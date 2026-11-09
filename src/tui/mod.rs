@@ -143,6 +143,10 @@ pub(crate) struct Session<'t> {
     /// The same, for an open agent session view's own transcript
     /// (`docs/agent-tool.md`).
     agent_render: ui::StreamRender,
+    /// What the streaming strip stood on last frame and how long it has held
+    /// rows a hand-off gave back, so the next cell lands in them instead of
+    /// the box rising and dropping back (`docs/strip-hold.md`).
+    strip_hold: ui::StripHold,
     /// The Ctrl+O overlay's incrementally-built transcript, retained across
     /// closes and warmed at the loop bottom so it never opens cold
     /// (`docs/tool-view-performance.md`).

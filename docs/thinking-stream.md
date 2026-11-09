@@ -110,6 +110,21 @@ something is still happening.
 `ui::preview_rows` sizes the same block from the same state (the strip's
 `debug_assert` holds it to that), so the box and cursor stay seated.
 
+**A quick thought puts no block up** (updated 2026-11-09,
+`docs/strip-hold.md`). The block shows only once the phase has run
+`REASONING_SHOW_DELAY` (one second) by the boundary's thinking clock — the
+status line's `TurnStatus::thinking`, or a subagent's `AgentRun::thinking` in
+its session view — through the one gate every strip reader asks
+(`ui::reasoning::live_reasoning`/`agent_live_reasoning`). Most thoughts a fast
+model has between two tool calls are shorter than that, and their block used
+to go up, collapse before anyone could read it, and lift the box until the
+round's call landed — the reported flicker. Until the delay the status line's
+`Thinking for 0s` clause is all the strip says; the `Thought for …` line
+commits exactly as before, and the Ctrl+O transcript shows an open phase at
+once. The strip flow's key (`ui::live::strip_flow_key`) signs on the block
+being shown, not on the phase being open, since the block appearing is what
+changes the strip.
+
 The reasoning branch sits **after** the agent/tool branches and **before** the
 streaming-reply branch. In practice they never collide — reasoning precedes
 both the text and the tool calls of its round — but a tool that is genuinely

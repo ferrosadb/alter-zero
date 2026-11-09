@@ -524,4 +524,22 @@ impl App {
     pub const fn stream_preview_rows(&self) -> u16 {
         self.stream_preview_rows
     }
+    /// Inject the rows the streaming strip holds above its status line this
+    /// frame (the [`set_stream_preview_rows`] pattern): the boundary's
+    /// `ui::StripHold` knows what the last frame painted, what committed since
+    /// and how long the rows have been held, and the strip's geometry counts
+    /// the rows through `ui::hang_rows` (`docs/strip-hold.md`).
+    ///
+    /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
+    pub const fn set_strip_hold(&mut self, rows: u16) {
+        self.strip_hold = rows;
+    }
+    /// The boundary-injected strip hold (see
+    /// [`set_strip_hold`](App::set_strip_hold); 0 until a draw injects one).
+    /// Raw: what applies on screen is `ui::layout::held_rows`, which ignores
+    /// it while no live strip is up.
+    #[must_use]
+    pub const fn strip_hold(&self) -> u16 {
+        self.strip_hold
+    }
 }

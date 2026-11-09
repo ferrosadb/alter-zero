@@ -910,6 +910,17 @@ since a commit repaints the region **in place** rather than blanking it first,
 Phase 121 pins that a token-paced 65 s turn records no live-region clear at all
 (`docs/slow-stream.md`).
 
+The box is kept still between two live cells too (`docs/strip-hold.md`).
+Because the region is content-anchored, a frame whose strip sheds more rows
+than it commits lifts the box, and every hand-off did that — a settled
+thought's block before its round's call had a cell, a command's clock row as
+its tail settled — so the box rose and dropped back a moment later. Two rules
+answer it: a thinking phase shows its block only once it has run a second
+(`REASONING_SHOW_DELAY`), and the boundary's `ui::StripHold` keeps the rows a
+hand-off gave back as blank rows over the status line until content takes
+them, commits cover them, or `STRIP_HOLD` (1.5 s) passes. Guarded by
+`scripts/smoke.sh` Phase 153.
+
 ```
 keyboard / resize ──► EventStream ─┐
 reply backend ─────► tokio mpsc ───┤─► select! ─► App::on_key / push_chunk / start_tool / set_file_matches / … ─► schedule_frame

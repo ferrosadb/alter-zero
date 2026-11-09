@@ -379,6 +379,7 @@ use alter_zero::tasks::{
 use alter_zero::ui::{
     Repin,
     StreamRender,
+    StripHold,
     TranscriptCache,
     ViewFlow,
     COMPACTED_NOTICE,

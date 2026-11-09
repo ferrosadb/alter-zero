@@ -245,6 +245,14 @@ itself: `assert_stream_matches_batch` fails any step whose preview shrinks
 by more than that step committed, over the whole hostile-soup fuzz corpus
 at every width — which is how the table's shape was found at all.
 
+Between the strip's **cells** — a settled thought giving way to its call, a
+command's tail to its peek — the same rule holds for a bounded time instead:
+the boundary's `ui::StripHold` keeps the rows a hand-off gave back as blank
+rows over the status line until the next cell takes them, commits cover them,
+or `STRIP_HOLD` passes (`docs/strip-hold.md`). Bounded, because unlike a
+reply's frontier the next cell can be a whole request away, and rows held
+that long read as empty lines rather than a steady box.
+
 The smoke phase's own hop watch confirms a lower footer against a second
 capture a beat later, since `tmux capture-pane` can read a frame
 half-parsed — the screen scrolled, the region not yet repainted, the old

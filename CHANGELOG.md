@@ -185,6 +185,18 @@ release heading when a version is cut.
 
 ### Fixed
 
+- **The input box no longer jumps when one live cell hands over to the
+  next.** A quick thought showed its three-row `● Thinking…` block, then
+  collapsed into its `Thought for 0s` line before the tool call it led to
+  had a cell, so the box rose three rows and dropped back a fraction of a
+  second later — the flicker between a fast think and a `skill` call. A
+  running command's tail did the same by a row as it settled, until the next
+  round answered. A thought shorter than a second now puts no block up at
+  all (the status line still says `Thinking for 0s`, and Ctrl+O shows it),
+  and rows a hand-off gives back stay as blank rows over the status line
+  until the next cell takes them — for at most a second and a half, so they
+  never linger while a slow request is answered (`docs/strip-hold.md`).
+
 - **Models an OpenAI-compatible gateway discovered stay in `/model`.**
   OmniRoute lists a model it found upstream, such as a Codex model, under
   the upstream's own endpoints (`"supported_endpoints": ["responses"]`) and

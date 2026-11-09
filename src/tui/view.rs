@@ -236,20 +236,59 @@ impl Session<'_> {
     /// chat above it scrolling into real scrollback (`InlineViewport` notes that
     /// one-way move for the close's purge rebuild; `docs/permissions.md`).
     pub(crate) fn draw_conversation(&mut self) -> io::Result<()> {
+        // The strip's hold is re-measured below, so last frame's comes off
+        // first: the preview's row cap and the hold itself are measured
+        // against the strip's content alone (`docs/strip-hold.md`).
+        self.app.set_strip_hold(0);
         // Compute the strip preview cheaply once per frame (O(one line); a
         // forming table re-renders just its own block), so the status animation
         // never re-renders the whole reply — and inject its row count so the
         // layout reserves it. See `docs/markdown.md`, `docs/table-streaming.md`.
         let preview = self.stream_preview_lines();
+        // Hold what the strip gave back since the last frame without
+        // committing it — a settled thought's block before the round's call
+        // has a cell, a command's clock row — as blank rows over the status
+        // line, so the box does not rise and drop back a moment later
+        // (`docs/strip-hold.md`). After the preview, whose row count it reads.
+        let screen = self.term.screen();
+        let held = self.strip_hold.rows(
+            &self.app,
+            self.term.pending_rows(),
+            screen.width,
+            screen.height,
+            self.clocks.loop_start.elapsed(),
+        );
+        self.app.set_strip_hold(held);
         let height = self.live_region_height();
         let app = &self.app;
         // `term` places the cursor from the final (content-anchored) viewport
         // via `ui::cursor_position`, which mirrors render_live's layout exactly.
-        self.term.draw(
+        let drawn = self.term.draw(
             height,
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
-        )
+        );
+        self.strip_hold
+            .painted(&self.app, screen.width, screen.height);
+        drawn
+    }
+
+    /// A purge rebuild re-seats the live region from scratch, so nothing an
+    /// earlier frame stood on is owed any more: the strip paints at its
+    /// content's own height and the hold starts over from what the rebuild
+    /// draws (`docs/strip-hold.md`). Called before the rebuild's preview and
+    /// height; [`Session::record_strip_hold`] after its paint.
+    fn restart_strip_hold(&mut self) {
+        self.strip_hold.reset();
+        self.app.set_strip_hold(0);
+    }
+
+    /// Record what a rebuild's paint stood on, the next frame's starting
+    /// point for the hold.
+    fn record_strip_hold(&mut self) {
+        let screen = self.term.screen();
+        self.strip_hold
+            .painted(&self.app, screen.width, screen.height);
     }
 
     /// Render the full-screen tool-output overlay. Clamps the scroll to the
@@ -479,6 +518,7 @@ impl Session<'_> {
         // so nothing is "already committed" any more: reset, and let the
         // catch-up below re-commit the whole partial at the current width.
         self.render.reset();
+        self.restart_strip_hold();
         // The preview comes FIRST: it injects the strip's preview row count
         // (`set_stream_preview_rows` — a forming table previews multi-row) that
         // `live_region_height` below must reserve (docs/table-streaming.md).
@@ -519,6 +559,7 @@ impl Session<'_> {
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
         )?;
+        self.record_strip_hold();
         // Catch scrollback up on the in-flight partial the purge dropped:
         // exactly the rows live streaming would have committed, queued for
         // the next draw. Suppressed while a flow is active — the queued rows
@@ -544,6 +585,7 @@ impl Session<'_> {
     pub(crate) fn repaint_agent_view(&mut self) -> io::Result<()> {
         let screen = self.term.screen();
         self.agent_render.reset();
+        self.restart_strip_hold();
         let Some(run) = self.app.viewed_agent() else {
             return Ok(());
         };
@@ -583,6 +625,7 @@ impl Session<'_> {
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
         )?;
+        self.record_strip_hold();
         // Catch scrollback up on the agent's in-flight partial the purge
         // dropped — `repaint_conversation`'s catch-up over `agent_render`, so
         // a rebuild mid-reply leaves the same rows behind here as it does in

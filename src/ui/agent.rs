@@ -901,7 +901,7 @@ pub(super) fn agent_view_preview_lines(
     // and before the reply's — what is genuinely executing is what the user
     // waits on, and the model cannot be streaming a reply while it thinks
     // (the main strip's order, `docs/thinking-stream.md`).
-    if let Some(text) = run.reasoning() {
+    if let Some(text) = super::reasoning::agent_live_reasoning(run) {
         return super::reasoning::live_reasoning_lines(text, pulse, width);
     }
     if let Some(lines) = stream_preview {
@@ -929,7 +929,7 @@ pub(super) fn agent_view_preview_lines(
 pub(super) fn agent_preview_rows(app: &App, run: &crate::agents::AgentRun, width: u16) -> u16 {
     if run.tool_queue.is_empty()
         && run.drafts().previews().next().is_none()
-        && run.reasoning().is_none()
+        && super::reasoning::agent_live_reasoning(run).is_none()
         && run.streaming.as_deref().is_some_and(|t| !t.is_empty())
     {
         return app.stream_preview_rows();

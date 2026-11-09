@@ -106,7 +106,7 @@ pub fn preview_rows(app: &App, width: u16) -> u16 {
     if group > 0 {
         return u16::try_from(group).unwrap_or(u16::MAX);
     }
-    if let Some(text) = app.reasoning() {
+    if let Some(text) = super::reasoning::live_reasoning(app) {
         let block = super::reasoning::live_reasoning_lines(text, app.pulse(), width);
         return u16::try_from(block.len()).unwrap_or(u16::MAX);
     }
@@ -229,6 +229,179 @@ pub fn fitted_preview_rows(app: &App, width: u16, height: u16) -> u16 {
     )
 }
 
+/// The streaming strip's **hold** across frames — the boundary-owned tracker
+/// that keeps the box from rising when one live cell hands over to the next
+/// (`docs/strip-hold.md`).
+///
+/// The region is content-anchored (invariant 3): a frame that commits `c`
+/// rows pushes the box down by `c`, and a frame whose region is `h` rows
+/// shorter pulls it up by `h`. So the box rises exactly when the strip sheds
+/// more rows than went to scrollback in the same frame — and every hand-off
+/// between two live cells did: a settled thought's block before the round's
+/// call has a cell (three rows, for as long as the call took to generate), a
+/// command's clock row when its tail settles into the shorter peek (a row,
+/// until the next round answered). Up and back down a fraction of a second
+/// later: the reported flicker.
+///
+/// Each conversation frame the boundary asks [`rows`](Self::rows) how many
+/// blank rows to hold above the status line, injects them
+/// ([`App::set_strip_hold`]), paints, and records what the frame stood on
+/// ([`painted`](Self::painted)). The rows are held until content takes them
+/// back, until commits cover them, or for `STRIP_HOLD` — never longer, so a
+/// slow request never leaves them over the status line; while a thinking
+/// phase is open the clock waits, since what it settles into uses them up.
+/// Only on the composer path mid-turn (`holds_strip`); a purge rebuild
+/// starts the tracker over ([`reset`](Self::reset)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StripHold {
+    /// The rows the last painted frame's strip stood on above its status
+    /// line — its preview slot (the live cells and their gap) and the rows it
+    /// held. 0 when it painted no live strip, or since a rebuild.
+    upper: u16,
+    /// When the rows now held were first owed, while the hold's clock runs —
+    /// `None` when nothing is held, or an open thinking phase stopped it.
+    since: Option<Duration>,
+}
+
+impl StripHold {
+    /// The blank rows the frame about to be drawn holds above its status
+    /// line: what the strip stood on a frame ago, less the `committed` rows
+    /// queued for scrollback since, less what its content needs now — clamped
+    /// to the room the composer path leaves the strip, so a hold can never
+    /// squeeze the box — or 0 once the hold has run `STRIP_HOLD` with
+    /// nothing taking it. `now` is the loop's clock, injected: time never
+    /// reaches the pure core except already measured.
+    ///
+    /// Measures the content on its own, whatever hold `app` still carries
+    /// from the last frame.
+    #[must_use]
+    pub fn rows(
+        &mut self,
+        app: &App,
+        committed: usize,
+        width: u16,
+        height: u16,
+        now: Duration,
+    ) -> u16 {
+        if !holds_strip(app) {
+            self.since = None;
+            return 0;
+        }
+        // Every row the region owes besides the preview slot and the hold
+        // itself: the room left above the status line is the rest.
+        let other = non_preview_rows(app, width).saturating_sub(held_rows(app));
+        let room = height.saturating_sub(other);
+        let content = slot_rows(fit_preview_rows(height, preview_rows(app, width), other));
+        let committed = u16::try_from(committed).unwrap_or(u16::MAX);
+        let owed = self
+            .upper
+            .saturating_sub(committed)
+            .min(room)
+            .saturating_sub(content);
+        if owed == 0 {
+            self.since = None;
+            return 0;
+        }
+        // An open thinking phase previews nothing for its first second, and
+        // the line it settles into commits the rows held here — letting the
+        // hold lapse meanwhile, for that line to push the box straight back
+        // down, was the bounce the hold exists to remove.
+        if thinking_open(app) {
+            self.since = None;
+            return owed;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_sub(since) >= STRIP_HOLD {
+            self.since = None;
+            return 0;
+        }
+        owed
+    }
+
+    /// Record what the frame just drawn stood on above its status line —
+    /// the next frame's starting point. Nothing outside a live strip: there
+    /// is no strip on screen to hold.
+    pub fn painted(&mut self, app: &App, width: u16, height: u16) {
+        self.upper = if holds_strip(app) {
+            slot_rows(fitted_preview_rows(app, width, height)).saturating_add(held_rows(app))
+        } else {
+            0
+        };
+    }
+
+    /// Forget what the last frame stood on — a purge rebuild re-seats the
+    /// region, so nothing it painted before is owed any more.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The rows a preview slot of `preview` content rows stands on: the rows and
+/// their gap, or nothing at all ([`strip_rows`]' own rule).
+const fn slot_rows(preview: u16) -> u16 {
+    if preview > 0 {
+        preview.saturating_add(GAP_ROWS)
+    } else {
+        0
+    }
+}
+
+/// Whether the conversation on screen has a thinking phase open — shown or
+/// not yet ([`super::reasoning::block_shown`]).
+fn thinking_open(app: &App) -> bool {
+    app.viewed_agent().map_or_else(
+        || app.reasoning().is_some(),
+        |run| run.reasoning().is_some(),
+    )
+}
+
+/// Whether the region shows a **live strip** the hold may keep rows in
+/// (`docs/strip-hold.md`): a turn's status line is up — the viewed agent's
+/// run inside its session view, the main turn otherwise, never a `!` shell
+/// turn's ([`strip_has_status`]) — no modal replaces the region, and the
+/// composer is on screen: a picker or the ↓ band lays the strip out by its
+/// own split, and the hold measures the composer path's.
+pub(super) fn holds_strip(app: &App) -> bool {
+    !app.modal_open() && composer_on_screen(app) && strip_has_status(app)
+}
+
+/// Whether the composer is what the live region shows under the strip — no
+/// composer-replacing view is open. Mirrors `render_live_with_preview`'s
+/// precedence: every view it paints instead of the composer (the startup
+/// review, the pickers, the menus, the pages, the ↓ manager band) is listed
+/// here, the two modals being [`App::modal_open`]'s.
+pub(super) fn composer_on_screen(app: &App) -> bool {
+    app.config_review.is_none()
+        && app.model_picker.is_none()
+        && app.key_onboarding.is_none()
+        && app.settings_picker.is_none()
+        && app.mascot_picker.is_none()
+        && app.spinner_picker.is_none()
+        && app.theme_picker.is_none()
+        && app.skills_menu.is_none()
+        && app.hooks_menu.is_none()
+        && app.donate_picker.is_none()
+        && app.secrets_page.is_none()
+        && app.export_picker.is_none()
+        && app.context_usage.is_none()
+        && app.usage_page.is_none()
+        && app.mcp_menu.is_none()
+        && app.background_view.is_none()
+}
+
+/// The blank rows the strip holds above its status line this frame — the
+/// boundary-injected [`App::strip_hold`] while a live strip is up
+/// ([`holds_strip`]), else 0, so a value injected a frame ago can never pad an
+/// idle composer, a modal or a picker (`docs/strip-hold.md`). Counted by
+/// [`hang_rows`], painted by `ui::live::strip_lines`.
+pub(super) fn held_rows(app: &App) -> u16 {
+    if holds_strip(app) {
+        app.strip_hold()
+    } else {
+        0
+    }
+}
+
 /// The cap the boundary passes to [`StreamRender::preview`]: how many strip
 /// rows a multi-row (forming-table) preview may take at this terminal height
 /// before it tail-follows its newest rows — [`preview_budget`] exactly, so the
@@ -269,11 +442,17 @@ pub fn strip_has_status(app: &App) -> bool {
 /// together (a plan's rows and the network's state are both worth a row),
 /// and at rest — where the checklist becomes the standalone block — there is
 /// no turn to draw a tip or to wait on.
+///
+/// The status slot also carries, **above** its line, the blank rows the strip
+/// holds for its next cell (`held_rows`, `docs/strip-hold.md`): every
+/// geometry path already sums this one count, so adding them here is what
+/// keeps the reserved rows and the painted ones in step.
 #[must_use]
 pub fn hang_rows(app: &App, width: u16) -> u16 {
     super::tasks::task_rows(app, width)
         .saturating_add(super::tips::tip_rows(app, width))
         .saturating_add(super::offline::offline_rows(app, width))
+        .saturating_add(held_rows(app))
 }
 
 /// Columns the input field's text occupies: the box spans the full width (no side

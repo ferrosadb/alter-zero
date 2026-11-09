@@ -7,8 +7,8 @@ use crate::app::Reasoning;
 use crate::ui::live::preview_lines;
 use crate::ui::reasoning::{live_reasoning_lines, reasoning_full_lines, reasoning_live_full_lines};
 use crate::ui::theme::{
-    SHIMMER_SWEEP, TOOL_PULSE_PERIOD, reasoning_label_color, reasoning_shimmer_base,
-    reasoning_text_color, shimmer_highlight,
+    REASONING_SHOW_DELAY, SHIMMER_SWEEP, TOOL_PULSE_PERIOD, reasoning_label_color,
+    reasoning_shimmer_base, reasoning_text_color, shimmer_highlight,
 };
 use crate::ui::wrap::cols;
 
@@ -228,10 +228,7 @@ fn a_wrapping_think_shows_its_newest_three_display_rows() {
 fn a_long_think_stands_four_rows_tall_in_the_strip() {
     // What the live region spends on it: the header and three rows of
     // thought, then the strip's gap — never a fourth row of the thought.
-    let mut app = App::new();
-    app.begin_stream();
-    app.begin_reasoning();
-    app.push_thinking(&twenty_lines());
+    let app = thinking_for(&twenty_lines(), REASONING_SHOW_DELAY);
     let width = 60;
     let pv = preview_rows(&app, width);
     assert_eq!(pv, 4, "the header plus three rows of thought");
@@ -392,10 +389,9 @@ fn the_live_bullet_blinks_but_the_committed_one_never_does() {
 fn a_live_phase_previews_in_the_strip() {
     // The strip's preview slot shows the block, and `preview_rows` sizes
     // exactly what `preview_lines` draws (the strip's debug_assert).
-    let mut app = App::new();
-    app.begin_stream();
-    app.begin_reasoning();
-    app.push_thinking("a\nb");
+    // Past the show delay: a quicker phase puts no block up at all
+    // (docs/strip-hold.md).
+    let app = thinking_for("a\nb", REASONING_SHOW_DELAY);
     let width = 60;
     let pv = preview_rows(&app, width);
     assert_eq!(pv, 3, "header + two rows");
@@ -448,5 +444,73 @@ fn a_settled_thought_repaints_in_the_conversation_and_the_transcript() {
     assert!(
         full.iter().any(|l| l.contains("the plan")),
         "and expands in Ctrl+O: {full:?}"
+    );
+}
+
+// ===== A quick thought puts no block up (docs/strip-hold.md, rule 1) =====
+
+/// An app mid-turn with a thinking phase open on `text`, which the boundary's
+/// thinking clock says has run `thinking`.
+fn thinking_for(text: &str, thinking: Duration) -> App {
+    let mut app = App::new();
+    app.begin_stream();
+    app.begin_reasoning();
+    app.push_thinking(text);
+    app.set_status_times(Duration::ZERO, Some(thinking));
+    app
+}
+
+#[test]
+fn a_thought_younger_than_the_show_delay_puts_no_block_up() {
+    // A block that collapses before anyone could read it is noise — and its
+    // collapse lifted the box until the round's call landed (the reported
+    // flicker). The status line's `Thinking for 0s` clause says the model is
+    // thinking; the strip previews nothing for it yet.
+    let app = thinking_for(
+        "one\ntwo\nthree",
+        REASONING_SHOW_DELAY - Duration::from_millis(1),
+    );
+    assert_eq!(preview_rows(&app, 60), 0, "no block before the delay");
+    assert!(preview_lines(&app, 60, None, 0).is_empty());
+    let status = app.status().expect("a turn is in flight");
+    assert!(
+        status.thinking.is_some(),
+        "the status line still carries the phase's clock"
+    );
+}
+
+#[test]
+fn a_thought_that_outlasts_the_show_delay_shows_its_block() {
+    let app = thinking_for("one\ntwo\nthree", REASONING_SHOW_DELAY);
+    let rows = preview_rows(&app, 60);
+    assert_eq!(rows, 4, "the header plus three rows of thought");
+    let lines = preview_lines(&app, 60, None, rows);
+    assert!(
+        plain(&lines[0]).starts_with("● Thinking…"),
+        "{:?}",
+        plain(&lines[0])
+    );
+}
+
+#[test]
+fn a_phase_the_clock_has_not_reached_yet_puts_no_block_up() {
+    // Between `ThinkingStart` and the first draw tick the status line carries
+    // no clock for the phase at all — the block waits for it too.
+    let mut app = App::new();
+    app.begin_stream();
+    app.begin_reasoning();
+    app.push_thinking("one");
+    assert_eq!(preview_rows(&app, 60), 0);
+}
+
+#[test]
+fn the_strip_flow_key_moves_when_a_thoughts_block_appears() {
+    // The strip flow freezes its flowed rows on what the strip is *of*; a
+    // block going up changes that, so it must re-sign (docs/strip-flow.md).
+    let hidden = thinking_for("one", REASONING_SHOW_DELAY - Duration::from_millis(1));
+    let shown = thinking_for("one", REASONING_SHOW_DELAY);
+    assert_ne!(
+        crate::ui::live::strip_flow_key(&hidden),
+        crate::ui::live::strip_flow_key(&shown)
     );
 }

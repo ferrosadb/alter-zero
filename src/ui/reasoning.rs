@@ -173,6 +173,35 @@ fn gutter_body(text: &str, width: u16) -> Vec<Line<'static>> {
     rows
 }
 
+/// Whether an open thinking phase that has run `thinking` — the boundary's
+/// thinking clock, injected each frame — previews its live block yet: only
+/// once it has run [`REASONING_SHOW_DELAY`]. A quicker thought collapses before
+/// anyone could read its block, and the collapse lifted the box until the
+/// round's next cell landed — the reported flicker — so it puts none up; the
+/// status line's `Thinking for Ns` clause is all the strip says until then
+/// (`docs/strip-hold.md`). `None` — no clock injected yet, the first frames
+/// after `ThinkingStart` — waits too.
+pub(super) fn block_shown(thinking: Option<Duration>) -> bool {
+    thinking.is_some_and(|elapsed| elapsed >= REASONING_SHOW_DELAY)
+}
+
+/// The main session's open phase **when the strip previews its block** — its
+/// chain-of-thought so far, once [`block_shown`] by the status line's clock.
+/// The one gate every strip reader of the main phase asks
+/// (`ui::preview_rows`, `ui::live::preview_lines`, the strip flow's key), so
+/// the rows reserved and the rows drawn agree. The Ctrl+O transcript reads
+/// [`App::reasoning`] instead: an open phase shows there at once.
+pub(super) fn live_reasoning(app: &App) -> Option<&str> {
+    app.reasoning()
+        .filter(|_| block_shown(app.status().and_then(|status| status.thinking)))
+}
+
+/// [`live_reasoning`] for a subagent's session view, off the run's own
+/// injected clock ([`AgentRun::thinking`](crate::agents::AgentRun::thinking)).
+pub(super) fn agent_live_reasoning(run: &crate::agents::AgentRun) -> Option<&str> {
+    run.reasoning().filter(|_| block_shown(run.thinking))
+}
+
 /// The **live** block for an open thinking phase, drawn in the strip's preview
 /// slot: a `● Thinking…` header — the bullet blinking at the frame `pulse`
 /// and the label carrying the status line's **shimmer** sweep

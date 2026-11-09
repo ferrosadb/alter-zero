@@ -917,6 +917,29 @@ fn an_agent_views_strip_previews_its_thinking_block() {
 }
 
 #[test]
+fn an_agent_views_quick_thought_puts_no_block_up() {
+    // The main strip's rule in the agent's own strip (docs/strip-hold.md):
+    // a phase younger than the show delay previews nothing, off the run's
+    // own injected clock.
+    use crate::stream::StreamEvent;
+    use crate::ui::theme::REASONING_SHOW_DELAY;
+    let mut app = App::new();
+    app.begin_stream();
+    app.start_agent_group(false, &[spec("a1", "Think", false)]);
+    app.begin_agent_reasoning("a1");
+    app.apply_agent_event("a1", &StreamEvent::ThinkingChunk("weighing options".into()));
+    app.set_agent_thinking("a1", REASONING_SHOW_DELAY - Duration::from_millis(1));
+    app.open_agent_view("a1");
+    assert_eq!(preview_rows(&app, 60), 0, "no block before the delay");
+    assert!(preview_lines(&app, 60, None, 0).is_empty());
+    app.set_agent_thinking("a1", REASONING_SHOW_DELAY);
+    assert!(
+        preview_rows(&app, 60) > 0,
+        "the block once the phase outlasts it"
+    );
+}
+
+#[test]
 fn an_agent_views_status_carries_its_lost_connection() {
     // The session view's synthesized status is built from the run, so the
     // wait shows there exactly as the main turn's does (docs/offline.md).

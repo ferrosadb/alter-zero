@@ -452,6 +452,9 @@ fn a_thought_with_no_group_open_keeps_its_own_block() {
     app.begin_stream();
     app.begin_reasoning();
     app.push_thinking("Before anything is read.");
+    // Past the show delay: a quicker phase puts no block up at all
+    // (docs/strip-hold.md).
+    app.set_status_times(Duration::ZERO, Some(crate::ui::theme::REASONING_SHOW_DELAY));
     let rows = preview_rows(&app, 80);
     let preview = texts(&preview_lines(&app, 80, None, rows));
     assert_eq!(usize::from(rows), preview.len());

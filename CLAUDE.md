@@ -992,6 +992,18 @@ cell's token estimate is **snapped** to the provider's own
 the round's usage frame lands, split by weight across a round's several
 phases; gated by `ALTER_ZERO_SHOW_THINKING`, whose falsy value restores the
 old counted-and-dropped behaviour exactly) in `docs/thinking-stream.md`;
+the **strip hold** (`docs/strip-hold.md`: a hand-off between two live cells
+never lifts the box — the region is content-anchored, so a frame whose strip
+shed more rows than it committed raised it until the next cell landed, the
+flicker between a quick thought and the call it led to. A thinking phase
+previews its block only once it has run `REASONING_SHOW_DELAY` (1 s,
+`ui::reasoning::live_reasoning`, the one gate every strip reader asks), and
+the boundary's `ui::StripHold` keeps the rows a hand-off gives back as blank
+rows over the status line — `App::set_strip_hold`, counted by `ui::hang_rows`
+so every geometry path agrees, only on the composer path mid-turn
+(`ui::layout::holds_strip`) — until content takes them, commits cover them,
+or `STRIP_HOLD` (1.5 s) passes, the clock waiting while a thinking phase is
+open; never longer, the reverted floor's flaw; `smoke.sh` Phase 153);
 the **running bullet's blink** (a tool in flight no longer
 shows a blue `●` — it shows the permission prompt's grey, and in the live
 region that bullet *blinks*, Claude-Code's running dot: shown in that one

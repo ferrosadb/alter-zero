@@ -381,6 +381,23 @@ pub(super) fn reasoning_label_color() -> Color {
 /// *now*. The whole thing is in the Ctrl+O transcript.
 pub(super) const REASONING_PEEK_LINES: usize = 3;
 
+/// How long a thinking phase must have run before the strip previews its live
+/// block — so a quick thought, which would collapse before anyone could read
+/// it, never puts a block up at all (`docs/strip-hold.md`). The spinner tip's
+/// rule and the Ctrl+B hint's: what would only flash is not shown. The status
+/// line's `Thinking for Ns` clause says the model is thinking meanwhile, and
+/// Ctrl+O shows an open phase at once.
+pub(super) const REASONING_SHOW_DELAY: Duration = Duration::from_secs(1);
+
+/// How long the streaming strip holds rows it gave back without committing
+/// them — a settled thought's block, a command's clock row — before letting
+/// them go (`docs/strip-hold.md`). Long enough to outlast the hand-offs the
+/// recordings measured (52–287 ms within a round, 0.65–1.15 s for the next
+/// round to answer), so a hold rarely lapses just before the content it was
+/// waiting for; short enough that a slow request never leaves blank rows over
+/// the status line for long.
+pub(super) const STRIP_HOLD: Duration = Duration::from_millis(1500);
+
 // ---------------------------------------------------------------------------
 // Background shells (docs/background.md): the backgrounded cell's fixed row,
 // the running-command Ctrl+B hint, the ↓ manager band, and the footer count.

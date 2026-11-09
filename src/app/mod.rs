@@ -323,6 +323,17 @@ pub struct App {
     /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
     /// [`set_status_times`]: App::set_status_times
     stream_preview_rows: u16,
+    /// The blank rows the streaming strip holds above its status line this
+    /// frame, injected by the boundary before each draw
+    /// ([`set_strip_hold`], the [`set_stream_preview_rows`] pattern): rows a
+    /// hand-off between two live cells gave back without committing them,
+    /// kept so the box holds still until the next cell lands
+    /// (`docs/strip-hold.md`). Applies only while a live strip is up — see
+    /// `ui::layout::held_rows`.
+    ///
+    /// [`set_strip_hold`]: App::set_strip_hold
+    /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
+    strip_hold: u16,
     /// The live tool calls of the current turn, front-first: the front is the
     /// running (status [`ToolStatus::Running`]) or about-to-run call, and any
     /// calls behind it are [`ToolStatus::Waiting`] siblings of a **parallel

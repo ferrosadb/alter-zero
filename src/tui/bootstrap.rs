@@ -499,6 +499,7 @@ impl<'t> Session<'t> {
             models,
             render: ui::StreamRender::new(),
             agent_render: ui::StreamRender::new(),
+            strip_hold: ui::StripHold::default(),
             transcript: ui::TranscriptCache::new(),
             context: ui::ContextCache::new(),
             burst: PasteBurst::new(),

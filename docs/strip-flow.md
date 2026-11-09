@@ -131,3 +131,9 @@ frontier the reserved count can exceed what the fallback build produces — so
   committed cell.
 - The preview budget (`docs/table-streaming.md`): untouched. The flow changes
   where the unaffordable rows *go*, never how many the region reserves.
+- The strip hold (`docs/strip-hold.md`): the blank rows a hand-off holds over
+  the status line ride `hang_rows`, so the flow check counts them on both
+  sides, and they are clamped to the room the composer path leaves — a hold
+  never makes the strip outgrow its rect, so blank rows never flow. The flow's
+  key signs on a thinking block being **shown**, not on a phase being open,
+  since a quick phase puts none up.

@@ -115,7 +115,7 @@ pub(super) fn preview_lines(
         // kind of `StreamRender` (`docs/agent-view-streaming.md`).
         let streaming = run.tool_queue.is_empty()
             && run.drafts().previews().next().is_none()
-            && run.reasoning().is_none();
+            && super::reasoning::agent_live_reasoning(run).is_none();
         trim_preview(
             agent_view_preview_lines(run, app.pulse(), width, stream_preview, app.path_display()),
             rows,
@@ -141,7 +141,7 @@ pub(super) fn preview_lines(
             // the group is up: the status line says the model is thinking
             // and Ctrl+O shows the text (docs/tool-groups.md *Thoughts*).
             trim_preview(group, rows, false)
-        } else if let Some(text) = app.reasoning() {
+        } else if let Some(text) = super::reasoning::live_reasoning(app) {
             trim_preview(live_reasoning_lines(text, app.pulse(), width), rows, false)
         } else if let Some(lines) = stream_preview {
             trim_preview(lines.to_vec(), rows, true)
@@ -459,6 +459,14 @@ pub(super) fn strip_lines(
             app.status()
                 .map(|status| styled_status_line(status, app.task_verb(), app.spinner(), width))
         };
+        // The rows the strip holds for its next cell, blank, directly above
+        // the status line — a hand-off gave them back without committing
+        // them, and the box holds still until something takes them
+        // (docs/strip-hold.md). `hang_rows` counts them.
+        lines.extend(std::iter::repeat_n(
+            Line::default(),
+            usize::from(super::layout::held_rows(app)),
+        ));
         lines.push(line.unwrap_or_default());
         // The rows hanging off the status line, in `hang_rows`' sum: the
         // lost-connection row first, right under the line whose verb it
@@ -542,12 +550,12 @@ fn strip_preview_is_live_cells(app: &App) -> bool {
     if let Some(run) = app.viewed_agent() {
         return !run.tool_queue.is_empty()
             || run.drafts().previews().next().is_some()
-            || run.reasoning().is_some();
+            || super::reasoning::agent_live_reasoning(run).is_some();
     }
     app.agent_group().is_some()
         || !app.tool_queue().is_empty()
         || app.tool_drafts().previews().next().is_some()
-        || app.reasoning().is_some()
+        || super::reasoning::live_reasoning(app).is_some()
         || app.tool_group_range().is_some()
 }
 
@@ -592,7 +600,16 @@ pub(super) fn strip_flow_key(app: &App) -> u64 {
     let mut hasher = DefaultHasher::new();
     app.agent_view.hash(&mut hasher);
     strip_has_status(app).hash(&mut hasher);
-    app.reasoning().is_some().hash(&mut hasher);
+    // Whether the conversation on screen shows a thinking block — not
+    // whether a phase is open: a quick one puts none up
+    // (docs/strip-hold.md), and the block appearing is what changes the
+    // strip.
+    app.viewed_agent()
+        .map_or_else(
+            || super::reasoning::live_reasoning(app).is_some(),
+            |run| super::reasoning::agent_live_reasoning(run).is_some(),
+        )
+        .hash(&mut hasher);
     app.streaming_text().is_some().hash(&mut hasher);
     let queue = app
         .viewed_agent()

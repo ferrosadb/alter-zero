@@ -178,7 +178,7 @@ pub fn preview_budget(app: &App, width: u16, height: u16) -> u16 {
 /// against a 8.3 ms frame budget, and beside the three calls the draw already
 /// makes to the same helpers. If it ever matters, memoize `queued_lines`,
 /// which every one of those call sites would gain from too.
-fn non_preview_rows(app: &App, width: u16) -> u16 {
+pub(super) fn non_preview_rows(app: &App, width: u16) -> u16 {
     let band = band_rows(app, width);
     strip_other_rows(app, width)
         .saturating_add(INPUT_CHROME_ROWS)
@@ -269,11 +269,20 @@ pub fn strip_has_status(app: &App) -> bool {
 /// together (a plan's rows and the network's state are both worth a row),
 /// and at rest — where the checklist becomes the standalone block — there is
 /// no turn to draw a tip or to wait on.
+///
+/// The status slot's one other occupant counts here too: the blank rows the
+/// strip **holds over** the status line while one live cell gives way to the
+/// next (`docs/handoff-hold.md`). They are painted above the line rather than
+/// under it, but they are rows of the same slot, and counting them in this
+/// one sum is what keeps the region, the layout, the cursor seat and the
+/// flow check agreeing on them — and lets a single row be held exactly,
+/// which the preview slot cannot do (a preview row brings its gap).
 #[must_use]
 pub fn hang_rows(app: &App, width: u16) -> u16 {
     super::tasks::task_rows(app, width)
         .saturating_add(super::tips::tip_rows(app, width))
         .saturating_add(super::offline::offline_rows(app, width))
+        .saturating_add(super::handoff::applied_handoff_hold(app))
 }
 
 /// Columns the input field's text occupies: the box spans the full width (no side

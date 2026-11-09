@@ -406,6 +406,29 @@ pub(super) const TOOL_STOP_WAITING_HINT: &str = "(ctrl+b to stop waiting)";
 /// [`App::background_hint_elapsed`]. See `docs/background.md`.
 pub(super) const TOOL_BACKGROUND_HINT_DELAY: Duration = Duration::from_secs(3);
 
+/// How long the strip holds the rows a live cell gave up when nothing is
+/// known to be on its way to fill them (`ui::HandoffHold`,
+/// `docs/handoff-hold.md`): long enough for the gaps inside a round — a
+/// thought's end and its call's first piece arrive back to back, a reply's
+/// first token follows its thought — and short enough to let go well before
+/// the next round's first token, so a box that must rise rises cleanly
+/// rather than a beat before the next cell pushes it back down.
+pub(super) const HANDOFF_HOLD: Duration = Duration::from_millis(300);
+
+/// How long the strip holds those rows while a **tool is running** under
+/// them (`ui::HandoffHold`, `docs/handoff-hold.md`): its settle commits rows
+/// that pay the hold off in the same frame, so a quick one — a read, an
+/// edit, a skill load, an `ls` — leaves the box where it was. A command can
+/// run for minutes, though, so the wait is only a moment.
+pub(super) const HANDOFF_HOLD_RUN: Duration = Duration::from_secs(1);
+
+/// How long the strip holds those rows while a tool call is **being
+/// written** — its pieces arriving, its cell sure to land when the round is
+/// announced (`App::tool_drafts`' `is_generating`). Capped, so a very long
+/// call shows the box where its content is rather than blank rows for the
+/// whole of it (`docs/handoff-hold.md`).
+pub(super) const HANDOFF_HOLD_MAX: Duration = Duration::from_secs(3);
+
 /// The separator inside a running command's clock clause, between the
 /// command's own elapsed and how long its call waits for it:
 /// `(22s · wait 1m 50s)` — the footer's [`FOOTER_SEPARATOR`], the one

@@ -185,6 +185,23 @@ release heading when a version is cut.
 
 ### Fixed
 
+- **The input box no longer jumps when one cell hands over to the next.**
+  When the model thought and then called a tool, the `● Thinking…` block
+  collapsed into its `Thought for …` line before the call had a cell, so
+  the box rose up to three rows and dropped back when the call landed, often
+  a frame or two later. Now the thinking block stays on screen, unchanged,
+  until the call's cell (or the reply) replaces it in a single frame, with
+  its `Thought for …` line committing at that moment. The same jump, by a row
+  or more, happened when a running command settled into a shorter peek and
+  when a group of reads closed under the call after it: the rows such a cell
+  gives up are now held blank over the status line until the next cell takes
+  them, while it is on its way (up to three seconds while a call is being
+  written or the reply streams, a second under a running tool, 300 ms
+  otherwise). Between rounds the status line still goes back to sitting one
+  blank row under the last cell long before the next reply starts. On the
+  reported turn the box moved sixteen times before this change and not at
+  all after (`docs/handoff-hold.md`).
+
 - **Models an OpenAI-compatible gateway discovered stay in `/model`.**
   OmniRoute lists a model it found upstream, such as a Codex model, under
   the upstream's own endpoints (`"supported_endpoints": ["responses"]`) and

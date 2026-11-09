@@ -115,6 +115,7 @@ use alter_zero::app::{
     Theme,
     ThemePicker,
     ThemeRow,
+    ThinkingClock,
     ThinkingState,
     Toast,
     ToastKind,
@@ -377,6 +378,7 @@ use alter_zero::tasks::{
 #[rustfmt::skip]
 #[allow(unused_imports)]
 use alter_zero::ui::{
+    HandoffHold,
     Repin,
     StreamRender,
     TranscriptCache,
@@ -505,6 +507,7 @@ use alter_zero::ui::{
     status_line_with_verb,
     stream_preview_max_rows,
     strip_has_status,
+    thought_linger_due,
     styled_status_line,
     summary_lines,
     task_rows,

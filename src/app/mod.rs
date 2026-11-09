@@ -101,7 +101,7 @@ pub use self::mcp_menu::{McpAuthView, McpMenu, McpPage, McpServerAction, server_
 pub use self::model_picker::{ModelFetchError, ModelLoad, ModelPicker};
 pub use self::permission::PermissionPrompt;
 pub use self::queue::QueuedTurn;
-pub use self::reasoning::Reasoning;
+pub use self::reasoning::{Reasoning, ThinkingClock};
 // Crate-internal: `agents::AgentRun` runs the same reasoning-token snap over
 // its own transcript (`docs/agent-view-streaming.md`).
 pub use self::config_review::{
@@ -250,6 +250,12 @@ pub struct App {
     /// without. Cleared by every [`apply_usage`](App::apply_usage) (one frame
     /// ends one round) and by every turn start.
     round_reasoning: Vec<usize>,
+    /// The round's provider `reasoning_tokens`, kept when its usage frame
+    /// landed while the round's last phase was still open — ended, its block
+    /// lingering for the round's next cell (`docs/handoff-hold.md` *The
+    /// thought lingers*). Snapped over the round's thoughts the moment that
+    /// phase is recorded ([`finish_reasoning`](App::finish_reasoning)).
+    round_reasoning_due: Option<u64>,
     /// Where the reply attempt now streaming began: the [`history`](Self::history)
     /// length at its first piece of output — the mark a
     /// [`StreamEvent::Retrying`] withdraws back to
@@ -323,6 +329,18 @@ pub struct App {
     /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
     /// [`set_status_times`]: App::set_status_times
     stream_preview_rows: u16,
+    /// The blank rows the strip holds over its status line while one live
+    /// cell hands over to the next — a settled thought before its call has a
+    /// cell, a command settling shorter than its live tail — injected by the
+    /// boundary before each draw ([`set_handoff_hold`], the
+    /// [`set_stream_preview_rows`] pattern) from its `ui::HandoffHold`
+    /// tracker. Counted only while a live strip is up (`ui::hang_rows`), so a
+    /// value injected a frame ago can never pad an idle composer. See
+    /// `docs/handoff-hold.md`.
+    ///
+    /// [`set_handoff_hold`]: App::set_handoff_hold
+    /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
+    handoff_hold: u16,
     /// The live tool calls of the current turn, front-first: the front is the
     /// running (status [`ToolStatus::Running`]) or about-to-run call, and any
     /// calls behind it are [`ToolStatus::Waiting`] siblings of a **parallel

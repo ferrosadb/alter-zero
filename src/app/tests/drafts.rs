@@ -637,3 +637,35 @@ fn a_lone_call_pushed_behind_a_live_write_borrows_no_draft() {
     );
     assert!(app.tool_drafts().previews().next().is_none());
 }
+
+// --- whether a call is on its way (docs/handoff-hold.md) ---
+
+#[test]
+fn a_call_is_being_generated_from_its_first_piece_until_its_round_is_announced() {
+    // The strip's hand-off hold waits on this: a thought settles at the
+    // round's first tool-call piece, and the call's cell lands only when the
+    // round is announced — any call, not just a previewed `write`.
+    let mut drafts = ToolDrafts::default();
+    assert!(!drafts.is_generating(), "nothing streamed yet");
+    drafts.push(&piece(0, "skill", ""));
+    assert!(drafts.is_generating(), "the first piece names a call");
+    drafts.push(&piece(0, "", r#"{"skill":"web-"#));
+    assert!(drafts.is_generating(), "its arguments are still arriving");
+    drafts.seal();
+    assert!(
+        !drafts.is_generating(),
+        "the round was announced: nothing more of it streams"
+    );
+}
+
+#[test]
+fn an_adopted_round_and_a_turn_edge_leave_nothing_generating() {
+    let mut drafts = ToolDrafts::default();
+    drafts.push(&piece(0, "bash", r#"{"command":"ls"}"#));
+    drafts.adopt(["Bash"]);
+    assert!(!drafts.is_generating(), "the batch took the round over");
+    drafts.push(&piece(0, "read", ""));
+    assert!(drafts.is_generating(), "the next round's first piece");
+    drafts.clear();
+    assert!(!drafts.is_generating(), "a turn edge drops it");
+}

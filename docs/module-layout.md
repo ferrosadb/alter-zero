@@ -66,7 +66,7 @@ widened for the split.
 | `ask.rs` | The inline `AskUserQuestion` modal: the tab/row state, answers under construction, the Other/notes entries, the queue against the permission prompt (`docs/ask.md`). |
 | `background.rs` | Background shells and the ↓ manager band. |
 | `agent.rs` | The `Agent` tool's roster, groups, and notices. |
-| `reasoning.rs` | The thinking stream: the live reasoning buffer, the `Reasoning` cell it settles into, and the provider's reasoning-token snap (`docs/thinking-stream.md`). |
+| `reasoning.rs` | The thinking stream: the live reasoning buffer, the `Reasoning` cell it settles into, the provider's reasoning-token snap (held while an ended phase lingers), and `ThinkingClock`, the phase's wall clock that freezes at its end (`docs/thinking-stream.md`, `docs/handoff-hold.md`). |
 | `tool_group.rs` | Collapsed read/search groups: which calls join one (`group_kind`, `is_group_member`), how far one runs through the history (`group_run`), what it counts, and the open group the commit path holds (`place_resolved_tool`, `close_tool_group`) (`docs/tool-groups.md`). |
 | `tips.rs` | The spinner tip's walk: the cursor the boundary seeds from `tips.json`, the draw `set_status_times` runs, and what hides the row (`docs/tips.md`). The catalog and the file format are the top-level `crate::tips`. |
 
@@ -105,6 +105,7 @@ widened for the split.
 | `secrets_view.rs` | The `/secrets` page — the list by placeholder with a fixed mask, the form with the value masked in the builder — and the form's caret seat (`docs/secrets.md`). |
 | `usage_view.rs` | The read-only `/usage` page — a section per subscription, one bar length for the page's meters, `limit reached`, the reset countdowns and local times and what a narrow row gives up, the highlighted subscription's link, the freshness, and its shedding ladder (`docs/usage.md`). |
 | `live.rs` | `render_live` — the streaming strip, the box, the band. |
+| `handoff.rs` | The hand-off policy: `HandoffHold`, the boundary-owned tracker that holds the strip's rows while one live cell gives way to the next (the held rows `hang_rows` counts over the status line), and `thought_linger_due`, when an ended thought's lingering block settles (`docs/handoff-hold.md`). |
 | `transcript.rs` | The Ctrl+O overlay and `TranscriptCache`. |
 | `classifier_view.rs` | The Ctrl+D view's classifier page body (`docs/permissions.md`). |
 | `context_view.rs` | The Ctrl+D context-debug overlay. |

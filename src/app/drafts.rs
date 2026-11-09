@@ -627,6 +627,16 @@ impl ToolDrafts {
         self.queued.iter()
     }
 
+    /// Whether a call of this round is **on its way**: a piece of it has
+    /// streamed and the round has not been announced. Any call, previewed or
+    /// not — the strip's hand-off hold waits on it, because a thought settles
+    /// at the round's first tool-call piece while the call's cell lands only
+    /// with the announcement (`docs/handoff-hold.md`).
+    #[must_use]
+    pub fn is_generating(&self) -> bool {
+        !self.sealed && !self.generating.is_empty()
+    }
+
     /// Whether there is nothing to show — no preview streaming, none queued.
     #[must_use]
     pub fn is_empty(&self) -> bool {

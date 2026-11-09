@@ -156,6 +156,25 @@ the status line and the turn summary use, so every duration and count in the
 TUI reads the same. A zero token count hides its clause; the `EXPAND_HINT` is
 the same string a capped tool peek ends with.
 
+**The block lingers until the next cell lands** (updated 2026-11-09). The
+settle commits two rows — the line and its spacer — where the live block stood
+on up to five, and the backend ends the phase at the round's *first tool-call
+piece*, while the call gets a cell only once its batch is announced.
+Collapsing at once sat the box up to three rows high for as long as the call
+took to generate, then dropped it back: the flicker reported between a thought
+and a `skill` call. Now `ThinkingEnd` stops the phase's clock
+(`app::ThinkingClock`, so `Thought for Ns` is the phase's own length) but
+leaves the block up, unchanged, and the first event that draws or records
+something settles it *first* (`StreamEvent::settles_ended_thought`): the line
+commits ahead of that event's own commits, and the call's cell lands on the
+block's rows in the same frame. Past a moment with nothing arriving — 300 ms,
+or up to 3 s while the call's pieces are still streaming — the draw tick
+settles it (`ui::thought_linger_due`). The round's usage frame, which arrives
+before the batch, keeps its `reasoning_tokens` until the thought is recorded,
+so the committed line still shows the provider's count
+(`docs/handoff-hold.md` *The thought lingers*). A subagent's session view
+settles at once, its box held still by the strip's hand-off hold instead.
+
 **Ordering is invariant 4's business, not free.** The item is appended the
 moment thinking ends — which is usually before the round's reply text exists,
 but a model can reason *after* it has begun answering (the dummy's default turn

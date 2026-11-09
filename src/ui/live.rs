@@ -438,6 +438,15 @@ pub(super) fn strip_lines(
     let tasks = super::tasks::task_lines(app, width);
     let has_status = strip_has_status(app);
     if has_status {
+        // The rows held over the status line while one live cell gives way to
+        // the next — a settled thought before its call has a cell, a command
+        // settling shorter than its tail — so the status line and the box
+        // hold still and the next cell lands here (`docs/handoff-hold.md`).
+        // Counted by `hang_rows`, as rows of this same slot.
+        lines.extend(std::iter::repeat_n(
+            Line::default(),
+            usize::from(super::handoff::applied_handoff_hold(app)),
+        ));
         // The live status line, just above the box while a turn is in flight
         // — suppressed for a `!` shell turn (has_status false), whose elapsed
         // rides the preview above. An agent session view shows the *viewed

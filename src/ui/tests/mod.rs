@@ -25,6 +25,7 @@ mod donate_view;
 mod export_view;
 mod file_cell;
 mod footer;
+mod handoff_hold;
 mod header;
 mod hook_cell;
 mod hooks_view;

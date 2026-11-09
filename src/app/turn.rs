@@ -511,6 +511,8 @@ impl App {
             summary.clear();
         }
         self.reasoning = None;
+        // A count that waited for that phase belongs to the void attempt too.
+        self.round_reasoning_due = None;
         self.tool_drafts.clear();
         let mut records = 0;
         if let Some(floor) = self.attempt_floor.take() {

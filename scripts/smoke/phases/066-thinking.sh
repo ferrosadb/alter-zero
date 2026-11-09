@@ -70,6 +70,13 @@ fi
 # Ctrl+O expands it back.
 tmux send-keys -t "$S66" C-o
 sleep 0.6
+# From the top: the pager opens pinned to the bottom, and the round's calls
+# land in the frame the thought settles (its block lingers until they do,
+# docs/handoff-hold.md *The thought lingers*), so by now the read's output may
+# have scrolled the thought out of a bottom-pinned window. Home also stops the
+# tail-follow, so the page holds still for the capture.
+tmux send-keys -t "$S66" Home
+sleep 0.3
 think_overlay="$(tmux capture-pane -t "$S66" -p -S -200)"
 if ! printf '%s' "$think_overlay" | grep -qF "Then edit it and run it."; then
 	echo "==== Phase 66: captured overlay ===="

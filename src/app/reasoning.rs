@@ -13,7 +13,70 @@
 //! [`App::begin_reasoning`], so no buffer opens, [`App::push_thinking`] only
 //! counts (exactly as before), and no cell is ever recorded.
 
+use std::time::Instant;
+
 use super::*;
+
+/// One thinking phase's wall clock, kept at the I/O boundary (time is impure):
+/// when the phase opened and, once its `ThinkingEnd` arrived, when it ended.
+///
+/// An ended phase's live block stays up until whatever takes its rows arrives
+/// — the call's cell, the reply's first words — so the box never rises and
+/// drops back between a thought and its call (`docs/handoff-hold.md` *The
+/// thought lingers*). This is what says how long the phase really ran — the
+/// status line's `Thinking for Ns` and the settled `Thought for Ns` line both
+/// read [`elapsed`](Self::elapsed), frozen at the end, so the wait never
+/// counts as thinking — and how long it has waited
+/// ([`ended_for`](Self::ended_for)), which the strip's hand-off policy reads
+/// (`ui::thought_linger_due`). Every reading takes `now` from the caller, so
+/// the rule is testable without a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingClock {
+    started: Instant,
+    ended: Option<Instant>,
+}
+
+impl ThinkingClock {
+    /// A phase that opened at `now`.
+    #[must_use]
+    pub const fn start(now: Instant) -> Self {
+        Self {
+            started: now,
+            ended: None,
+        }
+    }
+
+    /// The phase's `ThinkingEnd` arrived at `now`: its time stops. A second
+    /// end changes nothing, since the first is when the model stopped
+    /// thinking.
+    pub fn end(&mut self, now: Instant) {
+        if self.ended.is_none() {
+            self.ended = Some(now);
+        }
+    }
+
+    /// Whether the phase has ended — its block lingering for the next cell.
+    #[must_use]
+    pub const fn has_ended(&self) -> bool {
+        self.ended.is_some()
+    }
+
+    /// How long the phase ran: up to `now` while it runs, frozen at its end
+    /// after.
+    #[must_use]
+    pub fn elapsed(&self, now: Instant) -> Duration {
+        self.ended
+            .unwrap_or(now)
+            .saturating_duration_since(self.started)
+    }
+
+    /// How long an ended phase has waited for the next cell by `now`; `None`
+    /// while it still thinks.
+    #[must_use]
+    pub fn ended_for(&self, now: Instant) -> Option<Duration> {
+        self.ended.map(|ended| now.saturating_duration_since(ended))
+    }
+}
 
 /// One settled thinking phase: the model's whole chain-of-thought for it, how
 /// long it ran, and what it cost.
@@ -101,29 +164,45 @@ impl App {
     /// Returns `None` — recording nothing — when no phase was open, or when
     /// the phase produced no text: some providers open and close one without a
     /// single delta, and a `Thought for 0s` cell for that is noise.
+    ///
+    /// A usage frame that landed while the phase was still open — ended, its
+    /// block lingering for the round's next cell (`docs/handoff-hold.md` *The
+    /// thought lingers*) — is applied here, once the round's last thought is
+    /// recorded and before the cell is handed back: the line the boundary
+    /// commits carries the provider's own count.
     pub fn finish_reasoning(&mut self, secs: u64) -> Option<Reasoning> {
         let text = self.reasoning.take()?;
-        if text.trim().is_empty() {
-            return None;
-        }
-        let reasoning = Reasoning {
-            tokens: count_tokens(&text),
-            text,
-            secs,
-            timestamp: self.now_stamp(),
+        let recorded = if text.trim().is_empty() {
+            None
+        } else {
+            let reasoning = Reasoning {
+                tokens: count_tokens(&text),
+                text,
+                secs,
+                timestamp: self.now_stamp(),
+            };
+            // Remember where it landed so this round's usage frame can snap
+            // its estimate to the provider's own count.
+            self.round_reasoning.push(self.history.len());
+            self.history.push(HistoryItem::Reasoning(reasoning));
+            Some(self.history.len() - 1)
         };
-        // Remember where it landed so this round's usage frame can snap its
-        // estimate to the provider's own count.
-        self.round_reasoning.push(self.history.len());
-        self.history.push(HistoryItem::Reasoning(reasoning.clone()));
-        Some(reasoning)
+        if let Some(reasoning_tokens) = self.round_reasoning_due.take() {
+            self.snap_round_reasoning(reasoning_tokens);
+        }
+        match self.history.get(recorded?) {
+            Some(HistoryItem::Reasoning(reasoning)) => Some(reasoning.clone()),
+            _ => None,
+        }
     }
 
     /// Drop an open thinking phase without recording it — the `/clear` wipe
-    /// and the fresh-turn reset. The rounds' snap targets go with it.
+    /// and the fresh-turn reset. The rounds' snap targets go with it, and so
+    /// does a usage count that was waiting for the phase.
     pub(super) fn drop_reasoning(&mut self) {
         self.reasoning = None;
         self.round_reasoning.clear();
+        self.round_reasoning_due = None;
     }
 
     /// Replace this round's reasoning cells' token estimates with the

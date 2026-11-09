@@ -261,3 +261,78 @@ fn a_new_turn_starts_with_no_stale_phase() {
     app.begin_stream();
     assert_eq!(app.reasoning(), None);
 }
+
+// --- the thought lingers (docs/handoff-hold.md *The thought lingers*) ---
+
+#[test]
+fn a_phase_clock_runs_while_thinking_and_freezes_at_its_end() {
+    // The block stays up after the phase ends, waiting for the call's cell;
+    // its `Thinking for Ns` and the settled `Thought for Ns` read the phase's
+    // own length, never the wait.
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut clock = ThinkingClock::start(t0);
+    assert!(!clock.has_ended());
+    assert_eq!(clock.elapsed(t0 + s(2)), s(2), "it runs while thinking");
+    assert_eq!(clock.ended_for(t0 + s(2)), None);
+    clock.end(t0 + s(3));
+    assert!(clock.has_ended());
+    assert_eq!(clock.elapsed(t0 + s(9)), s(3), "frozen at the phase's end");
+    assert_eq!(clock.ended_for(t0 + s(4)), Some(s(1)));
+    clock.end(t0 + s(5));
+    assert_eq!(
+        clock.elapsed(t0 + s(9)),
+        s(3),
+        "a second end changes nothing: the first is when the model stopped"
+    );
+}
+
+#[test]
+fn a_rounds_usage_waits_for_its_lingering_thought() {
+    // The backend sends the round's usage frame before its batch, so it lands
+    // while the ended phase's block is still up. Its reasoning count waits for
+    // the thought to be recorded, so the committed line carries the
+    // provider's number — and it is never carried into the next round.
+    let mut app = App::new();
+    app.begin_stream();
+    app.begin_reasoning();
+    app.push_thinking("a short thought");
+    app.apply_usage(&crate::stream::TokenUsage {
+        input: 40,
+        output: 200,
+        reasoning: 169,
+        ..crate::stream::TokenUsage::default()
+    });
+    assert!(app.history.is_empty(), "the thought is still lingering");
+    let thought = app.finish_reasoning(4).expect("a thought");
+    assert_eq!(
+        thought.tokens, 169,
+        "the committed line shows the real count"
+    );
+    assert_eq!(thought_at(&app, 0).tokens, 169);
+    // The next round's thought is its own estimate, not the old count.
+    app.begin_reasoning();
+    app.push_thinking("another");
+    assert_ne!(app.finish_reasoning(1).expect("a thought").tokens, 169);
+}
+
+#[test]
+fn a_dropped_phase_drops_the_count_waiting_for_it() {
+    let mut app = App::new();
+    app.begin_stream();
+    app.begin_reasoning();
+    app.push_thinking("abandoned");
+    app.apply_usage(&crate::stream::TokenUsage {
+        reasoning: 169,
+        ..crate::stream::TokenUsage::default()
+    });
+    app.begin_stream(); // a new turn drops the phase
+    app.begin_reasoning();
+    app.push_thinking("fresh");
+    assert_ne!(
+        app.finish_reasoning(1).expect("a thought").tokens,
+        169,
+        "the abandoned phase's count went with it"
+    );
+}

@@ -75,7 +75,17 @@ which Ctrl+V reads the clipboard from.
   codex); the preview appears only once the reply streams (or a tool runs — a
   running backend tool previews its whole `header + ⎿ Running…` cell, so a long
   command isn't clipped, `docs/tools.md`), and the first chunk flips the arrow
-  `↓`. While a
+  `↓`. When one live cell gives way to the next the box holds still
+  (`docs/handoff-hold.md`): a thought's `● Thinking…` block **lingers**,
+  unchanged, after its phase ends until the round's call (or reply) lands on
+  its rows in one frame — the backend ends the phase at the call's first
+  piece, long before the call has a cell — and every other hand-off (a
+  command settling shorter than its live tail, a read group closing) **holds**
+  the rows it gave up as blank rows over the status line, while the next cell
+  is on its way: up to 3 s for a call being written or the reply streaming,
+  1 s under a running tool, else 300 ms (`ui::HandoffHold`). Between rounds
+  the hold lets go long before the next request answers, so the status line
+  goes back to sitting one spacer under the last cell. While a
   turn is active the draw branch re-arms an animation frame every 32 ms (codex's
   cadence), so the spinner runs, the shimmer waves, and the timer moves even
   with no events. On

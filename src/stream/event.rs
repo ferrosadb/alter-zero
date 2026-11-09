@@ -527,4 +527,60 @@ impl StreamEvent {
             | Self::StreamDone => false,
         }
     }
+
+    /// Does this event **settle** a thinking phase that has ended but whose
+    /// live block is still up, waiting for whatever takes its rows
+    /// (`docs/handoff-hold.md` *The thought lingers*)? Anything that draws or
+    /// records something does — the boundary settles the thought *before*
+    /// folding the event in, so the `Thought for …` line commits ahead of
+    /// what the event commits and the event's cell lands on the block's rows
+    /// in the same frame.
+    ///
+    /// What leaves it up draws nothing in the strip and records nothing: a
+    /// piece of the call being written (its cell lands only with its batch),
+    /// blank reply text, the round's usage frame (whose reasoning count waits
+    /// for the thought to be recorded) and its call ids. A retry does not
+    /// settle it either: the attempt the thought belongs to is void, and the
+    /// open phase is withdrawn with it.
+    ///
+    /// A piece that opens a previewed `write` draws a cell after all. That is
+    /// a matter of state, not of this event, so the boundary also asks
+    /// `App::push_tool_call_fragment`.
+    ///
+    /// Exhaustive on purpose: a new event has to say which side it is on.
+    #[must_use]
+    pub fn settles_ended_thought(&self) -> bool {
+        match self {
+            Self::Chunk(text) => !text.trim().is_empty(),
+            Self::ToolCallDelta(_)
+            | Self::Usage(_)
+            | Self::RoundCalls(_)
+            | Self::Retrying { .. } => false,
+            Self::ThinkingStart
+            | Self::ThinkingChunk(_)
+            | Self::ThinkingEnd
+            | Self::ToolBatch(_)
+            | Self::ToolStart { .. }
+            | Self::ToolEnd { .. }
+            | Self::ToolAnswered { .. }
+            | Self::ToolRejected { .. }
+            | Self::ToolNote(_)
+            | Self::ToolBackgrounded { .. }
+            | Self::ToolOutput(_)
+            | Self::ToolScreen { .. }
+            | Self::ToolTitle(_)
+            | Self::TaskCall { .. }
+            | Self::HookNote { .. }
+            | Self::Steered { .. }
+            | Self::NoticeDelivered { .. }
+            | Self::PromptBlocked { .. }
+            | Self::AgentBatch { .. }
+            | Self::AgentGroupDone { .. }
+            | Self::Offline { .. }
+            | Self::Permission(_)
+            | Self::AskUser(_)
+            | Self::Error(_)
+            | Self::StreamDone => true,
+        }
+    }
 }

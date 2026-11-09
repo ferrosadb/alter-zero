@@ -293,7 +293,14 @@ impl App {
         // One frame ends one round: this is where the round's `Thought for
         // …` cells trade their token estimate for the provider's own
         // `reasoning_tokens` (docs/thinking-stream.md).
-        self.snap_round_reasoning(usage.reasoning);
+        // A phase still open here has ended and lingers for the round's next
+        // cell, so the count waits for it to be recorded
+        // (docs/handoff-hold.md *The thought lingers*).
+        if self.reasoning().is_some() {
+            self.round_reasoning_due = Some(usage.reasoning);
+        } else {
+            self.snap_round_reasoning(usage.reasoning);
+        }
         // The `/context` page's Last request and Since launch rows
         // (docs/context-usage.md).
         self.last_usage = Some(*usage);
@@ -523,5 +530,23 @@ impl App {
     #[must_use]
     pub const fn stream_preview_rows(&self) -> u16 {
         self.stream_preview_rows
+    }
+    /// Inject the rows the strip holds over its status line this frame (the
+    /// [`set_stream_preview_rows`] pattern): only the boundary knows what the
+    /// last frame painted, what has committed since and what time it is, so
+    /// its `ui::HandoffHold` decides and this carries the answer to every
+    /// geometry helper. See `docs/handoff-hold.md`.
+    ///
+    /// [`set_stream_preview_rows`]: App::set_stream_preview_rows
+    pub const fn set_handoff_hold(&mut self, rows: u16) {
+        self.handoff_hold = rows;
+    }
+    /// The boundary-injected hand-off hold (see [`set_handoff_hold`]) —
+    /// verbatim; `ui` counts it only while a live strip is up.
+    ///
+    /// [`set_handoff_hold`]: App::set_handoff_hold
+    #[must_use]
+    pub const fn handoff_hold(&self) -> u16 {
+        self.handoff_hold
     }
 }

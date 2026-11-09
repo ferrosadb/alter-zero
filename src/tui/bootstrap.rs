@@ -499,6 +499,7 @@ impl<'t> Session<'t> {
             models,
             render: ui::StreamRender::new(),
             agent_render: ui::StreamRender::new(),
+            handoff: ui::HandoffHold::default(),
             transcript: ui::TranscriptCache::new(),
             context: ui::ContextCache::new(),
             burst: PasteBurst::new(),
@@ -956,6 +957,13 @@ impl<'t> Session<'t> {
     /// when the run recorded a conversation — the exit hint `main` prints after
     /// the terminal is restored (`docs/cli.md`).
     pub(crate) fn shutdown(mut self) -> Option<String> {
+        // A thought whose phase ended was still lingering for its call's cell
+        // (docs/handoff-hold.md *The thought lingers*): it is a finished
+        // thought, recorded at once before the linger existed, so settle it —
+        // its line reaches scrollback (`restore` flushes it) and the rollout.
+        if self.thought_lingering() {
+            self.settle_reasoning();
+        }
         // The quit arms break before the loop-bottom sync — catch the last
         // change.
         self.recorder

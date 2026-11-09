@@ -265,7 +265,7 @@ of per-area modules**, not single files — `src/app/` (`types`, `action`, `keys
 `agent`, `status`, `tips`, `permission`, `tool_group`, with the `App` struct itself in `mod.rs` so every submodule and
 the test tree keeps its private-field access), `src/ui/` (`theme`, `wrap`,
 `layout`, `assistant`, `inline`, `table`, `message`, `conversation`, `tool`,
-`file_cell`, `inline_diff`, `tool_group`, `status`, `tips`, `offline`, `agent`, `menu`, `footer`, `header`, `hooks_view`, `live`, `transcript`,
+`file_cell`, `inline_diff`, `tool_group`, `status`, `tips`, `offline`, `agent`, `menu`, `footer`, `header`, `hooks_view`, `live`, `handoff`, `transcript`,
 `context_view`, `resume_view`, `model_view`, `login_view`, `background_view`,
 `permission_view`, `settings_view`, `mascot_view`, `spinner_view`, `palette`, `theme_view`, `donate_view`, `export_view`, `context_usage_view`, `usage_view`, `secrets_view`, `mcp_view`, `config_review_view`, `view_flow`, `stream_render`), and **`src/stream/`** — the backend seam
 kept apart from the offline demo that used to crowd it: `event` (the whole
@@ -3296,7 +3296,31 @@ of bug:
    the screen *up* (oldest chat into scrollback) once the box would overflow the
    bottom; a shrink blanks the rows it vacates (the decision is the pure
    `ui::repin`). Never force it to `screen.height - height` — that reintroduces
-   the "box jumps to the bottom" bug. **One view closes differently: an inline
+   the "box jumps to the bottom" bug. Anchoring the top is also why **a strip
+   that sheds more rows than it commits lifts the box** — and every hand-off
+   between live cells did: a thought settling into its `Thought for …` line
+   before the round's call has a cell, a command settling shorter than its
+   live tail, a read group closing; the box rose and dropped back a few frames
+   later (the reported flicker). Two answers (`docs/handoff-hold.md`, `smoke.sh`
+   Phase 153). **The thought lingers**: `ThinkingEnd` only stops its clock
+   (`app::ThinkingClock`), the block stays up unchanged, and the first event
+   that draws or records something settles it *before* that event is folded in
+   (`StreamEvent::settles_ended_thought`, exhaustive) so its line commits ahead
+   of the event's commits and the call's cell lands on its rows in one frame;
+   the draw tick settles it past `ui::thought_linger_due`; the round's usage
+   frame keeps its `reasoning_tokens` for it (`App::round_reasoning_due`); a
+   quit settles it, a retry drops it; a subagent's session view settles at
+   once. **Every other hand-off holds** the rows it stood on, less what
+   committed, as blank rows over the status line — counted by `ui::hang_rows`,
+   the one sum the strip geometry sizes by, painted by `strip_lines` — for as
+   long as `hold_limit` allows (3 s for a call being written or the reply
+   streaming, 1 s under a running tool, 300 ms otherwise), each hand-off on
+   its own clock: `ui::HandoffHold`, boundary-owned like `StreamRender`, asked
+   (with the injected hold zeroed first, so it decides from the strip's own
+   rows) and recorded around every conversation-view frame, reset by every
+   purge rebuild; never under a modal, in a `!` turn or outside a turn.
+   Holding the rows until the next *request* answered was the reverted first
+   fix: seconds of empty lines over the status line between rounds. **One view closes differently: an inline
    *modal*** — the tool-permission prompt, `ui::region_is_modal`, the one region
    that can be as tall as the terminal. It *grows* by the same `ui::repin` as
    everything else — the chat it displaces scrolls into the terminal's real

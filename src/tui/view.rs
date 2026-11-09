@@ -78,7 +78,10 @@ impl Session<'_> {
             .clocks
             .turn_start
             .map_or(std::time::Duration::ZERO, |start| start.elapsed());
-        let thinking = self.clocks.thinking_start.map(|start| start.elapsed());
+        let thinking = self
+            .clocks
+            .thinking
+            .map(|clock| clock.elapsed(Instant::now()));
         self.app.set_status_times(elapsed, thinking);
         // The current running command's own elapsed (None when none is
         // running): the `(Ns)` its cell displays (docs/tool-streaming.md) and,
@@ -236,20 +239,51 @@ impl Session<'_> {
     /// chat above it scrolling into real scrollback (`InlineViewport` notes that
     /// one-way move for the close's purge rebuild; `docs/permissions.md`).
     pub(crate) fn draw_conversation(&mut self) -> io::Result<()> {
+        // The hand-off hold is decided from the strip's OWN rows, so last
+        // frame's injection goes first — before the preview below measures
+        // its budget against the status slot the held rows sit in
+        // (`docs/handoff-hold.md`).
+        self.app.set_handoff_hold(0);
         // Compute the strip preview cheaply once per frame (O(one line); a
         // forming table re-renders just its own block), so the status animation
         // never re-renders the whole reply — and inject its row count so the
         // layout reserves it. See `docs/markdown.md`, `docs/table-streaming.md`.
         let preview = self.stream_preview_lines();
+        // Then the hold itself: what the preview slot stood on last frame,
+        // less every row queued for scrollback since, kept as blank rows over
+        // the status line while the next live cell is on its way — so a
+        // thought settling before its call has a cell, or a command settling
+        // shorter than its tail, leaves the box where it was instead of
+        // lifting it for the frames until the next cell lands.
+        let screen = self.term.screen();
+        let hold = self.handoff.rows(
+            &self.app,
+            self.term.pending_rows(),
+            screen.width,
+            screen.height,
+            Instant::now(),
+        );
+        self.app.set_handoff_hold(hold);
         let height = self.live_region_height();
         let app = &self.app;
         // `term` places the cursor from the final (content-anchored) viewport
         // via `ui::cursor_position`, which mirrors render_live's layout exactly.
-        self.term.draw(
+        let drawn = self.term.draw(
             height,
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
-        )
+        );
+        self.handoff.record(&self.app, screen.width, screen.height);
+        drawn
+    }
+
+    /// A purge rebuild re-seats the live region from scratch, so there is no
+    /// bottom left to hold: the strip paints at its content's own height and
+    /// the hand-off hold starts over from what the rebuild painted
+    /// (`docs/handoff-hold.md`). Called before the rebuild measures anything.
+    fn restart_handoff_hold(&mut self) {
+        self.handoff.reset();
+        self.app.set_handoff_hold(0);
     }
 
     /// Render the full-screen tool-output overlay. Clamps the scroll to the
@@ -479,6 +513,7 @@ impl Session<'_> {
         // so nothing is "already committed" any more: reset, and let the
         // catch-up below re-commit the whole partial at the current width.
         self.render.reset();
+        self.restart_handoff_hold();
         // The preview comes FIRST: it injects the strip's preview row count
         // (`set_stream_preview_rows` — a forming table previews multi-row) that
         // `live_region_height` below must reserve (docs/table-streaming.md).
@@ -519,6 +554,7 @@ impl Session<'_> {
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
         )?;
+        self.handoff.record(&self.app, screen.width, screen.height);
         // Catch scrollback up on the in-flight partial the purge dropped:
         // exactly the rows live streaming would have committed, queued for
         // the next draw. Suppressed while a flow is active — the queued rows
@@ -544,6 +580,7 @@ impl Session<'_> {
     pub(crate) fn repaint_agent_view(&mut self) -> io::Result<()> {
         let screen = self.term.screen();
         self.agent_render.reset();
+        self.restart_handoff_hold();
         let Some(run) = self.app.viewed_agent() else {
             return Ok(());
         };
@@ -583,6 +620,7 @@ impl Session<'_> {
             |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
             app,
         )?;
+        self.handoff.record(&self.app, screen.width, screen.height);
         // Catch scrollback up on the agent's in-flight partial the purge
         // dropped — `repaint_conversation`'s catch-up over `agent_render`, so
         // a rebuild mid-reply leaves the same rows behind here as it does in
@@ -771,6 +809,10 @@ impl Session<'_> {
     /// a thinking pause). The chain seeds from the Submit keypress and stops by
     /// itself on the first draw after the turn ends.
     pub(crate) fn on_draw_tick(&mut self) -> io::Result<()> {
+        // A thought that has lingered as long as it may settles before the
+        // frame is measured, so this very frame paints without its block
+        // (docs/handoff-hold.md *The thought lingers*).
+        self.settle_lingering_thought();
         self.update_status_times();
         // Inject each background shell's runtime (the boundary owns the started
         // clocks — docs/background.md), so the manager's details view ticks.

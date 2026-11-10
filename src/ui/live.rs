@@ -16,7 +16,7 @@ use super::layout::{
 use super::reasoning::live_reasoning_lines;
 use super::theme::*;
 use super::tool::{
-    ctrl_b_hint, is_command_tool, live_tool_lines, result_row, running_command_lines,
+    CommandClock, CtrlBHint, ctrl_b_hint, is_command_tool, live_tool_lines, running_command_lines,
     shell_running_line,
 };
 use super::*;
@@ -102,7 +102,41 @@ pub fn render_live(area: Rect, buf: &mut Buffer, app: &App) {
 /// arriving, `StreamRender::preview`'s own rule), while a queue of live cells
 /// or a thinking block keeps its head (the running call, the `● Thinking…`
 /// header — the rows that say what is happening).
+///
+/// The **settling cells** — live cells that have ended and still hold the
+/// rows they stood on (`docs/settling.md`) — lead the slot, oldest on top,
+/// with one blank row between them and what is live: where each will sit in
+/// scrollback. A slot too small for all of it keeps the cells' rows from the
+/// top and gives the live content what is left, so the list is exactly
+/// `rows` long at every size.
 pub(super) fn preview_lines(
+    app: &App,
+    width: u16,
+    stream_preview: Option<&[Line<'static>]>,
+    rows: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = super::settling::settling_preview_lines(app);
+    if lines.is_empty() {
+        return live_preview_lines(app, width, stream_preview, rows);
+    }
+    lines.truncate(usize::from(rows));
+    if lines.len() < usize::from(rows) {
+        // The blank row under the cells, then the live content in the rows
+        // that leaves.
+        lines.push(Line::default());
+        lines.extend(live_preview_lines(
+            app,
+            width,
+            stream_preview,
+            super::settling::live_rows_under_settling(app, rows),
+        ));
+    }
+    lines
+}
+
+/// The **live** half of [`preview_lines`]: what is executing or streaming
+/// now, in `rows` rows.
+fn live_preview_lines(
     app: &App,
     width: u16,
     stream_preview: Option<&[Line<'static>]>,
@@ -225,10 +259,13 @@ fn trim_preview(mut lines: Vec<Line<'static>>, rows: usize, tail: bool) -> Vec<L
 /// ([`super::agent::agent_view_preview_lines`]) — a subagent's running
 /// command tails its output exactly like the main turn's, which a second
 /// thinner copy of this walk did not (`docs/agent-view-streaming.md`).
-/// `elapsed` is the **running command's own** runtime — what every `(Ns)`
+/// `clock` carries the **running command's own** runtime — what every `(Ns)`
 /// here shows: the main strip's boundary-injected [`App::command_elapsed`],
 /// the agent view's [`AgentRun::command_elapsed`](crate::agents::AgentRun::command_elapsed)
-/// — never the turn's or the agent's elapsed, which the status line counts.
+/// — never the turn's or the agent's elapsed, which the status line counts —
+/// and what Ctrl+B does to the call once that hint is due, the main strip's
+/// alone ([`due_ctrl_b_hint`]): it closes the running cell's clock clause,
+/// never a row of its own (`docs/background.md`).
 /// `live` is that session's running call's live rows and when each last
 /// changed ([`App::live_tail`], [`AgentRun::live_tail`](crate::agents::AgentRun::live_tail)),
 /// which the command tail's window follows (`docs/tool-streaming.md`).
@@ -242,7 +279,7 @@ pub(super) fn live_call_lines(
     tool: &ToolCall,
     draft: Option<&crate::app::ToolDraft>,
     live: &LiveTail,
-    elapsed: Duration,
+    clock: CommandClock,
     pulse: Duration,
     width: u16,
     paths: &PathDisplay,
@@ -253,10 +290,10 @@ pub(super) fn live_call_lines(
         return draft_cell_lines(draft, Some(tool), Some(pulse), width, paths, false);
     }
     if tool.shell && tool.status == ToolStatus::Running {
-        return vec![shell_running_line(elapsed)];
+        return vec![shell_running_line(clock, width)];
     }
     if is_command_tool(tool) && tool.status == ToolStatus::Running {
-        return running_command_lines(tool, live, elapsed, pulse, width, paths);
+        return running_command_lines(tool, live, clock, pulse, width, paths);
     }
     live_tool_lines(tool, width, pulse, paths)
 }
@@ -317,17 +354,6 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::default());
         }
         lines.extend(group);
-        // A long search can go to the background like any command — its
-        // cell is the group's, so the hint hangs off the group's.
-        if let Some(front) = app.tool_queue().front().filter(|_| grouped > 0)
-            && front.status == ToolStatus::Running
-            && let Some(hint) = ctrl_b_hint(front)
-            && app
-                .background_hint_elapsed()
-                .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-        {
-            lines.push(result_row(1, hint.to_string()));
-        }
     }
     // Each queued previewed call owns the next adopted draft, in queue order
     // (docs/write-streaming.md) — the group's own included: a scratchpad
@@ -345,36 +371,43 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         let draft = crate::app::previewed_display(&tool.name)
             .then(|| drafts.next())
             .flatten();
+        // A running command (a model `bash` call or the `!` shell) can be
+        // moved to the background with Ctrl+B, and a wait on a session that
+        // already runs there ended — its clock clause says what the key does
+        // (`ctrl_b_hint`), but only once the command has been running a few
+        // seconds (`TOOL_BACKGROUND_HINT_DELAY`), Claude-Code-style: a
+        // command that finishes right away never flashes the hint (Ctrl+B
+        // still works the whole time — only the hint waits). Live-only by
+        // construction: this renderer never feeds scrollback commits, so the
+        // hint is never committed (docs/background.md).
         lines.extend(live_call_lines(
             tool,
             draft,
             app.live_tail(),
-            elapsed,
+            CommandClock {
+                elapsed,
+                hint: due_ctrl_b_hint(app, tool),
+            },
             pulse,
             width,
             app.path_display(),
         ));
-        // A running command (a model `bash` call or the `!` shell) can be
-        // moved to the background with Ctrl+B, and a wait on a session that
-        // already runs there ended — hint what the key does under the live
-        // cell (`ctrl_b_hint`), but only once the command has been running a
-        // few seconds (`TOOL_BACKGROUND_HINT_DELAY`), Claude-Code-style: a
-        // command that finishes right away never flashes the hint (Ctrl+B
-        // still works the whole time — only the hint waits). The command's
-        // own elapsed is boundary-injected each frame
-        // (`App::command_elapsed`). Live-only by construction: this renderer
-        // never feeds scrollback commits, so the hint is never committed
-        // (docs/background.md).
-        if tool.status == ToolStatus::Running
-            && let Some(hint) = ctrl_b_hint(tool)
-            && app
-                .background_hint_elapsed()
-                .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-        {
-            lines.push(result_row(1, hint.to_string()));
-        }
     }
     lines
+}
+
+/// What Ctrl+B does to `tool`, once saying so is due: the call is running
+/// and has been for [`TOOL_BACKGROUND_HINT_DELAY`] — off the command's own
+/// boundary-injected clock, masked while something else owns the key
+/// ([`App::background_hint_elapsed`]). `None` before that, so a command that
+/// finishes right away never flashes the hint (`docs/background.md`).
+pub(super) fn due_ctrl_b_hint(app: &App, tool: &ToolCall) -> Option<CtrlBHint> {
+    if tool.status != ToolStatus::Running {
+        return None;
+    }
+    app.background_hint_elapsed()
+        .filter(|elapsed| *elapsed >= TOOL_BACKGROUND_HINT_DELAY)
+        .and_then(|_| ctrl_b_hint(tool))
 }
 
 /// The previewed calls a round is still generating — a `write` streaming
@@ -446,9 +479,15 @@ pub(super) fn strip_lines(
         // spinner style (`/spinner`, docs/spinner.md). A blank row stands
         // in if the status somehow went while `has_status` said otherwise,
         // so the count still matches `strip_rows`' STATUS_ROWS.
+        //
+        // A thought whose block still stands in the strip keeps its
+        // `Thinking for Ns` clause here too (`lingering_status`): the block
+        // and the clause change together, when the block's rows are taken
+        // (docs/settling.md).
         let line = if let Some(run) = app.viewed_agent() {
+            let status = agent_view_status(run);
             Some(styled_status_line(
-                &agent_view_status(run),
+                &super::settling::lingering_status(app, &status),
                 None,
                 app.spinner(),
                 width,
@@ -456,8 +495,14 @@ pub(super) fn strip_lines(
         } else {
             // While some task is in progress the spinner wears its
             // activeForm instead of the turn's verb (docs/task-tools.md).
-            app.status()
-                .map(|status| styled_status_line(status, app.task_verb(), app.spinner(), width))
+            app.status().map(|status| {
+                styled_status_line(
+                    &super::settling::lingering_status(app, status),
+                    app.task_verb(),
+                    app.spinner(),
+                    width,
+                )
+            })
         };
         lines.push(line.unwrap_or_default());
         // The rows hanging off the status line, in `hang_rows`' sum: the
@@ -539,6 +584,11 @@ pub(super) fn strip_content_preview_rows(app: &App, width: u16, term_height: u16
 /// streaming reply's frontier. What [`strip_content_preview_rows`] branches
 /// on; mirrors [`preview_rows`]' own branch order.
 fn strip_preview_is_live_cells(app: &App) -> bool {
+    // A settling cell is the live cell it settled from, still on screen and
+    // not yet in scrollback (docs/settling.md).
+    if !app.settling().is_empty() {
+        return true;
+    }
     if let Some(run) = app.viewed_agent() {
         return !run.tool_queue.is_empty()
             || run.drafts().previews().next().is_some()
@@ -592,6 +642,10 @@ pub(super) fn strip_flow_key(app: &App) -> u64 {
     let mut hasher = DefaultHasher::new();
     app.agent_view.hash(&mut hasher);
     strip_has_status(app).hash(&mut hasher);
+    // A cell settling in the strip is part of what the strip is of
+    // (docs/settling.md) — its rows are not: they are given up frame by
+    // frame, and the boundary lets the cells go before a strip overflows.
+    app.settling().len().hash(&mut hasher);
     app.reasoning().is_some().hash(&mut hasher);
     app.streaming_text().is_some().hash(&mut hasher);
     let queue = app

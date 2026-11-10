@@ -162,7 +162,12 @@ the boundary is about to re-dispatch.
 - `App::deliver_steered(text)` — the `StreamEvent::Steered` half: flush the
   streamed segment, drop the pending row, record the user message, count the
   `↑` tokens. Records even when no row matched — what the model read is what the
-  transcript owes the user.
+  transcript owes the user. The bubble commits as a **cell**
+  (`Session::commit_cell`): a delivery comes straight after a round's tool
+  results, and behind a command that is still settling on the rows it ran on
+  the bubble waits its turn — drawn under it in the strip, exactly where it
+  will sit in scrollback — rather than pushing that cell out early, which
+  moved the box up two rows and back (`docs/settling.md`).
 - `App::reclaim_steered()` — the turn-end fallback described above. A no-op when
   nothing is waiting, so no empty batch is ever invented.
 - `App::steered_this_turn` — has this turn *read* one? The Esc-interrupt undo

@@ -245,6 +245,14 @@ itself: `assert_stream_matches_batch` fails any step whose preview shrinks
 by more than that step committed, over the whole hostile-soup fuzz corpus
 at every width — which is how the table's shape was found at all.
 
+That floor covers a reply's frontier and nothing else, and deliberately so:
+there the next content is a token away and lands on the padded row. Between
+the strip's **cells** — a thought and the call it leads to, one command and
+the next — the next cell can be a whole request away, and rows held blank
+there sat as empty lines over the status line for as long as it took. Those
+hand-offs are held by the finished cell itself, which keeps showing what it
+showed on the rows it stood on (`docs/settling.md`).
+
 The smoke phase's own hop watch confirms a lower footer against a second
 capture a beat later, since `tmux capture-pane` can read a frame
 half-parsed — the screen scrolled, the region not yet repainted, the old

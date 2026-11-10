@@ -68,6 +68,7 @@ widened for the split.
 | `agent.rs` | The `Agent` tool's roster, groups, and notices. |
 | `reasoning.rs` | The thinking stream: the live reasoning buffer, the `Reasoning` cell it settles into, and the provider's reasoning-token snap (`docs/thinking-stream.md`). |
 | `tool_group.rs` | Collapsed read/search groups: which calls join one (`group_kind`, `is_group_member`), how far one runs through the history (`group_run`), what it counts, and the open group the commit path holds (`place_resolved_tool`, `close_tool_group`) (`docs/tool-groups.md`). |
+| `settling.rs` | Settling cells: a live cell that has ended and still stands on its rows in the strip — `Settling` (its head, its body, the rows it keeps this frame and the rows its committed form takes) and the session's list of them (`docs/settling.md`). |
 | `tips.rs` | The spinner tip's walk: the cursor the boundary seeds from `tips.json`, the draw `set_status_times` runs, and what hides the row (`docs/tips.md`). The catalog and the file format are the top-level `crate::tips`. |
 
 ### `src/ui/` — pure rendering
@@ -86,6 +87,7 @@ widened for the split.
 | `tool.rs` | Tool cells: the `● name(args)` header, the `⎿` output block, a running command's live tail. |
 | `file_cell.rs` | The `read`/`write`/`edit` numbered-diff cell. |
 | `tool_group.rs` | The collapsed read/search group's two looks — the live `● Reading 2 files…` cell with its `⎿` hint, and the settled dim line a closed group commits (`docs/tool-groups.md`). |
+| `settling.rs` | Settling cells in the strip: the picture a live cell leaves when it ends (`thought_picture`, `command_picture`, `group_picture`), a cell drawn at the rows it keeps (`settling_lines`), and how many rows each keeps this frame (`settle_plan`, `settle_frame`) (`docs/settling.md`). |
 | `inline_diff.rs` | Character-level refinement of a diff cell's `-`/`+` pairs — which bytes of a line actually changed (`docs/inline-diff.md`). |
 | `image.rs` | The rows a picture reserves under a cell — the pure half of the inline images (`docs/images.md`). |
 | `status.rs` | The status line (spinner, shimmer, tally) and the `Done for Ns` summary — the amber `Waiting for internet…` verb and `offline for` clause included (`docs/offline.md`). |
@@ -139,6 +141,7 @@ opening the viewport, running the loop — and everything else lives here:
 | `ask.rs` | The `AskUserQuestion` idle clock's boundary half: `Instant::now()` into the pure `ask::AskTimer` on every key, paste and draw, and the expiry that resolves the waiting questions unanswered (`docs/ask.md`). |
 | `view.rs` | Drawing: the draw tick, the overlays, the repaints, `live_region_height`, the injected clocks. |
 | `commit.rs` | Scrollback commits — the one place invariant 4 is enforced — and the toast. |
+| `settle.rs` | Settling cells at the boundary: `commit_cell` — hold a finished cell's lines back, or commit them — and `sync_settling`, which releases them the frame the plan lets a cell go (`docs/settling.md`). |
 | `models.rs` | `ModelSession`: the backend and every knob that selects it, plus the `/model`, Ctrl+T and probe arms (`docs/llm.md`). |
 | `login.rs` | The `/login` flow's boundary half: opening it, running a subscription's sign-in — a device code or a browser PKCE flow, per provider — and persisting what it mints (`docs/copilot.md`, `docs/chatgpt.md`). |
 | `config.rs` | Reading the environment: providers, keys, the per-directory `/model` selections and `/settings` knobs (`docs/per-directory-state.md`), permission rules, the per-user `telemetry.json` (`docs/telemetry.md`), `update.json` (`docs/update.md`) and `tips.json` (`docs/tips.md`), paths. |

@@ -10,7 +10,7 @@ use crate::ui::theme::{
     tool_diff_del_bg, tool_diff_del_color, tool_diff_del_mark_bg, tool_dim_color, tool_fail_color,
     tool_ok_color, tool_output_color, tool_running_color, tool_waiting_color,
 };
-use crate::ui::tool::{live_tool_lines, running_command_lines, tool_full_lines};
+use crate::ui::tool::{CommandClock, live_tool_lines, running_command_lines, tool_full_lines};
 use crate::ui::wrap::{cols, contrast_ratio};
 
 /// A theme RGB triple as the `Color` a rendered span carries.
@@ -831,7 +831,7 @@ fn running_command_lines_tails_recent_output_with_the_elapsed() {
     let lines = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(9),
+        CommandClock::bare(Duration::from_secs(9)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -873,7 +873,7 @@ fn the_running_footer_names_the_timeout_the_call_runs_under() {
     let lines: Vec<String> = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(22),
+        CommandClock::bare(Duration::from_secs(22)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -909,7 +909,7 @@ fn a_running_command_with_no_output_counts_on_its_running_row() {
     let lines: Vec<String> = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(10),
+        CommandClock::bare(Duration::from_secs(10)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -939,7 +939,7 @@ fn running_footers_humanize_the_elapsed_past_a_minute() {
     let lines = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(123),
+        CommandClock::bare(Duration::from_secs(123)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -949,9 +949,10 @@ fn running_footers_humanize_the_elapsed_past_a_minute() {
         "+5 lines (2m 3s · wait 2m)",
         "the streaming footer humanizes"
     );
-    let row = plain(&crate::ui::tool::shell_running_line(Duration::from_secs(
-        75,
-    )));
+    let row = plain(&crate::ui::tool::shell_running_line(
+        CommandClock::bare(Duration::from_secs(75)),
+        80,
+    ));
     assert!(
         row.ends_with("Running… (1m 15s)"),
         "the shell running row humanizes: {row:?}"
@@ -968,7 +969,7 @@ fn running_command_lines_without_overflow_shows_the_clock_row_alone() {
     let lines = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(1),
+        CommandClock::bare(Duration::from_secs(1)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -995,7 +996,7 @@ fn running_command_lines_tail_window_counts_display_rows_when_lines_wrap() {
     let lines = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(7),
+        CommandClock::bare(Duration::from_secs(7)),
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
@@ -3088,7 +3089,7 @@ fn the_running_tail_footer_counts_hidden_rows() {
     let lines: Vec<String> = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(3),
+        CommandClock::bare(Duration::from_secs(3)),
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
@@ -4248,7 +4249,7 @@ fn the_running_tail_never_reshapes_what_is_still_streaming() {
     let lines: Vec<String> = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(1),
+        CommandClock::bare(Duration::from_secs(1)),
         Duration::ZERO,
         60,
         &PathDisplay::VERBATIM,
@@ -4787,7 +4788,7 @@ fn a_running_session_call_shows_the_wait_it_runs_under() {
     let lines: Vec<String> = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(3),
+        CommandClock::bare(Duration::from_secs(3)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -4834,7 +4835,7 @@ fn the_running_window_follows_the_rows_still_moving() {
     let body: Vec<String> = running_command_lines(
         &t,
         &live,
-        Duration::from_secs(50),
+        CommandClock::bare(Duration::from_secs(50)),
         Duration::ZERO,
         44,
         &PathDisplay::VERBATIM,
@@ -4882,7 +4883,7 @@ fn the_running_window_never_hides_rows_that_fit() {
     let body: Vec<String> = running_command_lines(
         &t,
         &live,
-        Duration::from_secs(50),
+        CommandClock::bare(Duration::from_secs(50)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
@@ -4920,7 +4921,7 @@ fn the_running_window_stays_a_tail_while_the_newest_output_is_at_the_end() {
     let body: Vec<String> = running_command_lines(
         &t,
         &live,
-        Duration::from_secs(9),
+        CommandClock::bare(Duration::from_secs(9)),
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,

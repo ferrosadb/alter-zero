@@ -241,6 +241,12 @@ impl Session<'_> {
         // never re-renders the whole reply — and inject its row count so the
         // layout reserves it. See `docs/markdown.md`, `docs/table-streaming.md`.
         let preview = self.stream_preview_lines();
+        // The cells still settling in the strip give up the rows this frame
+        // can spare them, and the ones down to their committed height are
+        // queued — after the preview's row count is in, which the frame's
+        // height is measured with, and before that height is taken
+        // (docs/settling.md).
+        self.sync_settling();
         let height = self.live_region_height();
         let app = &self.app;
         // `term` places the cursor from the final (content-anchored) viewport
@@ -366,6 +372,13 @@ impl Session<'_> {
 
     /// Paint whichever view is current — the draw tick's whole body.
     pub(crate) fn draw_active_view(&mut self) -> io::Result<()> {
+        // The settling cells first: the flow and modal checks below size the
+        // strip, and a cell the frame is about to let go — a prompt opened, the
+        // terminal is too short for it — must not be measured as though it
+        // stayed (docs/settling.md).
+        if self.app.view == View::Conversation {
+            self.sync_settling();
+        }
         match self.app.view {
             // The modal (permission-prompt) region needs a purge rebuild
             // instead of an in-place paint — two cases, one pure decision
@@ -479,6 +492,10 @@ impl Session<'_> {
         // so nothing is "already committed" any more: reset, and let the
         // catch-up below re-commit the whole partial at the current width.
         self.render.reset();
+        // A cell still settling in the strip is in history, so the rebuilt
+        // tail carries its committed form; the strip must not show it a
+        // second time (docs/settling.md).
+        self.drop_settling();
         // The preview comes FIRST: it injects the strip's preview row count
         // (`set_stream_preview_rows` — a forming table previews multi-row) that
         // `live_region_height` below must reserve (docs/table-streaming.md).
@@ -544,6 +561,9 @@ impl Session<'_> {
     pub(crate) fn repaint_agent_view(&mut self) -> io::Result<()> {
         let screen = self.term.screen();
         self.agent_render.reset();
+        // Whichever conversation had a cell settling, this rebuild seats the
+        // screen from history (docs/settling.md).
+        self.drop_settling();
         let Some(run) = self.app.viewed_agent() else {
             return Ok(());
         };

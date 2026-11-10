@@ -172,7 +172,8 @@ echo "==== Phase 94: inline wrote $reseed_bytes bytes over 2.5s after an overlay
 if [ "${reseed_bytes:-0}" -le 0 ]; then
 	fail "the animation chain never re-seeded after the overlay return: the inline status line is frozen for the rest of the turn"
 fi
-if ! tmux capture-pane -t "$S94" -p | grep -qE "Running… \([0-9]+s\)"; then
+# (By now the Ctrl+B hint is due and closes the clause — docs/background.md.)
+if ! tmux capture-pane -t "$S94" -p | grep -qE "Running… \([0-9]+s( · ctrl\+b to run in background)?\)"; then
 	fail "the live region's elapsed counter is not advancing after the overlay return"
 fi
 tmux kill-session -t "$S94" 2>/dev/null

@@ -147,7 +147,9 @@ rides the command's last row while it fits there, and moves to a row of its
 own under the command when it does not. The clock is the command's own
 (`App::command_elapsed`) and rides only its own value: while the row is still
 showing an earlier call, it shows no clock at all. A command running long
-enough for Ctrl+B keeps that hint too, hung off the group's cell.
+enough for Ctrl+B keeps that hint too — as the last clause of its clock,
+`(12s · 34 lines · ctrl+b to run in background)`, never a row of its own
+(`docs/tool-streaming.md` *The hint closes the clause*).
 
 **Settled**, in scrollback, once the group closes:
 
@@ -159,6 +161,16 @@ Bullet-less, flush at the margin and dim throughout — the settled thought's
 dress (`docs/thinking-stream.md`, `Thought for 4s · 1.2k tokens (ctrl+o to
 expand)`), since what is left is a fact about the turn rather than something
 happening. The counts stay bold.
+
+The live cell is a row taller than that line — the `⎿` value under its
+header — so a group that closes does not collapse at once: its cell **stays
+exactly as it was**, bullet still blinking, until whatever closed it takes
+that row, and the settled line then appears alone — never over the value it
+stood for — rather than the box jumping up a row and back
+(`ui::group_picture`, `docs/settling.md`). Most closes bring their own rows
+(a reply's first words, another call's cell), so the cell goes in that same
+frame; a batch a read led, whose other calls are already on screen under the
+group, is where it stands a moment.
 
 ## Which calls join a group
 

@@ -308,8 +308,14 @@ again (`docs/agent-tools.md` *A resume is news when it starts*).
 - **Live group cell** (`live_agent_group_lines`): a blinking-grey `● Running {n}
   agents… (ctrl+o to expand)` over the tree —
   `   ├ {description} · {n} tool uses · {tokens} tokens` with a
-  `   │ ⎿  {activity}` status row per agent — plus the delayed
-  `(ctrl+b to run in background)` hint (foreground only). The activity is
+  `   │ ⎿  {activity}` status row per agent — and, a few seconds in
+  (foreground only), the Ctrl+B hint **in the header's own dim hint**:
+  `(ctrl+o to expand · ctrl+b to run in background)`, its shorter wording
+  where the row is narrow, nothing where it is narrower still. It is never
+  a row of its own under the tree: a row that came and went with the clock
+  was a row the box jumped by when the group resolved (`docs/settling.md`).
+  A **lone** live agent's `● Agent({description})` cell does keep it on a
+  third row, since that cell commits on three rows too. The activity is
   **sticky**: `Initializing…` until the first event, then the newest tool's
   `{Name}: {detail}` — **one grammar for every call** (`agents::activity_line`):
   a `bash` call's model-supplied `description`

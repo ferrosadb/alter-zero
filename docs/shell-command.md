@@ -133,8 +133,10 @@ exactly that:
 - the command as the running **shell-flagged tool**: `tool_lines` renders it
   **headerless** (no `● name(args)` — the Shell message above is the header).
   While it runs the strip's preview row is `  ⎿ Running… (Ns)` —
-  `render_live`'s `shell_running_line(elapsed)`, the elapsed the hidden status
-  would have carried — sitting flush under the committed header; on `ToolEnd`
+  `render_live`'s `shell_running_line`, the elapsed the hidden status
+  would have carried, closed a few seconds in by the Ctrl+B hint
+  (`⎿ Running… (4s · ctrl+b to run in background)` — one row either way,
+  `docs/background.md`) — sitting flush under the committed header; on `ToolEnd`
   the committed `⎿` block (every row, aligned, unfolded) replaces it
   (`result_row` does the corner/
   continuation alignment). `conversation_lines` skips the blank spacer after a

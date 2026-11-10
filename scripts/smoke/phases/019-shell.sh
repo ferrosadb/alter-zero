@@ -53,7 +53,8 @@ expect_lacks "$shell_ran" -E "● echo|^Ran for" "the old '● cmd' tool header 
 expect_has "$shell_fail" -F "exit status: 3" "a failing !command did not report its non-zero exit status"
 # Req 3: a running !command shows the `⎿ Running…` preview with its elapsed and
 # NO spinner status line (its elapsed rides the preview instead).
-expect_has "$shell_running" -E "⎿  Running… \([0-9]+s\)" "a running !command did not show the '⎿ Running… (Ns)' preview"
+# (The Ctrl+B hint joins the clause once it is due — docs/background.md.)
+expect_has "$shell_running" -E "⎿  Running… \([0-9]+s( · ctrl\+b to run in background)?\)" "a running !command did not show the '⎿ Running… (Ns)' preview"
 expect_lacks "$shell_running" -F "esc to interrupt" "a running !command showed the spinner status line — req 3: shell hides it (the elapsed rides the ⎿ Running… preview)"
 # Req 2: Esc resolves the shell cell `⎿ Interrupted by user` — and does NOT
 # commit the redundant `Conversation interrupted` notice (the cell is the record).

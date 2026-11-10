@@ -80,11 +80,7 @@ impl Session<'_> {
                 self.close_tool_group(committing, width);
                 let group = self.app.finish_agent_group(background, &agents);
                 if committing {
-                    let height = self.live_region_height();
-                    self.term.set_view_height(height);
-                    self.term
-                        .insert_before(ui::agent_group_lines(&group, width));
-                    self.term.insert_before(vec![Line::default()]);
+                    self.commit_cell(ui::agent_group_lines(&group, width), None);
                 }
                 self.clocks.command_start = None;
                 false
@@ -170,6 +166,13 @@ impl Session<'_> {
                 if truncated {
                     self.app.set_tool_truncated();
                 }
+                // What the running cell leaves in the strip, taken before the
+                // call resolves: a command's cell is a row taller running
+                // than settled, and it keeps that row until the next cell
+                // takes it rather than pulling the box up (docs/settling.md).
+                let picture = committing
+                    .then(|| ui::command_picture(&self.app, ok, width))
+                    .flatten();
                 // Commit the finished tool *collapsed* (green/red) to scrollback;
                 // its full (retained) output lives in the Ctrl+O view. A
                 // completion that landed while the call ran (often a `kill`
@@ -177,7 +180,7 @@ impl Session<'_> {
                 // results, where the agent reads it (`NoticeDelivered`,
                 // docs/background.md).
                 if self.app.end_tool(&output, ok).is_some() {
-                    self.commit_tool_cell(committing, width);
+                    self.commit_tool_cell(committing, width, picture);
                 }
                 // The command resolved — stop its Ctrl+B-hint clock (the turn may
                 // continue with more text/tools).
@@ -199,7 +202,7 @@ impl Session<'_> {
                     self.app.set_tool_truncated();
                 }
                 if self.app.reject_tool(&display, &result).is_some() {
-                    self.commit_tool_cell(committing, width);
+                    self.commit_tool_cell(committing, width, None);
                 }
                 self.clocks.command_start = None;
                 false
@@ -217,7 +220,7 @@ impl Session<'_> {
                     self.app.set_tool_truncated();
                 }
                 if self.app.answer_tool(&display, &result).is_some() {
-                    self.commit_tool_cell(committing, width);
+                    self.commit_tool_cell(committing, width, None);
                 }
                 self.clocks.command_start = None;
                 false
@@ -229,7 +232,7 @@ impl Session<'_> {
                 // itself now reports through the background channel. Mirrors the
                 // ToolEnd commit dance (docs/background.md).
                 if self.app.background_tool(&output).is_some() {
-                    self.commit_tool_cell(committing, width);
+                    self.commit_tool_cell(committing, width, None);
                 }
                 // The command moved to the background — stop its hint clock.
                 self.clocks.command_start = None;
@@ -322,13 +325,14 @@ impl Session<'_> {
                 self.render.reset();
                 self.app.deliver_steered(&text);
                 if committing {
-                    // The strip loses the pending row as the bubble lands, so
-                    // reseat before committing (invariant 3).
-                    let height = self.live_region_height();
-                    self.term.set_view_height(height);
-                    self.term
-                        .insert_before(ui::message_lines(Role::User, &text, width));
-                    self.term.insert_before(vec![Line::default()]);
+                    // The strip loses the pending row as the bubble lands —
+                    // and the round boundary that delivers it comes straight
+                    // after a tool's result, so the bubble is a cell like any
+                    // other: behind one still settling it waits its turn,
+                    // rather than pushing that cell out with its rows not
+                    // yet taken (docs/settling.md). Otherwise it commits
+                    // behind the reseat (invariant 3).
+                    self.commit_cell(ui::message_lines(Role::User, &text, width), None);
                 }
                 false
             }
@@ -651,6 +655,15 @@ impl Session<'_> {
     /// A no-op when no phase is open (the display is off, or the phase produced
     /// no text) — so the sites need no condition of their own.
     ///
+    /// The block is three rows taller than the line it settles into, and the
+    /// phase ends the moment the model starts writing what follows — a call
+    /// that has no cell until its batch is announced, a reply whose first row
+    /// is one row. So the block **stands until its rows are taken**
+    /// ([`Session::commit_cell`]): unchanged, header and all, with the
+    /// line it commits held back, and the line appears alone in the frame
+    /// what comes next lands — the box never jumps up in between, and the
+    /// line is never drawn over its own thought (`docs/settling.md`).
+    ///
     /// Two of the module's three shapes apply. **Flush before you interleave**:
     /// a model can reason *after* it has begun answering, so the run of
     /// assistant text before the phase is finalised first
@@ -681,6 +694,12 @@ impl Session<'_> {
         }
         let width = self.term.screen().width;
         let committing = self.commits_allowed();
+        // What the live block leaves in the strip, taken before the phase is
+        // recorded: the block itself, unchanged, which stands until what
+        // comes next takes its rows (docs/settling.md).
+        let picture = committing
+            .then(|| ui::thought_picture(&self.app, width, secs))
+            .flatten();
         // The text before the phase becomes its own history message, so the
         // thought slots after it in scrollback and history alike. Normally
         // already done — the `ThinkingStart` arm flushes as the live block
@@ -701,11 +720,7 @@ impl Session<'_> {
             return;
         }
         if committing {
-            let height = self.live_region_height();
-            self.term.set_view_height(height);
-            self.term
-                .insert_before(ui::reasoning_lines(&reasoning, width));
-            self.term.insert_before(vec![Line::default()]);
+            self.commit_cell(ui::reasoning_lines(&reasoning, width), picture);
         }
     }
 

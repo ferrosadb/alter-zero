@@ -30,7 +30,7 @@ use crate::app::Reasoning;
 /// One row of the thought's body in the `⎿` gutter — dim and italic, the cue
 /// that separates it from a tool's output in the same gutter. Row 0 opens with
 /// the corner; the rest indent under it ([`gutter_row_styled`]).
-fn body_row(index: usize, text: String) -> Line<'static> {
+pub(super) fn body_row(index: usize, text: String) -> Line<'static> {
     gutter_row_styled(
         index,
         text,
@@ -134,13 +134,24 @@ pub(super) fn reasoning_full_lines(reasoning: &Reasoning, width: u16) -> Vec<Lin
 /// move or cost a full-tail re-render every 32 ms for something nobody is
 /// watching (`docs/tool-pulse.md`).
 pub(super) fn reasoning_live_full_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    let label = vec![Span::styled(
-        REASONING_RUNNING.to_string(),
-        Style::new().fg(reasoning_text_color()),
-    )];
-    let mut lines = vec![thinking_header(None, label)];
+    let mut lines = vec![resting_thinking_header()];
     lines.extend(gutter_body(text, width));
     lines
+}
+
+/// The `● Thinking…` header **at rest**: the bullet steady, the label flat
+/// in the thought's own colour. What the Ctrl+O pager draws for an open
+/// phase ([`reasoning_live_full_lines`]), and what the strip draws for a
+/// phase that has ended once its block has given a row up
+/// ([`settling::settling_lines`](super::settling::settling_lines)).
+pub(super) fn resting_thinking_header() -> Line<'static> {
+    thinking_header(
+        None,
+        vec![Span::styled(
+            REASONING_RUNNING.to_string(),
+            Style::new().fg(reasoning_text_color()),
+        )],
+    )
 }
 
 /// The **whole** thought in the `⎿` gutter, its own blank lines kept as
@@ -192,10 +203,41 @@ fn gutter_body(text: &str, width: u16) -> Vec<Line<'static>> {
 /// Walking newest-first wraps only what the window can show, so redrawing this
 /// every animation frame costs O(window), not O(reasoning).
 pub(super) fn live_reasoning_lines(text: &str, pulse: Duration, width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![thinking_header(
+    let mut lines = vec![live_thinking_header(pulse)];
+    lines.extend(
+        thought_tail_rows(text, width)
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| body_row(i, row)),
+    );
+    lines
+}
+
+/// The live block's `● Thinking…` header at the frame `pulse`: the bullet
+/// blinking, the label shimmering.
+///
+/// One builder for an open phase ([`live_reasoning_lines`]) and for a phase
+/// that has ended but whose block still stands
+/// ([`settling::settling_lines`](super::settling::settling_lines)): the two
+/// are the same row, which is what lets a phase end without anything on
+/// screen changing (`docs/settling.md`).
+pub(super) fn live_thinking_header(pulse: Duration) -> Line<'static> {
+    thinking_header(
         Some(pulse),
         shimmer_spans_from(REASONING_RUNNING, pulse, reasoning_shimmer_base()),
-    )];
+    )
+}
+
+/// The **tail** of `text` as the live block shows it: its last
+/// [`REASONING_PEEK_LINES`] wrapped rows, oldest first, blank source lines
+/// skipped.
+///
+/// The one walk behind the live block ([`live_reasoning_lines`]) and the rows
+/// a thought keeps on screen once its phase has ended
+/// ([`settling::thought_picture`](super::settling::thought_picture)), so the
+/// block that lingers stands on the rows the live one did by construction
+/// (`docs/settling.md`).
+pub(super) fn thought_tail_rows(text: &str, width: u16) -> Vec<String> {
     let inner = body_width(width);
     let mut window: VecDeque<String> = VecDeque::new();
     for source in text.split('\n').rev() {
@@ -212,11 +254,5 @@ pub(super) fn live_reasoning_lines(text: &str, pulse: Duration, width: u16) -> V
     while window.len() > REASONING_PEEK_LINES {
         window.pop_front();
     }
-    lines.extend(
-        window
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| body_row(i, row)),
-    );
-    lines
+    window.into()
 }

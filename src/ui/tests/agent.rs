@@ -377,6 +377,56 @@ fn a_multi_agent_tree_keeps_the_sticky_tool_activity() {
 }
 
 #[test]
+fn the_ctrl_b_hint_rides_the_trees_header_instead_of_a_row_of_its_own() {
+    // A foreground group can be moved to the background, and the tree says
+    // so once it has run a few seconds (docs/background.md). The hint used
+    // to be a row under the tree that the settled tree does not have — a
+    // row the box jumped by when the group resolved (docs/settling.md) — so
+    // it joins the header's own dim hint, and the tree keeps the rows its
+    // agents give it at every width.
+    let tree = |width: u16, elapsed: Duration| {
+        let mut app = App::new();
+        app.begin_stream();
+        app.start_agent_group(
+            false,
+            &[
+                spec("a1", "Fetch Warsaw", false),
+                spec("a2", "Fetch Oslo", false),
+            ],
+        );
+        app.set_command_elapsed(Some(elapsed));
+        live_agent_group_lines(&app, width)
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+    };
+    let early = Duration::from_secs(1);
+    let late = Duration::from_secs(30);
+    assert_eq!(tree(90, early)[0], "● Running 2 agents… (ctrl+o to expand)");
+    assert_eq!(
+        tree(90, late)[0],
+        "● Running 2 agents… (ctrl+o to expand · ctrl+b to run in background)"
+    );
+    assert_eq!(
+        tree(64, late)[0],
+        "● Running 2 agents… (ctrl+o to expand · ctrl+b to background)",
+        "a narrower header says it shorter"
+    );
+    assert_eq!(
+        tree(50, late)[0],
+        "● Running 2 agents… (ctrl+o to expand)",
+        "and one too narrow for either leaves it out"
+    );
+    for width in [120u16, 90, 64, 50, 30] {
+        assert_eq!(
+            tree(width, early).len(),
+            tree(width, late).len(),
+            "the hint changed the tree's height at {width} columns"
+        );
+    }
+}
+
+#[test]
 fn a_live_agent_groups_bullet_blinks_like_a_running_tool() {
     // The tree header is the round's "this is happening now" bullet, so it
     // blinks on the same clock as a running tool cell — the two are on screen

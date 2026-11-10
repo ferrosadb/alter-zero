@@ -78,6 +78,15 @@ shape in `main.rs` barely changes.
 - **`restore` flushes leftovers.** A quit can land between queueing and the
   next tick (e.g. a notice, then an instant Ctrl+C); `restore` writes any
   pending lines before leaving raw mode so committed content is never lost.
+- **A batch can be held back from the queue** (`hold`, added later —
+  `docs/settling.md`). One atomic frame per commit removed the flash, but a
+  frame can still *move* the box: a live cell that ends is taller than what
+  it commits, so committing at once pulled the box up until the next cell
+  pushed it back. A finished cell's lines therefore wait, held, while the
+  cell still stands on its rows in the strip; `release_held` queues them for
+  the frame that draws whatever took those rows, `insert_before` queues them
+  ahead of anything that commits meanwhile (order by construction), `reflow`
+  drops them with the queue and `restore` flushes them.
 - **Ctrl+O enter paints immediately.** The `ToggleToolView` arm draws the
   overlay right after `enter_overlay` instead of waiting for the tick, closing
   the black-flash window. (Exit was already followed by `repaint_conversation`,

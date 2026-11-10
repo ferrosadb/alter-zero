@@ -22,7 +22,7 @@
 //! conversation shows of them.
 
 use super::theme::*;
-use super::tool::{bullet_span, command_display_lines, result_row};
+use super::tool::{bullet_span, clock_row, command_display_lines, result_row};
 use super::wrap::{cols, truncate_cols, wrap_output};
 use super::*;
 use crate::app::{
@@ -215,18 +215,27 @@ fn path_hint_rows(path: &str, room: usize) -> Vec<Line<'static>> {
 /// A command on the `⎿` row — `$ ` and then every line of it, **wrapped**
 /// rather than cut, each row after the first hanging under the text after
 /// the `$ ` — with its `clock` whole at the end: on the last row when it
-/// fits there, else on a row of its own.
-fn command_hint_rows(command: &str, clock: Option<&str>, room: usize) -> Vec<Line<'static>> {
+/// fits there, else on a row of its own. The Ctrl+B hint closes the clock
+/// only where the row it is on still fits — it never takes a row, so the
+/// cell's height does not change when the hint comes due
+/// (`docs/settling.md`).
+fn command_hint_rows(command: &str, clock: Option<&GroupClock>, room: usize) -> Vec<Line<'static>> {
     let hang = " ".repeat(cols(TOOL_GROUP_COMMAND_PROMPT));
     let text_room = room.saturating_sub(cols(TOOL_GROUP_COMMAND_PROMPT)).max(1);
     let mut rows = wrap_output(command, u16::try_from(text_room).unwrap_or(u16::MAX));
     if let Some(clock) = clock {
+        let used = rows.last().map_or(0, |last| cols(last.trim_end()));
+        // Beside the command when it fits there — with the hint, if that
+        // fits too — else the clock alone on a row of its own.
+        let beside = text_room.saturating_sub(used + 1);
+        let clause = clock_row("", &clock.clauses, clock.hint, beside);
         match rows.last_mut() {
-            Some(last) if cols(last.trim_end()) + cols(clock) <= text_room => {
+            Some(last) if used + 1 + cols(&clause) <= text_room => {
                 last.truncate(last.trim_end().len());
-                last.push_str(clock);
+                last.push(' ');
+                last.push_str(&clause);
             }
-            _ => rows.push(clock.trim_start().to_string()),
+            _ => rows.push(clock_row("", &clock.clauses, clock.hint, text_room)),
         }
     }
     rows.into_iter()
@@ -319,7 +328,7 @@ pub(super) fn live_group_lines(
             HintText::Path(path) => lines.extend(path_hint_rows(&path, room)),
             HintText::Command(command) => {
                 let clock = group_clock(app, item, with_queue);
-                lines.extend(command_hint_rows(&command, clock.as_deref(), room));
+                lines.extend(command_hint_rows(&command, clock.as_ref(), room));
             }
         }
     }
@@ -327,11 +336,20 @@ pub(super) fn live_group_lines(
 }
 
 /// What the hint row adds while it shows a command that has run
-/// [`TOOL_GROUP_CLOCK_DELAY`]: ` (12s)`, then ` (12s · 34 lines)` once it
-/// has printed — the reference's collapsed group, so a long search does not
-/// look frozen. Only the running command's own value wears it: a row still
-/// showing an earlier call never borrows the clock of the one behind it.
-fn group_clock(app: &App, shown: GroupHintItem<'_>, with_queue: bool) -> Option<String> {
+/// [`TOOL_GROUP_CLOCK_DELAY`]: the clauses of its clock — `(12s)`, then
+/// `(12s · 34 lines)` once it has printed — and the Ctrl+B hint that closes
+/// them once it is due.
+struct GroupClock {
+    clauses: Vec<String>,
+    hint: Option<super::tool::CtrlBHint>,
+}
+
+/// The running command's [`GroupClock`] — the reference's collapsed group, so
+/// a long search does not look frozen. Only the running command's own value
+/// wears it: a row still showing an earlier call never borrows the clock of
+/// the one behind it. A long search can go to the background like any
+/// command — its cell is the group's, so the hint rides the group's clock.
+fn group_clock(app: &App, shown: GroupHintItem<'_>, with_queue: bool) -> Option<GroupClock> {
     let GroupHintItem::Call(shown) = shown else {
         return None;
     };
@@ -343,10 +361,14 @@ fn group_clock(app: &App, shown: GroupHintItem<'_>, with_queue: bool) -> Option<
     let elapsed = app
         .command_elapsed()
         .filter(|elapsed| *elapsed >= TOOL_GROUP_CLOCK_DELAY)?;
-    let time = crate::app::format_elapsed(elapsed.as_secs());
-    Some(match command_display_lines(running).len() {
-        0 => format!(" ({time})"),
-        1 => format!(" ({time}{TOOL_CLOCK_SEPARATOR}1 line)"),
-        printed => format!(" ({time}{TOOL_CLOCK_SEPARATOR}{printed} lines)"),
+    let mut clauses = vec![crate::app::format_elapsed(elapsed.as_secs())];
+    match command_display_lines(running).len() {
+        0 => {}
+        1 => clauses.push("1 line".to_string()),
+        printed => clauses.push(format!("{printed} lines")),
+    }
+    Some(GroupClock {
+        clauses,
+        hint: super::live::due_ctrl_b_hint(app, running),
     })
 }

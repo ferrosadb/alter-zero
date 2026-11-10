@@ -121,12 +121,21 @@ pub struct InlineViewport {
     /// rewind) *drops* the queue instead: its purge-rebuilt tail regenerates
     /// everything pending from history.
     ///
+    /// Beside the queue sit the batches **held back** from it ([`hold`]): a
+    /// settling cell's committed lines, kept off scrollback while the cell
+    /// still stands on its rows in the strip (`docs/settling.md`). Any later
+    /// [`insert_before`] queues them first, [`release_held`] queues them when
+    /// the frame lets the cell go, [`reflow`] drops them with the queue and
+    /// [`restore`] flushes them.
+    ///
     /// [`insert_before`]: InlineViewport::insert_before
     /// [`draw`]: InlineViewport::draw
     /// [`reflow`]: InlineViewport::reflow
     /// [`restore`]: InlineViewport::restore
     /// [`draw_overlay`]: InlineViewport::draw_overlay
-    pending: Vec<Line<'static>>,
+    /// [`hold`]: InlineViewport::hold
+    /// [`release_held`]: InlineViewport::release_held
+    commits: Commits,
     /// Set when the screen moved **one-way while an inline modal was open**
     /// ([`ui::region_is_modal`] — the tool-permission prompt): its growth (or
     /// a commit under it) scrolled chat into the terminal's scrollback, or a
@@ -200,6 +209,76 @@ pub struct InlineViewport {
     /// [`init`]: InlineViewport::init
     /// [`take_typeahead`]: InlineViewport::take_typeahead
     typeahead: Vec<u8>,
+}
+
+/// The lines on their way to scrollback: those queued for the next flush,
+/// and the batches **held back** from it.
+///
+/// A held batch is a settling cell's committed lines (`docs/settling.md`): a
+/// live cell that has ended still stands on its rows in the strip, and its
+/// lines must not reach scrollback until the frame that lets it go — else the
+/// region loses those rows before anything has taken them, and the box jumps
+/// up. Order is kept **by construction** rather than by every commit site
+/// remembering: anything queued while batches are held is newer than they
+/// are, so [`queue`](Commits::queue) releases them first.
+///
+/// Pure bookkeeping, split from the viewport so the ordering is unit-tested
+/// while the terminal I/O around it is smoke-covered.
+#[derive(Default)]
+struct Commits {
+    /// Lines the next flush writes above the viewport, in order.
+    pending: Vec<Line<'static>>,
+    /// Batches held back from it, oldest first.
+    held: VecDeque<Vec<Line<'static>>>,
+}
+
+impl Commits {
+    /// Queue `lines` for the next flush. Whatever is held is older than what
+    /// commits now, so it goes first — unless `lines` is empty: a commit of
+    /// nothing puts nothing newer in scrollback, so it releases nothing.
+    fn queue(&mut self, lines: Vec<Line<'static>>) {
+        if !lines.is_empty() {
+            self.release(usize::MAX);
+        }
+        self.pending.extend(lines);
+    }
+
+    /// Hold `lines` back from the next flush, behind the batches already held.
+    fn hold(&mut self, lines: Vec<Line<'static>>) {
+        self.held.push_back(lines);
+    }
+
+    /// Queue the oldest `count` held batches (all of them, past the end),
+    /// behind what is queued already.
+    fn release(&mut self, count: usize) {
+        let count = count.min(self.held.len());
+        for batch in self.held.drain(..count) {
+            self.pending.extend(batch);
+        }
+    }
+
+    /// How many batches are held back.
+    fn held_len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Rows the next flush writes.
+    const fn pending_rows(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Take the queued lines for the flush, releasing their capacity (a turn
+    /// that streamed under an overlay can queue thousands of rows).
+    fn take_pending(&mut self) -> Vec<Line<'static>> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Drop everything queued and held: a rebuild regenerates it from
+    /// history.
+    fn clear(&mut self) {
+        drop(std::mem::take(&mut self.pending));
+        self.held.clear();
+    }
 }
 
 impl InlineViewport {
@@ -303,7 +382,7 @@ impl InlineViewport {
             view,
             prev: None,
             overlay_prev: None,
-            pending: Vec::new(),
+            commits: Commits::default(),
             modal_scrolled: false,
             painted_bottom: top.saturating_add(height),
             keyboard_enhanced,
@@ -383,7 +462,7 @@ impl InlineViewport {
     /// [`insert_before`]: InlineViewport::insert_before
     #[must_use]
     pub const fn pending_rows(&self) -> usize {
-        self.pending.len()
+        self.commits.pending_rows()
     }
 
     /// Whether the screen moved one-way while an inline modal was open (see
@@ -486,7 +565,7 @@ impl InlineViewport {
         // flush, not a mid-stream collapse). Gated on pending lines: without a
         // flush the height change must flow through `ui::repin` below, whose
         // shrink is what blanks the rows an in-place shrink vacates.
-        let flushing = !self.pending.is_empty();
+        let flushing = self.commits.pending_rows() > 0;
         if flushing {
             self.view.height = height;
         }
@@ -601,8 +680,41 @@ impl InlineViewport {
     /// [`draw`]: InlineViewport::draw
     /// [`reflow`]: InlineViewport::reflow
     /// [`restore`]: InlineViewport::restore
+    ///
+    /// Lines **held back** ([`hold`]) are older than anything queued here, so
+    /// they are queued first: scrollback keeps the order things happened in
+    /// without any commit site knowing a line is held (`docs/settling.md`).
+    ///
+    /// [`hold`]: InlineViewport::hold
     pub fn insert_before(&mut self, lines: Vec<Line<'static>>) {
-        self.pending.extend(lines);
+        self.commits.queue(lines);
+    }
+
+    /// Commit `lines` but **hold them back** from the next flush — a settling
+    /// cell's committed lines, kept off scrollback while the cell still
+    /// stands on its rows in the strip (`docs/settling.md`). They reach
+    /// scrollback ahead of the next [`insert_before`], or when
+    /// [`release_held`] lets the cell go.
+    ///
+    /// [`insert_before`]: InlineViewport::insert_before
+    /// [`release_held`]: InlineViewport::release_held
+    pub fn hold(&mut self, lines: Vec<Line<'static>>) {
+        self.commits.hold(lines);
+    }
+
+    /// How many batches are held back ([`hold`]) — one per settling cell.
+    ///
+    /// [`hold`]: InlineViewport::hold
+    #[must_use]
+    pub fn held_len(&self) -> usize {
+        self.commits.held_len()
+    }
+
+    /// Queue the oldest `count` held batches for the next flush — the frame
+    /// that draws whatever took a settling cell's rows writes its lines with
+    /// it. `usize::MAX` releases every one.
+    pub fn release_held(&mut self, count: usize) {
+        self.commits.release(count);
     }
 
     /// Write any queued [`insert_before`] lines above the viewport and empty the
@@ -613,10 +725,10 @@ impl InlineViewport {
     /// [`draw`]: InlineViewport::draw
     /// [`restore`]: InlineViewport::restore
     fn flush_pending(&mut self) -> io::Result<()> {
-        if self.pending.is_empty() {
+        if self.commits.pending_rows() == 0 {
             return Ok(());
         }
-        let lines = std::mem::take(&mut self.pending);
+        let lines = self.commits.take_pending();
         self.write_above(lines)
     }
 
@@ -812,11 +924,11 @@ impl InlineViewport {
         app: &App,
     ) -> io::Result<()> {
         let height = height.clamp(1, self.screen.height.max(1));
-        // Take, don't clear: `clear` keeps the Vec's high-water capacity for
-        // the rest of the session (a turn that streamed under an overlay can
-        // queue thousands of rows), while the flush path's `mem::take` already
-        // releases it — the rebuild drops the stale queue the same way.
-        drop(std::mem::take(&mut self.pending));
+        // The stale queue goes, capacity and all (a turn that streamed under
+        // an overlay can queue thousands of rows) — and with it the batches
+        // held back for settling cells: both are in history, so the tail
+        // carries them (`docs/settling.md`).
+        self.commits.clear();
         // A modal open right now takes its seat by this rebuild's real write —
         // note it (`modal_scrolled`): the close must purge-rebuild or its
         // collapse strands the box above the rows it vacates. Recording this
@@ -1059,7 +1171,10 @@ impl InlineViewport {
         // the old box's rows shifted and torn where the region now sits —
         // blank them, which is what `write_above`'s own clear did for this
         // one path before commits repainted in place (`docs/slow-stream.md`).
-        let flushed = !self.pending.is_empty();
+        // A held batch is committed content too — a quit while a cell is
+        // still settling keeps its lines (`docs/settling.md`).
+        self.commits.release(usize::MAX);
+        let flushed = self.commits.pending_rows() > 0;
         self.flush_pending()?;
         if flushed {
             self.backend
@@ -1539,7 +1654,11 @@ mod tests {
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Style;
 
-    use super::{OverlayPaint, keyboard_enhancement_disabled, overlay_paint, visible_cells};
+    use ratatui::text::Line;
+
+    use super::{
+        Commits, OverlayPaint, keyboard_enhancement_disabled, overlay_paint, visible_cells,
+    };
 
     /// Render `line` into a `width`-wide one-row buffer the way every full-cell
     /// paint does, then list what [`visible_cells`] would actually send to the
@@ -1667,6 +1786,95 @@ mod tests {
             "c",
             "row 1 starts fresh — a shadow never crosses a row boundary"
         );
+    }
+
+    /// The text of each line of `lines`.
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A batch of committed lines from its row texts.
+    fn batch(rows: &[&str]) -> Vec<Line<'static>> {
+        rows.iter()
+            .map(|row| Line::from((*row).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn held_lines_reach_scrollback_ahead_of_whatever_commits_next() {
+        // A settling cell's lines wait for the frame that lets it go — but
+        // anything committed meanwhile is newer, and scrollback is in order
+        // (docs/settling.md). No commit site has to know a line is held.
+        let mut commits = Commits::default();
+        commits.hold(batch(&["Thought for 2s", ""]));
+        assert_eq!(commits.pending_rows(), 0, "held back from the next flush");
+        commits.queue(batch(&["● Skill(web-search)", ""]));
+        assert_eq!(commits.held_len(), 0);
+        assert_eq!(
+            texts(&commits.take_pending()),
+            ["Thought for 2s", "", "● Skill(web-search)", ""]
+        );
+    }
+
+    #[test]
+    fn an_empty_commit_releases_nothing() {
+        // A reply that has completed no line yet commits an empty batch on
+        // every chunk: nothing newer reached scrollback, so nothing is owed.
+        let mut commits = Commits::default();
+        commits.hold(batch(&["Thought for 2s", ""]));
+        commits.queue(Vec::new());
+        assert_eq!(commits.held_len(), 1);
+        assert_eq!(commits.pending_rows(), 0);
+    }
+
+    #[test]
+    fn releasing_takes_the_oldest_batches_in_order() {
+        let mut commits = Commits::default();
+        commits.hold(batch(&["first", ""]));
+        commits.hold(batch(&["second", ""]));
+        commits.hold(batch(&["third", ""]));
+        commits.release(2);
+        assert_eq!(commits.held_len(), 1);
+        assert_eq!(texts(&commits.take_pending()), ["first", "", "second", ""]);
+        // Past the end is everything.
+        commits.release(usize::MAX);
+        assert_eq!(commits.held_len(), 0);
+        assert_eq!(texts(&commits.take_pending()), ["third", ""]);
+    }
+
+    #[test]
+    fn released_lines_follow_what_was_already_queued() {
+        // A cell let go after an earlier line was queued this frame lands
+        // under it: the queue is the order things happened in.
+        let mut commits = Commits::default();
+        commits.queue(batch(&["a reply line"]));
+        commits.hold(batch(&["● Bash(make)", ""]));
+        commits.release(1);
+        assert_eq!(
+            texts(&commits.take_pending()),
+            ["a reply line", "● Bash(make)", ""]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_drops_what_is_queued_and_what_is_held() {
+        // The rebuild's tail regenerates both from history; flushing either
+        // would write the lines twice.
+        let mut commits = Commits::default();
+        commits.queue(batch(&["queued"]));
+        commits.hold(batch(&["held"]));
+        commits.clear();
+        assert_eq!(commits.pending_rows(), 0);
+        assert_eq!(commits.held_len(), 0);
+        assert!(commits.take_pending().is_empty());
     }
 
     /// Two `width`-wide overlay frames from their row texts.

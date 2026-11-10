@@ -447,8 +447,9 @@ and `smoke.sh` Phase 130 drives it in the real binary
   profile)` — the agent named by its description from the moment the call
   is announced (`tools::summarize_call_naming`, the bash sessions' lookup
   answering agent ids too). A waiting `AgentOutput` renders like a running
-  command: the streamed lines tail under a `(12s · wait 5m)` clock row and
-  `(ctrl+b to stop waiting)`.
+  command: the streamed lines tail under a `(12s · wait 5m)` clock row,
+  whose clause closes on `ctrl+b to stop waiting` once the hint is due
+  (`docs/tool-streaming.md` *The hint closes the clause*).
 - **The roster**: a resumed agent reappears on it (or reopens there, if
   still lingering) with a fresh runtime clock; one the lead stopped turns red
   without the user's `x to clear` row, and lingers the natural 30 seconds.

@@ -91,7 +91,7 @@ a `Saved the conversation to …` toast would read as a page still waiting
 for an answer. The page works **mid-turn** like every picker — it only
 replaces the composer, the streaming strip keeps its rows above it, and the
 export then carries the live tail exactly as Ctrl+O shows it — and, like
-every picker, it blanks the running cell's `(ctrl+b to run in background)`
+every picker, it blanks the running cell's `ctrl+b to run in background`
 hint while open (`App::background_hint_elapsed`), since it would swallow
 the Ctrl+B the hint advertises.
 

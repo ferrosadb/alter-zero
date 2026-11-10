@@ -72,6 +72,7 @@ mod reasoning;
 mod resume_view;
 mod secrets_view;
 mod settings_view;
+mod settling;
 mod skills_view;
 mod spinner_view;
 mod status;
@@ -146,6 +147,10 @@ pub use self::reasoning::reasoning_lines;
 pub use self::resume_view::render_resume_picker;
 pub use self::secrets_view::{render_secrets_picker, secrets_picker_height, secrets_view_lines};
 pub use self::settings_view::{render_settings, settings_height};
+pub use self::settling::{
+    LivePicture, SettleGeometry, command_picture, group_picture, settle_frame, settle_plan,
+    settles_in_place, settling_cell, settling_holds, settling_lines, thought_picture,
+};
 pub use self::skills_view::{render_skills_menu, skills_menu_height};
 pub use self::spinner_view::{render_spinner_picker, spinner_picker_height};
 pub use self::status::{

@@ -6,7 +6,7 @@ use crate::ui::theme::{
     TOOL_HEADER_MAX_COLS, USER_BULLET, shell_mode_color, tool_args_color, tool_diff_add_bg,
     tool_diff_add_color, tool_diff_del_color, user_bg_color,
 };
-use crate::ui::tool::{running_command_lines, tool_full_lines};
+use crate::ui::tool::{CommandClock, running_command_lines, tool_full_lines};
 use crate::ui::wrap::{WrapMode, cols, ellipsize, truncate_cols, wrap_output, wrap_verbatim};
 
 #[test]
@@ -388,7 +388,7 @@ fn running_command_lines_wraps_a_long_tail_line_instead_of_clipping() {
     let lines = running_command_lines(
         &t,
         &crate::app::LiveTail::default(),
-        Duration::from_secs(1),
+        CommandClock::bare(Duration::from_secs(1)),
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
@@ -413,21 +413,21 @@ fn running_command_lines_wraps_a_long_tail_line_instead_of_clipping() {
 #[test]
 fn preview_rows_counts_a_wrapped_running_tail() {
     // Strip sizing and paint agree when the tail wraps: preview_rows
-    // counts the wrapped rows (header + windowed tail + the clock row + the
-    // Ctrl+B hint), not one row per source line.
+    // counts the wrapped rows (header + windowed tail + the clock row), not
+    // one row per source line.
     let mut app = App::new();
     // The per-call cell: a reading command collapses into the read/search
     // group's cell otherwise (docs/tool-groups.md).
     app.settings_mut().verbose = true;
     app.begin_stream();
     app.start_tool("Bash", "cat log", None);
-    // Past the hint delay so the Ctrl+B hint row is part of the preview.
+    // Past the hint delay: the Ctrl+B hint is due, and takes no row.
     app.set_command_elapsed(Some(Duration::from_secs(3)));
     app.push_tool_output(&"y".repeat(70)); // 35 content cols → 2 rows
     assert_eq!(
         preview_rows(&app, 40),
-        5,
-        "header + 2 wrapped tail rows + the clock row + the Ctrl+B hint"
+        4,
+        "header + 2 wrapped tail rows + the clock row"
     );
 }
 

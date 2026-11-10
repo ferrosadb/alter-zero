@@ -46,6 +46,8 @@ mod reasoning;
 mod resume_view;
 mod secrets_view;
 mod settings_view;
+mod settling;
+mod settling_frames;
 mod skills_view;
 mod spinner_view;
 mod status;

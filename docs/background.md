@@ -329,7 +329,7 @@ beneath the region as they resolve (commits stay allowed while the band is
 open — unless its page is flowing, where they pause like under any other
 flowed view and the flow-exit rebuild regenerates them), so the transition
 running-cell → committed-cell reads exactly like it does over the composer. One consequence of the band owning every key: the
-running cell's delayed `(ctrl+b to run in background)` hint is suppressed
+running cell's delayed `ctrl+b to run in background` hint is suppressed
 while the band is open — `App::background_hint_elapsed` reads `None`, the
 permission-prompt rule — since Ctrl+B would not reach the runner from
 inside the band.
@@ -388,13 +388,28 @@ inside the band.
 
 ### Ctrl+B
 
-The running `bash` cell's live preview appends a dim
-`(ctrl+b to run in background)` row (live-only — never committed); the
-running `!` shell cell gets the same row. A running `bashwait` or `bashsend`
-cell gets `(ctrl+b to stop waiting)` instead: its session already runs in the
-background, so there the key ends the wait and the command keeps going. A
-`bashkill` gets no row at all, since the key does nothing to a kill
-(`ui::tool::ctrl_b_hint` picks which). The hint is **delayed**,
+The running `bash` cell's clock clause closes on a dim
+`ctrl+b to run in background` — `+18 lines (22s · wait 2m · ctrl+b to run in
+background)` — live-only, never committed; the running `!` shell cell's
+`⎿ Running… (4s · ctrl+b to run in background)` row carries it the same way.
+A running `bashwait` or `bashsend` cell reads `ctrl+b to stop waiting`
+instead: its session already runs in the background, so there the key ends
+the wait and the command keeps going. A `bashkill` gets no hint at all, since
+the key does nothing to a kill (`ui::tool::ctrl_b_hint` picks which).
+
+The hint **joins the clock row** rather than taking a row of its own
+(`ui::tool::clock_row`): a row that appeared three seconds in was a row the
+cell lost again when the command ended, and the box jumped by it
+(`docs/settling.md`). Where the row is too narrow for the whole hint it
+takes its shorter wording (`ctrl+b to background`, `ctrl+b to stop`), and
+where it is too narrow for that the hint is left out — the clock is what the
+row is for. The agent tree puts it in its header's dim hint
+(`(ctrl+o to expand · ctrl+b to run in background)`), and the collapsed
+read/search group in its own clock clause; only a lone live agent keeps it
+on a row of its own, since that cell commits on three rows too
+(`docs/agent-tool.md`).
+
+The hint is **delayed**,
 Claude-Code-style: it appears only once the command has been running for
 `ui::TOOL_BACKGROUND_HINT_DELAY` (3s), so a command that finishes right away
 never flashes it (it isn't needed for a fast command). The gate is the

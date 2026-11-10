@@ -20,7 +20,7 @@ sleep 0.4
 submit "$S43" '!sleep 300'
 # Wait for the Ctrl+B hint (it appears a few seconds into the run — the delay);
 # its presence confirms the command is running before we background it.
-wait_for 8 "$S43" -F "(ctrl+b to run in background)"
+wait_for 8 "$S43" -F "· ctrl+b to run in background)"
 tmux send-keys -t "$S43" C-b
 wait_for 3 "$S43" -F "· 1 shell"
 # Start a dummy turn, then kill the shell during its pre-stream pause: ↓ lights

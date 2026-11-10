@@ -35,8 +35,6 @@
 
 use std::time::Instant;
 
-use ratatui::text::Line;
-
 use alter_zero::app::BgCompletion;
 use alter_zero::background::BgEvent;
 use alter_zero::ui;
@@ -229,15 +227,13 @@ impl Session<'_> {
         if committing {
             let width = self.term.screen().width;
             // A completion can settle right after a turn whose strip just
-            // collapsed — reseat the viewport like every post-stream commit
-            // so the notice replaces the strip's rows in place (invariant 3).
-            // Mid-turn this re-asserts the current strip-aware height (a
-            // no-op sync; `paint_live` re-syncs before any pending flush).
-            let height = self.live_region_height();
-            self.term.set_view_height(height);
-            self.term
-                .insert_before(ui::background_notice_lines(&notice, width));
-            self.term.insert_before(vec![Line::default()]);
+            // collapsed — the viewport is reseated like every post-stream
+            // commit so the notice replaces the strip's rows in place
+            // (invariant 3). Mid-turn it lands where the agent read it,
+            // straight after a round's results: behind a cell still
+            // settling there it waits its turn (`Session::commit_cell`,
+            // docs/settling.md).
+            self.commit_cell(ui::background_notice_lines(&notice, width), None);
         }
     }
 
@@ -251,11 +247,8 @@ impl Session<'_> {
         self.app.record_agent_notice(notice);
         if committing {
             let width = self.term.screen().width;
-            let height = self.live_region_height();
-            self.term.set_view_height(height);
-            self.term
-                .insert_before(ui::agent_notice_lines(notice, width));
-            self.term.insert_before(vec![Line::default()]);
+            // The shell notice's rule (docs/settling.md).
+            self.commit_cell(ui::agent_notice_lines(notice, width), None);
         }
     }
 }

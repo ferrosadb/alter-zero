@@ -38,6 +38,7 @@
 //! | [`permission`] | The permission gate's session rules and the prompt's answers (`docs/permissions.md`). |
 //! | [`view`] | Drawing: the inline region, the overlays, the repaints, the status clocks. |
 //! | [`commit`] | Writing finished lines to scrollback — the one place invariant 4 is enforced. |
+//! | [`settle`] | Letting a finished live cell keep its rows until the next one takes them: the hold and the per-frame release (`docs/settling.md`). |
 //! | [`models`] | The reply backend and everything that selects it (`docs/llm.md`). |
 //! | [`config`] | Reading the environment: providers, keys, settings, permission rules. |
 //! | [`bootstrap`] | Assembling a [`Session`] before the first frame. |
@@ -105,6 +106,7 @@ pub(crate) mod recorder;
 pub(crate) mod resume;
 pub(crate) mod secrets;
 pub(crate) mod settings;
+pub(crate) mod settle;
 pub(crate) mod shell;
 pub(crate) mod spinner;
 pub(crate) mod startup;

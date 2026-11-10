@@ -64,8 +64,8 @@ fi
 # (docs/tool-streaming.md).
 batch_tail=""
 for _ in $(seq 1 200); do # up to ~20s — the tail streams as each ping runs
-	if grep -qaE '\+[0-9]+ lines \([0-9]+s · wait 2m\)' "$RAW39"; then
-		batch_tail="$(grep -aoE '\+[0-9]+ lines \([0-9]+s · wait 2m\)' "$RAW39" | head -4)"
+	if grep -qaE '\+[0-9]+ lines \([0-9]+s · wait 2m( · ctrl\+b to run in background)?\)' "$RAW39"; then
+		batch_tail="$(grep -aoE '\+[0-9]+ lines \([0-9]+s · wait 2m( · ctrl\+b to run in background)?\)' "$RAW39" | head -4)"
 		break
 	fi
 	sleep 0.1
@@ -81,4 +81,5 @@ tmux kill-session -t "$S_BATCH" 2>/dev/null
 # Phase 39: a running Bash(ping) cell TAILS its live output — the last lines plus
 # a `+N lines (Ns · wait 2m)` footer, Claude-Code's running-command look
 # with the call's timeout beside the elapsed (docs/tool-streaming.md).
-expect_has "$batch_tail" -E '\+[0-9]+ lines \([0-9]+s · wait 2m\)' "a running Bash(ping) cell did not tail its streamed output (no '+N lines (Ns · wait 2m)' footer)"
+# (The Ctrl+B hint joins the clause once it is due — docs/background.md.)
+expect_has "$batch_tail" -E '\+[0-9]+ lines \([0-9]+s · wait 2m( · ctrl\+b to run in background)?\)' "a running Bash(ping) cell did not tail its streamed output (no '+N lines (Ns · wait 2m)' footer)"

@@ -15,7 +15,7 @@ use super::*;
 /// One colour per state, on every frame: a running bullet's animation is the
 /// **blink** ([`bullet_span`]), never a second colour, so this is all the
 /// colour a cell ever wears. See `docs/tool-pulse.md`.
-fn tool_status_color(status: ToolStatus) -> Color {
+pub(super) fn tool_status_color(status: ToolStatus) -> Color {
     match status {
         ToolStatus::Waiting => tool_waiting_color(),
         ToolStatus::Running => tool_running_color(),
@@ -372,7 +372,7 @@ pub(super) fn result_row(index: usize, text: String) -> Line<'static> {
 /// A `⎿` row for a finished tool's **output** — a dim corner over white content
 /// ([`tool_output_color`]), so command/shell output reads like a normal reply.
 /// The placeholders keep the dim [`result_row`].
-fn output_row(index: usize, text: String) -> Line<'static> {
+pub(super) fn output_row(index: usize, text: String) -> Line<'static> {
     gutter_row(index, text, Some(tool_output_color()))
 }
 
@@ -384,24 +384,92 @@ pub(super) fn is_command_tool(tool: &ToolCall) -> bool {
     !tool.shell && COMMAND_TOOL_NAMES.contains(&tool.name.as_str())
 }
 
+/// What Ctrl+B does to a running call, as its clock clause says it: the
+/// whole hint, and the shorter wording a narrow row falls back to
+/// ([`clock_row`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CtrlBHint {
+    full: &'static str,
+    short: &'static str,
+}
+
 /// The live hint that says what Ctrl+B does to this running call: a `bash`
 /// launch or a `!` command moves to the background, a call waiting on a
 /// session that already runs there — `bashwait`, `bashsend`, the legacy
 /// tool — or on an agent — `agentoutput` (`docs/agent-tools.md`) — stops
 /// waiting, and `bashkill`, which never answers the key, hints nothing
 /// (`docs/background.md`).
-pub(super) fn ctrl_b_hint(tool: &ToolCall) -> Option<&'static str> {
+pub(super) fn ctrl_b_hint(tool: &ToolCall) -> Option<CtrlBHint> {
+    const BACKGROUND: CtrlBHint = CtrlBHint {
+        full: TOOL_BACKGROUND_HINT,
+        short: TOOL_BACKGROUND_HINT_SHORT,
+    };
+    const STOP_WAITING: CtrlBHint = CtrlBHint {
+        full: TOOL_STOP_WAITING_HINT,
+        short: TOOL_STOP_WAITING_HINT_SHORT,
+    };
     if tool.shell {
-        return Some(TOOL_BACKGROUND_HINT);
+        return Some(BACKGROUND);
     }
     match tool.name.as_str() {
-        "Bash" => Some(TOOL_BACKGROUND_HINT),
+        "Bash" => Some(BACKGROUND),
         crate::llm::tools::BASH_WAIT_DISPLAY
         | crate::llm::tools::BASH_SEND_DISPLAY
         | crate::llm::tools::BASH_SESSION_TOOL_DISPLAY
-        | crate::llm::tools::AGENT_OUTPUT_DISPLAY => Some(TOOL_STOP_WAITING_HINT),
+        | crate::llm::tools::AGENT_OUTPUT_DISPLAY => Some(STOP_WAITING),
         _ => None,
     }
+}
+
+/// What a running command's clock row counts and closes on: the command's
+/// own runtime — never the turn's (`docs/tool-streaming.md`) — and what
+/// Ctrl+B does to the call once saying so is due ([`ctrl_b_hint`]). One
+/// value, because one row shows both ([`clock_row`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CommandClock {
+    /// How long the command has run.
+    pub(super) elapsed: Duration,
+    /// The Ctrl+B hint that closes the clause, once it is due.
+    pub(super) hint: Option<CtrlBHint>,
+}
+
+impl CommandClock {
+    /// A clock nothing closes: the hint is not due yet, or Ctrl+B is not
+    /// this call's key (a subagent's command, `bashkill`).
+    pub(super) const fn bare(elapsed: Duration) -> Self {
+        Self {
+            elapsed,
+            hint: None,
+        }
+    }
+}
+
+/// The text of a running cell's **clock row** in `room` columns: `lead` —
+/// `+18 lines `, `Running… `, or nothing — then the clock clause, `clauses`
+/// joined by [`TOOL_CLOCK_SEPARATOR`] inside parentheses, closed by the
+/// Ctrl+B `hint` when one is due.
+///
+/// One row at every width, which is the point: the hint joins the clause
+/// only where the whole row still fits — in full, else in its shorter
+/// wording, else not at all — so a running cell's height never depends on
+/// whether the hint is showing (`docs/settling.md`). The clock itself is
+/// never cut: it is what the row is for.
+pub(super) fn clock_row(
+    lead: &str,
+    clauses: &[String],
+    hint: Option<CtrlBHint>,
+    room: usize,
+) -> String {
+    let row = |hint: Option<&str>| {
+        let mut parts: Vec<&str> = clauses.iter().map(String::as_str).collect();
+        parts.extend(hint);
+        format!("{lead}({})", parts.join(TOOL_CLOCK_SEPARATOR))
+    };
+    hint.into_iter()
+        .flat_map(|hint| [hint.full, hint.short])
+        .map(|hint| row(Some(hint)))
+        .find(|text| cols(text) <= room)
+        .unwrap_or_else(|| row(None))
 }
 
 /// A call's `args` summary as the screen shows it: a file tool's path
@@ -432,14 +500,21 @@ pub(super) fn more_hint_line(hidden: usize) -> Line<'static> {
 /// The live preview row for a running `!` shell command: `⎿ Running…
 /// ({elapsed})`. A shell turn hides the spinner status line entirely (see
 /// [`strip_has_status`]), so its running elapsed lives here instead — the
-/// boundary-supplied `elapsed`, [`format_elapsed`]-humanized like the status
-/// line's timer (`1m 5s`, never a bare `65s`). Only shown live in
-/// [`render_live`]; the committed cell renders its output, not `Running…`.
+/// boundary-supplied `clock`, [`format_elapsed`]-humanized like the status
+/// line's timer (`1m 5s`, never a bare `65s`) — closed by its Ctrl+B hint
+/// once that is due ([`clock_row`]). Only shown live in [`render_live`]; the
+/// committed cell renders its output, not `Running…`.
 /// See `docs/shell-command.md`.
-pub(super) fn shell_running_line(elapsed: Duration) -> Line<'static> {
+pub(super) fn shell_running_line(clock: CommandClock, width: u16) -> Line<'static> {
+    let room = usize::from(width).saturating_sub(cols(TOOL_RESULT_PREFIX));
     result_row(
         0,
-        format!("{TOOL_RUNNING} ({})", format_elapsed(elapsed.as_secs())),
+        clock_row(
+            &format!("{TOOL_RUNNING} "),
+            &[format_elapsed(clock.elapsed.as_secs())],
+            clock.hint,
+            room,
+        ),
     )
 }
 
@@ -615,70 +690,26 @@ fn pretty_json_line(line: &str) -> Option<String> {
 }
 
 /// The clock clause every shape of the running command cell carries —
-/// `(22s · wait 1m 50s)`: the command's own `elapsed`
-/// ([`format_elapsed`]-humanized, ticking) beside how long its call waits for
+/// `(22s · wait 1m 50s)`, as its two parts: the command's own `elapsed`
+/// ([`format_elapsed`]-humanized, ticking) and how long its call waits for
 /// it (`wait_ms`, [`format_timeout`]-humanized as a whole limit) — a wait, not
 /// a deadline: the command goes on as a session when it passes
 /// (`docs/bash-tools.md`, `docs/tool-streaming.md` *The clock row is always
-/// there*).
-fn command_clock_clause(elapsed: Duration, wait_ms: u64) -> String {
-    format!(
-        "({}{TOOL_CLOCK_SEPARATOR}{TOOL_TIMEOUT_LABEL}{})",
+/// there*). [`clock_row`] joins them, and closes them with the Ctrl+B hint.
+fn command_clock_clauses(elapsed: Duration, wait_ms: u64) -> Vec<String> {
+    vec![
         format_elapsed(elapsed.as_secs()),
-        format_timeout(wait_ms)
-    )
+        format!("{TOOL_TIMEOUT_LABEL}{}", format_timeout(wait_ms)),
+    ]
 }
 
-/// The live preview for a **running** command-style backend tool (`bash`): the
-/// coloured `● name(args)` header, a window of [`TOOL_PEEK_ROWS`] display
-/// **rows** of its output under the `⎿` gutter — the *tail*, what just
-/// streamed, ending at the lowest row **still moving** (`live`'s
-/// [`LiveTail::anchor`]): the output's last row for every command whose
-/// newest output is at its end, and the bar still redrawing for a program
-/// that leaves finished rows below it, pacman's parallel downloads
-/// (`docs/tool-streaming.md` *The window follows what is still moving*) —
-/// then the **clock row** — `+{hidden} lines ({elapsed} · wait
-/// {limit})` when any display rows are fully hidden, above or below the
-/// window, the bare `({elapsed} · wait {limit})` when none are, and for a
-/// command that has printed nothing yet the clause rides the corner row itself:
-/// `⎿ Running… ({elapsed} · wait {limit})`. The clause is on the cell in
-/// **every** shape, so a silent `sleep 100` no longer sits on a bare
-/// `Running…` for as long as it takes, and the limit is the model's own
-/// `wait` read off the call's verbatim arguments
-/// ([`bash_wait_ms`](crate::llm::tools::bash_wait_ms) — the executor's
-/// default-and-clamp rule, so the cell names exactly what the call waits).
-/// This is Claude-Code's running-command look (the mock;
-/// `docs/tool-streaming.md`) with the wait beside the clock — the asymmetric twin of the finished
-/// head peek in [`tool_lines`]. The `elapsed` is boundary-supplied (like the
-/// shell running row and the status timer), so this is drawn from
-/// [`preview_tool_lines`] where `App` is in hand.
-///
-/// Long lines **word-wrap, spaces preserved** ([`wrap_output`] — the same
-/// wrapper the finished peek and the Ctrl+O view use, so alignment survives
-/// and prose breaks at words) instead of clipping at the width; the window is
-/// counted in wrapped rows so a single long line tail-follows its own newest
-/// rows without growing the strip past its budget. Walking the source lines
-/// newest-first wraps only what the window can show — never the whole
-/// retained buffer — per animation frame.
-///
-/// Two clocks ride in: `elapsed` is how long the command has run (the clock
-/// row's first number), `pulse` is the frame phase its bullet blinks at.
-/// Live-only by construction — only the strip calls this — so the blink is
-/// unconditional here (`docs/tool-pulse.md`).
-pub(super) fn running_command_lines(
-    tool: &ToolCall,
-    live: &LiveTail,
-    elapsed: Duration,
-    pulse: Duration,
-    width: u16,
-    paths: &PathDisplay,
-) -> Vec<Line<'static>> {
-    let mut lines = tool_header_lines(tool, width, /*collapsed=*/ true, Some(pulse), paths);
-    // The wait the call runs under — a session call's own, not `bash`'s
-    // (`docs/bash-tools.md`). A companion's display name lowercases to its
-    // wire name; the legacy tool's has an underscore to put back.
+/// How long the call `tool` makes waits for its command, in milliseconds —
+/// a session call's own wait, not `bash`'s (`docs/bash-tools.md`). A
+/// companion's display name lowercases to its wire name; the legacy tool's
+/// has an underscore to put back.
+fn command_wait_ms(tool: &ToolCall) -> u64 {
     let arguments = tool.arguments.as_deref();
-    let wait_ms = match tool.name.as_str() {
+    match tool.name.as_str() {
         "Bash" => crate::llm::tools::bash_wait_ms(arguments),
         // A wait on an agent, not a session (docs/agent-tools.md).
         crate::llm::tools::AGENT_OUTPUT_DISPLAY => {
@@ -688,14 +719,46 @@ pub(super) fn running_command_lines(
             crate::llm::tools::session_wait_ms(crate::llm::tools::BASH_SESSION_TOOL_NAME, arguments)
         }
         other => crate::llm::tools::session_wait_ms(&other.to_ascii_lowercase(), arguments),
-    };
-    let clock = command_clock_clause(elapsed, wait_ms);
+    }
+}
+
+/// The window a running command's cell shows of its output: the display
+/// rows on screen, oldest first, and how many rows sit outside it.
+///
+/// The one walk behind the live cell ([`running_command_lines`]) and the
+/// picture it leaves when the command ends
+/// ([`settling::command_picture`](super::settling::command_picture)), so the
+/// rows a finished cell keeps are the rows the running one stood on by
+/// construction (`docs/settling.md`).
+pub(super) struct CommandTail {
+    /// The rows in the window — empty for a command that has printed nothing.
+    pub(super) window: Vec<String>,
+    /// Every row the window leaves out — above it, and below it when it ends
+    /// on a moving line with finished rows after it: what Ctrl+O adds.
+    pub(super) hidden: usize,
+}
+
+/// The [`CommandTail`] of `tool`'s output as streamed so far: a window of
+/// [`TOOL_PEEK_ROWS`] display **rows** ending at the lowest row **still
+/// moving** (`live`'s [`LiveTail::anchor`]) — the output's last row for every
+/// command whose newest output is at its end, and the bar still redrawing for
+/// a program that leaves finished rows below it, pacman's parallel downloads
+/// (`docs/tool-streaming.md` *The window follows what is still moving*).
+///
+/// Long lines **word-wrap, spaces preserved** ([`wrap_output`] — the same
+/// wrapper the finished peek and the Ctrl+O view use, so alignment survives
+/// and prose breaks at words) instead of clipping at the width; the window is
+/// counted in wrapped rows so a single long line tail-follows its own newest
+/// rows without growing the strip past its budget. Walking the source lines
+/// newest-first wraps only what the window can show — never the whole
+/// retained buffer — per animation frame.
+pub(super) fn command_tail(tool: &ToolCall, live: &LiveTail, width: u16) -> CommandTail {
     let display = command_display_lines(tool);
     if display.is_empty() {
-        // Nothing printed yet: the clause rides the `⎿ Running…` row, so a
-        // silent command still shows it is alive and how long it may be.
-        lines.push(result_row(0, format!("{TOOL_RUNNING} {clock}")));
-        return lines;
+        return CommandTail {
+            window: Vec::new(),
+            hidden: 0,
+        };
     }
     let peek_width = (width as usize)
         .saturating_sub(cols(TOOL_RESULT_PREFIX))
@@ -742,23 +805,80 @@ pub(super) fn running_command_lines(
         }
         at += rows;
     }
-    // Every row the window leaves out — above it, and below it when it
-    // ends on a moving line with finished rows after it: what Ctrl+O adds.
     let hidden = total.saturating_sub(window.len());
-    let shown = window.len();
-    for (i, row) in window.into_iter().enumerate() {
+    CommandTail { window, hidden }
+}
+
+/// What a clock row opens with when its cell hides `hidden` rows: `+18 lines `
+/// in front of the clause, nothing when the output fits.
+pub(super) fn hidden_lead(hidden: usize) -> String {
+    if hidden > 0 {
+        format!("+{hidden} lines ")
+    } else {
+        String::new()
+    }
+}
+
+/// The live preview for a **running** command-style backend tool (`bash`): the
+/// coloured `● name(args)` header, the [`command_tail`] window of its output
+/// under the `⎿` gutter — the *tail*, what just streamed — then the **clock
+/// row** — `+{hidden} lines ({elapsed} · wait {limit})` when any display rows
+/// are fully hidden, above or below the window, the bare `({elapsed} · wait
+/// {limit})` when none are, and for a command that has printed nothing yet the
+/// clause rides the corner row itself: `⎿ Running… ({elapsed} · wait {limit})`.
+/// The clause is on the cell in **every** shape, so a silent `sleep 100` no
+/// longer sits on a bare `Running…` for as long as it takes, and the limit is
+/// the model's own `wait` read off the call's verbatim arguments
+/// ([`bash_wait_ms`](crate::llm::tools::bash_wait_ms) — the executor's
+/// default-and-clamp rule, so the cell names exactly what the call waits).
+/// This is Claude-Code's running-command look (the mock;
+/// `docs/tool-streaming.md`) with the wait beside the clock — the asymmetric twin of the finished
+/// head peek in [`tool_lines`]. The `clock` is boundary-supplied (like the
+/// shell running row and the status timer), so this is drawn from
+/// [`preview_tool_lines`] where `App` is in hand.
+///
+/// The clock's Ctrl+B hint, once it is due, **closes the clock clause**
+/// rather than taking a row of its own ([`clock_row`]), so the cell's height
+/// follows its output and never the clock.
+///
+/// Two clocks ride in: `clock` is how long the command has run (the clock
+/// row's first number), `pulse` is the frame phase its bullet blinks at.
+/// Live-only by construction — only the strip calls this — so the blink is
+/// unconditional here (`docs/tool-pulse.md`).
+pub(super) fn running_command_lines(
+    tool: &ToolCall,
+    live: &LiveTail,
+    clock: CommandClock,
+    pulse: Duration,
+    width: u16,
+    paths: &PathDisplay,
+) -> Vec<Line<'static>> {
+    let CommandClock { elapsed, hint } = clock;
+    let mut lines = tool_header_lines(tool, width, /*collapsed=*/ true, Some(pulse), paths);
+    let clauses = command_clock_clauses(elapsed, command_wait_ms(tool));
+    let room = usize::from(width).saturating_sub(cols(TOOL_RESULT_PREFIX));
+    let tail = command_tail(tool, live, width);
+    if tail.window.is_empty() {
+        // Nothing printed yet: the clause rides the `⎿ Running…` row, so a
+        // silent command still shows it is alive and how long it may be.
+        lines.push(result_row(
+            0,
+            clock_row(&format!("{TOOL_RUNNING} "), &clauses, hint, room),
+        ));
+        return lines;
+    }
+    let shown = tail.window.len();
+    for (i, row) in tail.window.into_iter().enumerate() {
         lines.push(output_row(i, row));
     }
     // The clock row closes the cell whatever is hidden: `+N lines` in front
     // of the clause when rows sit outside the window, the clause alone when
     // the output fits. A continuation row (index ≥ 1) so it indents under
     // the content column; it is meta, so it stays the dim `result_row`.
-    let footer = if hidden > 0 {
-        format!("+{hidden} lines {clock}")
-    } else {
-        clock
-    };
-    lines.push(result_row(shown, footer));
+    lines.push(result_row(
+        shown,
+        clock_row(&hidden_lead(tail.hidden), &clauses, hint, room),
+    ));
     lines
 }
 

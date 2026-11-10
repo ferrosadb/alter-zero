@@ -33,7 +33,7 @@ submit "$S105" "!echo FLOWCONV_MARKER_105"
 sleep 0.6
 submit "$S105" "!sh $BGF_SCRIPT"
 # Wait past TOOL_BACKGROUND_HINT_DELAY, then hand the run to the registry.
-wait_for 8 "$S105" -F "(ctrl+b to run in background)"
+wait_for 8 "$S105" -F "· ctrl+b to run in background)"
 tmux send-keys -t "$S105" C-b
 sleep 0.5
 tmux send-keys -t "$S105" Down # focus the footer's shell indicator

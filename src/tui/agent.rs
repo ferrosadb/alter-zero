@@ -72,7 +72,7 @@ impl Session<'_> {
         let recorded = self.begin_local_agent_settle(id, width);
         if self.app.stop_agent_by_lead(id) {
             if on_screen {
-                self.commit_agent_tail(recorded, width);
+                self.commit_agent_tail(recorded, width, None);
             }
             self.agent_clocks.remove(id);
             self.agent_thinking_clocks.remove(id);
@@ -226,11 +226,20 @@ impl Session<'_> {
         // owes it — see `commit_agent_view_event`.
         let recorded = self.app.agent(id).map_or(0, |run| run.history.len());
         let was_final = self.app.agent(id).is_some_and(|run| run.status.is_final());
+        // What the agent's running command leaves in its strip, taken before
+        // the fold resolves it — the main view's rule: the cell keeps the row
+        // it ran on until the next cell takes it (docs/settling.md).
+        let picture = match &event {
+            StreamEvent::ToolEnd { ok, .. } if viewing => {
+                ui::command_picture(&self.app, *ok, width)
+            }
+            _ => None,
+        };
         let mut settled =
             self.app
                 .apply_agent_settled(id, &event, matches!(settle, Some((true, _))));
         if viewing {
-            self.commit_agent_view_event(&event, width, recorded);
+            self.commit_agent_view_event(&event, width, recorded, picture);
         }
         // What the withdrawal took had reached the view's scrollback: rebuild
         // it from the agent's transcript, which no longer holds any of it —
@@ -424,7 +433,7 @@ impl Session<'_> {
         if let Some((id, recorded)) = owed
             && self.viewing_agent(&id)
         {
-            self.commit_agent_tail(recorded, width);
+            self.commit_agent_tail(recorded, width, None);
         }
     }
 
@@ -446,25 +455,28 @@ impl Session<'_> {
     /// A no-op when no phase is open (the display is off, or it streamed no
     /// text), so the call sites need no condition of their own.
     ///
-    /// **Reseat before you commit** (invariant 3): the strip loses the live
-    /// block's rows as the cell lands, so the box must not rise off the
-    /// bottom. See `docs/agent-view-streaming.md`.
+    /// The block **stands until its rows are taken**, like the main
+    /// session's ([`Session::commit_cell`], `docs/settling.md`): unchanged
+    /// while the agent writes its call, the line appearing alone in the
+    /// frame the agent's next cell lands, so the box does not jump up in
+    /// between. See `docs/agent-view-streaming.md`.
     fn settle_agent_reasoning(&mut self, id: &str, viewing: bool, width: u16) {
         let secs = self
             .agent_thinking_clocks
             .remove(id)
             .map_or(0, |start| start.elapsed().as_secs());
+        // What the live block leaves in the view's strip, before the phase is
+        // recorded (docs/settling.md) — only this agent's own view shows it.
+        let picture = viewing
+            .then(|| ui::thought_picture(&self.app, width, secs))
+            .flatten();
         let Some(reasoning) = self.app.finish_agent_reasoning(id, secs) else {
             return;
         };
         if !viewing {
             return;
         }
-        let height = self.live_region_height();
-        self.term.set_view_height(height);
-        self.term
-            .insert_before(ui::reasoning_lines(&reasoning, width));
-        self.term.insert_before(vec![Line::default()]);
+        self.commit_cell(ui::reasoning_lines(&reasoning, width), picture);
     }
 
     /// Is `id`'s session the conversation currently on the inline screen?
@@ -495,7 +507,7 @@ impl Session<'_> {
     /// ([`Session::on_agent_event`]'s flush block), a settled thought to
     /// [`Session::settle_agent_reasoning`], and a hook note is invisible
     /// inline by design (`docs/hooks.md`).
-    fn commit_agent_tail(&mut self, recorded: usize, width: u16) {
+    fn commit_agent_tail(&mut self, recorded: usize, width: u16, picture: Option<ui::LivePicture>) {
         let Some(run) = self.app.viewed_agent() else {
             return;
         };
@@ -504,7 +516,9 @@ impl Session<'_> {
         // a whole batch at once — the running call and each `⎿ Waiting…`
         // sibling behind it (`AgentRun::interrupt`, `docs/interrupt.md`) — and
         // committing only the newest item is how a resolved cell goes missing.
-        let owed: Vec<Vec<Line<'static>>> = (recorded..run.history.len())
+        // Each is tagged with whether it is a call's **cell** — which can
+        // settle in place — or anything else, which commits at once.
+        let owed: Vec<(Vec<Line<'static>>, bool)> = (recorded..run.history.len())
             .filter_map(|index| match &run.history[index] {
                 // A resolved call — its collapsed cell, through the same
                 // history-derived builder the rebuild uses (the history up to
@@ -512,15 +526,16 @@ impl Session<'_> {
                 // ends (`docs/mcp.md`).
                 HistoryItem::Tool(_) => {
                     ui::tool_commit_lines(&run.history[..=index], &run.tool_queue, width, paths)
+                        .map(|lines| (lines, true))
                 }
                 // The turn's `Done for Ns · {n} tokens` receipt
                 // (`docs/agent-tool.md`).
-                HistoryItem::Summary(summary) => Some(ui::summary_lines(summary, width)),
+                HistoryItem::Summary(summary) => Some((ui::summary_lines(summary, width), false)),
                 // A message the user queued into this agent, now that its loop
                 // has read it (`docs/queue.md`) — the bubble lands where the
                 // agent saw it, not where it was typed.
                 HistoryItem::Message(message) if message.role == Role::User => {
-                    Some(ui::message_lines(Role::User, &message.text, width))
+                    Some((ui::message_lines(Role::User, &message.text, width), false))
                 }
                 // What the agent's SubagentStop hooks said — its `● Ran 1
                 // SubagentStop hook` cell (docs/hooks.md *The hook-run
@@ -528,19 +543,26 @@ impl Session<'_> {
                 HistoryItem::HookNote(note) => note
                     .report
                     .as_ref()
-                    .map(|report| ui::hook_report_lines(report, width)),
+                    .map(|report| (ui::hook_report_lines(report, width), false)),
                 _ => None,
             })
-            .filter(|lines| !lines.is_empty())
+            .filter(|(lines, _)| !lines.is_empty())
             .collect();
         if owed.is_empty() {
             return;
         }
-        let height = self.live_region_height();
-        self.term.set_view_height(height);
-        for lines in owed {
-            self.term.insert_before(lines);
-            self.term.insert_before(vec![Line::default()]);
+        // The running command's picture belongs to the one cell its event
+        // resolved; a settle that resolved a whole batch at once ends the
+        // run, and nothing is held for it.
+        let mut picture = picture.filter(|_| owed.len() == 1);
+        for (lines, cell) in owed {
+            // A call's cell settles in place where it has rows to give up;
+            // everything else — a delivered message's bubble, a receipt, a
+            // hook's cell — waits behind one that is still settling, and
+            // otherwise commits behind the reseat (`Session::commit_cell`,
+            // docs/settling.md).
+            let picture = if cell { picture.take() } else { None };
+            self.commit_cell(lines, picture);
         }
     }
 
@@ -566,7 +588,13 @@ impl Session<'_> {
     /// ([`Session::on_agent_event`]'s flush block), a settled thought to
     /// [`Session::settle_agent_reasoning`], and a hook note is invisible
     /// inline by design (`docs/hooks.md`).
-    fn commit_agent_view_event(&mut self, event: &StreamEvent, width: u16, recorded: usize) {
+    fn commit_agent_view_event(
+        &mut self,
+        event: &StreamEvent,
+        width: u16,
+        recorded: usize,
+        picture: Option<ui::LivePicture>,
+    ) {
         if matches!(event, StreamEvent::Chunk(_)) {
             if let Some(text) = self
                 .app
@@ -578,7 +606,7 @@ impl Session<'_> {
             }
             return;
         }
-        self.commit_agent_tail(recorded, width);
+        self.commit_agent_tail(recorded, width, picture);
         // The red notice is the one thing a failure does *not* record on the
         // transcript (the run keeps only its `error` field), so it commits
         // here — after the cell the failure resolved, the main view's order.
@@ -648,7 +676,7 @@ impl Session<'_> {
         match self.app.stop_agent(id) {
             Some(AgentStop::Stopped(notice)) => {
                 if on_screen {
-                    self.commit_agent_tail(recorded, width);
+                    self.commit_agent_tail(recorded, width, None);
                 }
                 let stop = self.agent_registry.kill(id);
                 self.agent_clocks.remove(id);

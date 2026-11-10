@@ -46,8 +46,9 @@ the strip. Two halves:
    them, so the rows `live_height`/`live_layout` reserve and the rows drawn
    agree by construction. `render_strip` paints it through the framed views'
    own `render_framed_tail`, so a strip whose content outgrew its rows keeps
-   its **last** ones: the newest streamed rows, the `+N lines` footer, the
-   ctrl+b hint, the status line.
+   its **last** ones: the newest streamed rows, the `+N lines` clock row
+   (which carries the ctrl+b hint — `docs/tool-streaming.md`), the status
+   line.
 
 2. **The head flows into real scrollback, frozen.** `ui::view_flow` gains a
    branch for the strip, so the rows the anchor skips are committed above the
@@ -78,8 +79,10 @@ would purge-rebuild the whole screen thirty times a second, so it takes the ↓
 manager's `FlowSign::Frozen` (`docs/view-flow.md`) over
 `ui::live::strip_flow_key`: which conversation is on screen, whether a status
 line is up, each queued call's name/arguments/status, the live agent group's
-members, whether a thinking phase is open, and each `write` still being
-generated, by its path and whether it has finished (`docs/write-streaming.md`).
+members, whether a thinking phase is open, how many finished cells are
+still settling above the live ones (`docs/settling.md`), and each `write`
+still being generated, by its path and whether it has finished
+(`docs/write-streaming.md`).
 A new call, a resolution, a new round, the turn ending or a streaming `write`
 flipping from its tail to its head re-signs it; a streamed line does not. The width and
 the flowed row count are hashed by the caller, so a resize re-signs too.
@@ -98,6 +101,17 @@ frontier that grows on every chunk would re-sign the flow, and purge-rebuild
 the screen, once per chunk. So `strip_content_preview_rows` gives the frontier
 the **reserved** count and it contributes nothing to the flow; only live cells,
 which reach no buffer until they resolve, flow.
+
+### A strip that overflows holds no settling cell
+
+A cell that has ended normally keeps the rows it stood on until the next
+cell takes them (`docs/settling.md`). That is only possible while the strip
+fits its budget: on a terminal too short for it the rows it cannot paint are
+flowing into scrollback, and a held cell would be rows the region does not
+have — so `ui::settling_holds` is false there, and at the boundary under any
+flowed view, and a finished cell commits at once, as it did before. (Commits
+are paused under an active flow anyway; the flow's exit rebuilds from
+history.)
 
 ### Scope: the composer path only
 

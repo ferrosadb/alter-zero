@@ -124,7 +124,7 @@ number under a call that had just begun — the same bug the main strip had
 with the turn's elapsed (`docs/tool-streaming.md`, *Whose clock the footer
 shows*).
 
-The delayed `(ctrl+b to run in background)` hint is deliberately **not** shared:
+The delayed `ctrl+b to run in background` hint is deliberately **not** shared:
 `App::background_hint_elapsed` gates it off the *main* turn's command clock, and
 Ctrl+B in the agent view moves the whole group, not the call. Advertising it off
 another turn's clock would be a lie.
@@ -153,7 +153,10 @@ another turn's clock would be a lie.
 `Session::settle_reasoning` — called from all three places a phase can end:
 its own `ThinkingEnd`, the agent's `Error`, and a user stop. It records the
 `HistoryItem::Reasoning` on the **agent's** transcript and, when that agent's
-session view is up, commits the collapsed cell (reseat before you commit).
+session view is up, commits the collapsed cell — the main session's way: the
+block stands unchanged until the agent's next cell takes its rows, and the
+line then appears alone (`Session::commit_cell`, `docs/settling.md`; the
+view's resolved command cells and delivered messages go through it too).
 `ThinkingStart` flushes the agent's streamed segment first — flush before you
 interleave — so the header sits under the same blank spacer the settled cell
 will take.

@@ -38,6 +38,7 @@ mod reasoning;
 mod resume;
 mod secrets;
 mod settings;
+mod settling;
 mod skill_picker;
 mod skills_menu;
 mod spinner;

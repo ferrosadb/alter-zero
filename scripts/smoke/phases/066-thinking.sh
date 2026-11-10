@@ -9,11 +9,14 @@ smoke_begin
 # the strip under a `● Thinking…` header over the `⎿` gutter, and COLLAPSES at
 # the phase's end into one bullet-less committed
 # `Thought for {n} · {t} tokens (ctrl+o to expand)` line — the reasoning text
-# itself never reaching scrollback (it expands in Ctrl+O instead). Driven
-# against the dummy's canned two-line reasoning: poll for the live block, then
-# for the settled cell, and assert the thought's text is nowhere in the
-# committed scrollback. Then the same turn with ALTER_ZERO_SHOW_THINKING=0
-# must show neither.
+# itself never reaching scrollback (it expands in Ctrl+O instead). The block
+# stays up, unchanged, until the next cell lands, so the box does not jump up
+# in between; the settled line is only ever drawn alone, in the frame that
+# cell lands (docs/settling.md). Driven against the dummy's canned two-line
+# reasoning: poll for the live block, then for the settled cell, and assert
+# the thought's text is gone from the screen the moment its line shows, and
+# nowhere in the committed scrollback. Then the same turn with
+# ALTER_ZERO_SHOW_THINKING=0 must show neither.
 S66="${S}_thinking"
 launch "$S66" 80 24
 submit "$S66" "$USER_MSG"
@@ -58,7 +61,9 @@ expect_has "$think_done" -E "^Thought for [0-9]+s · [0-9]+ tokens \(ctrl\+o to 
 # prefix it, not even the bullet's two blank columns.
 expect_lacks "$think_done" -E "^[^[:space:]]+ Thought for " "the settled line carries a bullet; it must read like the turn summary ('Worked for Ns')"
 expect_lacks "$think_done" -E "^[[:space:]]+Thought for " "the settled line is inset; it must start at the edge like the turn summary ('Worked for Ns')"
-expect_lacks "$think_done" -F "Then edit it and run it." "the chain-of-thought reached scrollback; only the collapsed cell may commit"
+# The line is never drawn over its own thought: the frame that shows it is the
+# frame the next cell took the block's rows (docs/settling.md).
+expect_lacks "$think_done" -F "Then edit it and run it." "the settled line is on screen with its thought still showing; the line may only be drawn alone"
 # Invariant 4: a phase that ends MID-REPLY must finalise the assistant text
 # before it (the ToolStart dance), so the cell is its own block rather than a
 # line spliced into the paragraph that was streaming. The dummy's default turn
@@ -70,6 +75,12 @@ fi
 # Ctrl+O expands it back.
 tmux send-keys -t "$S66" C-o
 sleep 0.6
+# From the top: the pager opens pinned to the bottom, and the round's calls
+# land in the frame the thought's line does (docs/settling.md), so by now the
+# read's output may have scrolled the thought out of a bottom-pinned window.
+# Home also stops the tail-follow, so the page holds still for the capture.
+tmux send-keys -t "$S66" Home
+sleep 0.3
 think_overlay="$(tmux capture-pane -t "$S66" -p -S -200)"
 if ! printf '%s' "$think_overlay" | grep -qF "Then edit it and run it."; then
 	echo "==== Phase 66: captured overlay ===="
@@ -78,6 +89,13 @@ if ! printf '%s' "$think_overlay" | grep -qF "Then edit it and run it."; then
 fi
 tmux send-keys -t "$S66" C-o
 sleep 0.3
+# The chain-of-thought itself never reaches scrollback: look again once the
+# round's call has landed, whether that happened under the overlay above or
+# after it — the thought's line commits ahead of the cell either way. The
+# read's bullet blinks, so its header is matched without it.
+think_after="$(wait_pane 20 "$S66" -S -80 -- -F "Read(about.py)")" # up to ~20s
+expect_has "$think_after" -F "Read(about.py)" "the round's call never landed after the thought"
+expect_lacks "$think_after" -F "Then edit it and run it." "the chain-of-thought reached scrollback; only the collapsed cell may commit"
 tmux kill-session -t "$S66" 2>/dev/null
 
 # The off switch: same turn, ALTER_ZERO_SHOW_THINKING=0 → neither the live

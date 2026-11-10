@@ -54,7 +54,7 @@ done
 # wait 2m)`: the live row carries the command's clock and its wait,
 # docs/tool-streaming.md), never as the substring the demo's own narration
 # also contains.
-if ! printf '%s\n' "$sf_full" | grep -qE '^[[:space:]]*⎿[[:space:]]+Running… \([0-9]+s · wait 2m\)[[:space:]]*$'; then
+if ! printf '%s\n' "$sf_full" | grep -qE '^[[:space:]]*⎿[[:space:]]+Running… \([0-9]+s · wait 2m( · ctrl\+b to run in background)?\)[[:space:]]*$'; then
 	fail "the flowed head lost the running call's '⎿ Running… (Ns · wait 2m)' row"
 	printf '%s\n' "$sf_full" >&2
 fi

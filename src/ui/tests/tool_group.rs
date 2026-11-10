@@ -295,19 +295,56 @@ fn a_command_running_two_seconds_shows_its_clock_on_the_hint_row() {
     app.set_command_elapsed(Some(Duration::from_millis(1900)));
     let row = |app: &App| texts(&live_group_lines(app, 80, None, true))[1].clone();
     assert_eq!(row(&app), "  ⎿  $ grep -rn todo .");
+    // Under the Ctrl+B hint's own delay, the clock alone.
+    app.set_command_elapsed(Some(Duration::from_millis(2500)));
+    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (2s)");
+    // Past it, the hint closes the clause: a long search can go to the
+    // background like any command (docs/background.md).
     app.set_command_elapsed(Some(Duration::from_secs(12)));
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s · ctrl+b to run in background)"
+    );
     app.push_tool_output("a.rs:1: todo\n");
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s · 1 line)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s · 1 line · ctrl+b to run in background)"
+    );
     app.push_tool_output("b.rs:2: todo\n");
     app.set_command_elapsed(Some(Duration::from_secs(65)));
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (1m 5s · 2 lines)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (1m 5s · 2 lines · ctrl+b to run in background)"
+    );
     // A row too narrow for both keeps the whole command and moves the clock,
-    // whole, under it.
+    // whole, under it — without the hint, which never costs a row.
     assert_eq!(
         texts(&live_group_lines(&app, 34, None, true))[1..],
         ["  ⎿  $ grep -rn todo .", "       (1m 5s · 2 lines)"]
     );
+}
+
+#[test]
+fn the_ctrl_b_hint_never_adds_a_row_to_the_groups_cell() {
+    // The hint used to hang off the group as a row of its own, three
+    // seconds into a search: the cell grew a row and gave it back when the
+    // search ended, with nothing committed in its place — a row the box
+    // jumped by (docs/settling.md). It closes the clock clause where the
+    // clause's row has room for it, and is left out where it has not.
+    for width in [120u16, 80, 60, 44, 34] {
+        let mut app = App::new();
+        app.begin_stream();
+        app.start_tool("Bash", "grep -rn todo .", None);
+        app.push_tool_output("a.rs:1: todo\n");
+        app.set_command_elapsed(Some(Duration::from_millis(2900)));
+        let before = live_group_lines(&app, width, None, true).len();
+        app.set_command_elapsed(Some(Duration::from_secs(40)));
+        let after = live_group_lines(&app, width, None, true).len();
+        assert_eq!(
+            before, after,
+            "the hint changed the cell's height at {width} columns"
+        );
+    }
 }
 
 #[test]
@@ -322,7 +359,10 @@ fn the_clock_rides_only_the_running_commands_own_value() {
     let row = |app: &App| texts(&live_group_lines(app, 80, None, true))[1].clone();
     assert_eq!(row(&app), "  ⎿  mathutil.py");
     app.advance_group_hint(t0 + crate::app::GROUP_HINT_HOLD);
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s · ctrl+b to run in background)"
+    );
 }
 
 #[test]

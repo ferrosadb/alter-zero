@@ -30,7 +30,7 @@ for _ in $(seq 1 600); do
 	if has "$cap" -F " core " && has "$cap" -F " extra " &&
 		[ "$(printf '%s\n' "$cap" | grep -cE '\] +[0-9]{1,2}%$')" = "2" ] &&
 		lacks "$cap" -F " multilib" && lacks "$cap" -F "100%" &&
-		has "$cap" -E '\+5 lines \([0-9]+s · wait 3m\)'; then
+		has "$cap" -E '\+5 lines \([0-9]+s · wait 3m( · ctrl\+b to run in background)?\)'; then
 		followed=1
 		followed_cap="$cap"
 	fi

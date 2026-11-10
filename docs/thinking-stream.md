@@ -21,6 +21,31 @@ Now it **streams live**, then **collapses**:
 Thought for 1m 5s · 1.5k tokens (ctrl+o to expand)
 ```
 
+It gives way **in the frame the next cell lands**, not the moment the phase
+ends. A phase ends as soon as the model starts writing what follows — a tool
+call that has no cell until its arguments have streamed — so collapsing a
+four-row block to one row at once pulled the input box up by three rows, and
+the call's cell pushed it back down a moment later: a flicker at every
+thought. So the block **stays exactly as it was** — the header still
+blinking and shimmering, the same rows of thought, `Thinking for Ns` still on
+the status line — until its rows are taken, and the line then appears alone:
+
+```
+● Thinking…                                        Thought for 2s · 53 tokens (ctrl+o to expand)
+  ⎿  so the structure should be: a hero, three
+     feature cards, a footer. Let me check the  →  ● Read(index.html)
+     repo before writing…                            ⎿  Running…
+```
+
+The `Thought for …` line is **never drawn over the thought it stands for**:
+that was tried, and a line saying the thought was over with the thought
+still hanging under it read as a flash of stale thought. Nothing here is
+timed, either — the block stands for as long as the call takes to write.
+Where the *reply* follows a long thought, its first row and spacer take two
+of the block's three rows of thought and the third stays, under the header
+at rest, until the reply's first line commits. The thought's text never
+reaches scrollback (`docs/settling.md`).
+
 Two shapes, deliberately: while it runs it **is** a tool cell — a `●` bullet
 over a `⎿` gutter, because that is what is happening (something working, with
 output under it) — and it is the **only** part of the feature that moves: the
@@ -60,8 +85,10 @@ back, so `Thought for …` could not replace it. So the reasoning block lives
 **only in the live region**, in the streaming strip's preview slot (where a
 running tool's tail already lives), and the *only* thing that ever commits is
 the one-line cell. That is the same collapsed-inline / expanded-in-Ctrl+O
-contract every tool call has (CLAUDE.md invariant 4), and it needs no new
-machinery in `term.rs`.
+contract every tool call has (CLAUDE.md invariant 4). The block that stands
+for a moment after its phase ends (above) is the strip's too: the line's own
+flush is what waits (`InlineViewport::hold`), never a row of thought on its
+way to scrollback.
 
 ## The pieces
 
@@ -243,9 +270,12 @@ the detail) simply keeps the estimate.
 | `/clear` | dropped |
 | a `/compact` turn | never opened — the summarization turn is invisible by design (`docs/compact.md`) |
 
-`Session::settle_reasoning` is the one boundary helper: it closes the buffer
-with the thinking clock's elapsed, commits the cell (view-gated like every
-commit), and clears the clock. The three settle sites call it before they
+`Session::settle_reasoning` is the one boundary helper: it takes the picture
+the live block leaves (`ui::thought_picture` — the block itself, read before
+the buffer closes), closes the buffer with the thinking clock's elapsed,
+commits the cell through `Session::commit_cell` (view-gated like every
+commit; where a turn is in flight to take its rows the block stands until
+they are taken, `docs/settling.md`), and clears the clock. The three settle sites call it before they
 record anything else, which is what keeps stream order right. The interrupt
 also calls it before it stops the turn's clocks: `abandon_inflight` clears
 the thinking clock with the others, and a phase settled after it read
@@ -301,10 +331,13 @@ strip geometry (`ui::tests::reasoning`), the record round-trip (`session`), and
 the context skip (`context`).
 
 The boundary wiring is covered by `scripts/smoke.sh` **Phase 66**, which drives
-the real binary in tmux: the live block appears while the dummy "thinks", it is
-replaced by the collapsed cell, the chain-of-thought is **not** in scrollback,
-Ctrl+O expands it back — and the same turn under `ALTER_ZERO_SHOW_THINKING=0`
-shows neither while still settling to its `Done for Ns` summary.
+the real binary in tmux: the live block appears while the dummy "thinks", it
+collapses into its line — the thought's text off the screen in that very
+frame — Ctrl+O expands it back, and the chain-of-thought is **not** in
+scrollback — and the same
+turn under `ALTER_ZERO_SHOW_THINKING=0` shows neither while still settling to
+its `Done for Ns` summary. **Phase 153** samples the hand-off itself: the box
+never moves up between the thought and what follows it (`docs/settling.md`).
 
 Two `#[ignore]`d live tests in `tests/live_openrouter.rs` pin the provider end
 (run with a real key):

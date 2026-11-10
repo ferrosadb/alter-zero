@@ -57,6 +57,17 @@ release heading when a version is cut.
 
 ### Changed
 
+- **The Ctrl+B hint sits on a running command's clock line.**
+  `(ctrl+b to run in background)` used to appear on a line of its own three
+  seconds into a command, so the cell grew by a row and lost it again when
+  the command ended. The hint now closes the clock —
+  `+18 lines (22s · wait 2m · ctrl+b to run in background)` — with a shorter
+  `ctrl+b to background` on a narrow terminal and nothing on one too narrow
+  for that; Ctrl+B works either way. A `bashwait` or `bashsend` reads
+  `ctrl+b to stop waiting` the same way, a `!` command shows it on its
+  `Running…` row, and a group of running agents in its header
+  (`docs/background.md`).
+
 - **The context gauge follows the conversation between replies, and learns
   how your provider counts.** The footer's `{used}/{window}` only moved when
   the provider reported a request, so a large paste or a long tool output
@@ -184,6 +195,24 @@ release heading when a version is cut.
   browse them.
 
 ### Fixed
+
+- **The input box no longer jumps up and down between a thought, a tool
+  call and the next one.** A `● Thinking…` block is taller than the
+  `Thought for …` line it leaves behind, and a running command's live
+  output is taller than the cell it settles into, so every time one of them
+  ended the box moved up by the difference and dropped back when the next
+  cell arrived: a flicker after each thought and between commands, longer
+  the slower the model was to write its next call. A finished cell now
+  keeps its rows until what comes next takes them, and only then moves up
+  into the scrollback. A thought's `● Thinking…` block stays exactly as it
+  was until the tool call it led to appears, and the `Thought for …` line
+  then shows on its own in that same frame — it is never drawn over the
+  thought. A finished command stays where it ran, its bullet green or red
+  and its clock stopped, until the next cell arrives. No row is left blank
+  in between, nothing waits on a timer, and what ends up in the scrollback
+  is the same as before. A message you sent mid-turn that is delivered
+  right after a command no longer moves the box either, and the same holds
+  inside a subagent's session view (`docs/settling.md`).
 
 - **Models an OpenAI-compatible gateway discovered stay in `/model`.**
   OmniRoute lists a model it found upstream, such as a Codex model, under

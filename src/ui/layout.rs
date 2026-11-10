@@ -72,8 +72,18 @@ pub(super) const fn strip_rows(has_status: bool, preview_rows: u16, hang_rows: u
 /// [`fitted_preview_rows`] instead, which is this clamped to
 /// [`preview_budget`]. Must match exactly what `preview_lines` builds before
 /// its own trim (they share this walk, so they agree by construction).
+///
+/// The **settling cells** stand above all of it — live cells that have ended
+/// and still hold the rows they stood on (`docs/settling.md`): this is their
+/// rows, a blank row, then what is live.
 #[must_use]
 pub fn preview_rows(app: &App, width: u16) -> u16 {
+    super::settling::with_settling_rows(app, live_preview_rows(app, width))
+}
+
+/// The preview rows the **live** content wants — [`preview_rows`] less the
+/// settling cells above it.
+fn live_preview_rows(app: &App, width: u16) -> u16 {
     // An agent session view previews the *viewed agent's* stream — its live
     // tool cells, its thinking block, or its reply's uncommitted frontier
     // (docs/agent-tool.md, docs/agent-view-streaming.md). The branch mirrors
@@ -233,9 +243,15 @@ pub fn fitted_preview_rows(app: &App, width: u16, height: u16) -> u16 {
 /// rows a multi-row (forming-table) preview may take at this terminal height
 /// before it tail-follows its newest rows — [`preview_budget`] exactly, so the
 /// renderer never spends a row the strip cannot reserve (docs/table-streaming.md).
+///
+/// Less the settling cells standing above the frontier, and the blank row
+/// under them (`docs/settling.md`): the budget is the whole slot's.
 #[must_use]
 pub fn stream_preview_max_rows(app: &App, width: u16, term_height: u16) -> usize {
-    usize::from(preview_budget(app, width, term_height))
+    usize::from(super::settling::live_rows_under_settling(
+        app,
+        preview_budget(app, width, term_height),
+    ))
 }
 
 /// Whether the streaming strip shows the **status line** (the spinner + timer +

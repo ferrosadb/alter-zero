@@ -15,8 +15,7 @@ Running (live, in the strip above the box):        Finished (committed to scroll
      64 bytes from … icmp_seq=7 … time=247 ms             64 bytes from … icmp_seq=1 … time=32.1 ms
      64 bytes from … icmp_seq=8 … time=332 ms             64 bytes from … icmp_seq=2 … time=71.1 ms
      64 bytes from … icmp_seq=9 … time=144 ms             … +11 lines (ctrl+o to expand)
-     +5 lines (9s · wait 2m)
-     (ctrl+b to run in background)
+     +5 lines (9s · wait 2m · ctrl+b to run in background)
 
 ● Bash(ping -c 10 facebook.com)                     (a parallel batch's not-yet-run
   ⎿  Waiting…                                        siblings stay `⎿ Waiting…` until
@@ -25,7 +24,9 @@ Running (live, in the strip above the box):        Finished (committed to scroll
 
 The footer's clause is the **command's own clock beside the wait its call
 runs under** — `(9s · wait 2m)` — and it is on the live cell whatever
-the output's shape (*The clock row is always there*, below).
+the output's shape (*The clock row is always there*, below). Once the
+command has run a few seconds the clause closes on what Ctrl+B does to it
+(*The hint closes the clause*, below).
 
 The two states are deliberately asymmetric — while **running** you want the
 **tail** (what just happened); once **finished** you want the **head** with an
@@ -36,6 +37,14 @@ it settles. (It can settle *shorter*: the finished head is the output's first
 **block**, so a blank line ends it — `docs/long-lines.md`. The running tail
 keeps its blanks, being what the command just printed, and shows the output
 as printed where the settled cell reshapes a JSON line for display.)
+
+Because the running cell is taller than the one it commits — by its clock
+row at least, by three rows when the head is cut at a blank line — a command
+that ends does not collapse at once: it **settles in place**, standing on
+the rows it ran on with its bullet in the outcome's colour and its clock
+stopped (`+12 lines (4s)`), until the next cell takes those rows. Committing
+the short form the moment the command ended pulled the box up by the
+difference and the next cell pushed it back — `docs/settling.md`.
 
 ## The protocol — `ToolOutput` and `ToolScreen`
 
@@ -170,7 +179,7 @@ The command clock already existed. `StatusClocks::command_start` is set at
 a model `bash` call's `ToolStart` and at a `!` shell's launch (`run_shell`,
 which starts it together with the turn's, so the shell row's number is
 unchanged), cleared at every resolution and injected each frame as
-`App::set_command_elapsed` — the delayed `(ctrl+b to run in background)`
+`App::set_command_elapsed` — the delayed `ctrl+b to run in background`
 hint had waited on it since `docs/background.md`. The strip now reads the
 same injection through `App::command_elapsed`, the plain getter that answers
 what the setter set. The hint's gate is the separately named
@@ -214,17 +223,14 @@ under**, in every shape the running cell takes:
      21
      22
      +18 lines (22s · wait 1m 50s)             ← rows hidden above the window
-     (ctrl+b to run in background)
 
 ● Bash(python3 -u -c "
       import time…)
   ⎿  hello world
      (10s · wait 10m)                          ← output that fits: the clause alone
-     (ctrl+b to run in background)
 
 ● Bash(python3 -c "import time; time.sleep(100)")
   ⎿  Running… (10s · wait 2m)                 ← nothing printed yet
-     (ctrl+b to run in background)
 ```
 
 The wait is the model's own: `llm::tools::bash_wait_ms` reads the `wait`
@@ -254,6 +260,27 @@ The row is live-only, like the tail it closes: `tool_lines` (scrollback
 commits, the permission prompt's context, the frozen Ctrl+O transcript)
 still renders a running command at rest as `⎿ Running…`, since those
 surfaces have no clock to tick.
+
+### The hint closes the clause
+
+A running command can be moved to the background with Ctrl+B, and the cell
+says so once the command has run a few seconds (`TOOL_BACKGROUND_HINT_DELAY`
+— a command that finishes at once never flashes it; `docs/background.md`).
+The hint used to be a row of its own under the clock row, so the cell grew a
+row at second three and gave it back when the command ended: its height
+depended on the clock. It **closes the clock clause** now —
+
+```
+     +18 lines (22s · wait 1m 50s · ctrl+b to run in background)
+  ⎿  Running… (10s · wait 2m · ctrl+b to run in background)
+     (4s · wait 10s · ctrl+b to stop waiting)       ← a `bashwait` / `bashsend`
+```
+
+— so a running cell's rows follow its output and nothing else
+(`tool::clock_row`, `tool::CommandClock`). On a row too narrow for the whole
+hint it takes its shorter wording (`ctrl+b to background`, `ctrl+b to
+stop`), and on one too narrow for that it is left out: the clock is what the
+row is for, and Ctrl+B works whether or not it is hinted.
 
 ### The window follows what is still moving
 

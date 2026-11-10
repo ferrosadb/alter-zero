@@ -4,8 +4,8 @@ use super::*;
 use crate::ui::live::{preview_lines, preview_tool_lines};
 use crate::ui::theme::{
     INPUT_CHROME_ROWS, STATUS_GAP_ROWS, STATUS_ROWS, TOOL_BACKGROUND_HINT,
-    TOOL_BACKGROUND_HINT_DELAY, TOOL_PULSE_PERIOD, footer_focus_bg, footer_focus_fg,
-    tool_running_color,
+    TOOL_BACKGROUND_HINT_DELAY, TOOL_PULSE_PERIOD, TOOL_RESULT_PREFIX, footer_focus_bg,
+    footer_focus_fg, tool_running_color,
 };
 use crate::ui::wrap::cols;
 
@@ -35,7 +35,7 @@ fn render_live_tails_a_running_bash_tool_with_its_streamed_output() {
     assert!(all.contains("line 9"), "the newest line tails: {all:?}");
     assert!(!all.contains("line 4"), "older lines are hidden: {all:?}");
     assert!(
-        all.contains("+5 lines (9s · wait 2m)"),
+        all.contains("+5 lines (9s · wait 2m · ctrl+b to run in background)"),
         "the footer shows: {all:?}"
     );
 }
@@ -44,9 +44,9 @@ fn render_live_tails_a_running_bash_tool_with_its_streamed_output() {
 fn a_silent_running_command_shows_its_clock_and_timeout_live() {
     // The reported ask, third shape: a command that has printed nothing
     // shows how long it has run and how long it may on its Running row —
-    // `⎿ Running… (10s · wait 2m)` — with the delayed Ctrl+B hint under
-    // it, instead of a bare `⎿ Running…` that said nothing for as long as
-    // the command took (docs/tool-streaming.md).
+    // `⎿ Running… (10s · wait 2m)` — with the delayed Ctrl+B hint closing
+    // the same clause, instead of a bare `⎿ Running…` that said nothing for
+    // as long as the command took (docs/tool-streaming.md).
     let mut app = App::new();
     app.begin_stream();
     let command = r#"python3 -c "import time; time.sleep(100)""#;
@@ -61,11 +61,10 @@ fn a_silent_running_command_shows_its_clock_and_timeout_live() {
         preview,
         [
             format!("● Bash({command})"),
-            "  ⎿  Running… (10s · wait 2m)".to_string(),
-            "     (ctrl+b to run in background)".to_string(),
+            "  ⎿  Running… (10s · wait 2m · ctrl+b to run in background)".to_string(),
         ]
     );
-    // The strip is sized off the same walk, so the row it gained is reserved.
+    // The strip is sized off the same walk, so its rows are the ones reserved.
     assert_eq!(usize::from(preview_rows(&app, 80)), preview.len());
 }
 
@@ -88,8 +87,7 @@ fn a_running_command_whose_output_fits_shows_the_clock_row_under_it() {
         preview[1..],
         [
             "  ⎿  hello world",
-            "     (10s · wait 10m)",
-            "     (ctrl+b to run in background)",
+            "     (10s · wait 10m · ctrl+b to run in background)",
         ],
         "{preview:?}"
     );
@@ -128,7 +126,7 @@ fn the_running_tails_footer_counts_from_the_commands_own_start() {
     };
     assert_eq!(
         footer(&app),
-        "+5 lines (9s · wait 2m)",
+        "+5 lines (9s · wait 2m · ctrl+b to run in background)",
         "the command's own runtime, never the turn's 60s"
     );
     // A clock to *display*, not the Ctrl+B hint's gate: a composer-replacing
@@ -144,7 +142,7 @@ fn the_running_tails_footer_counts_from_the_commands_own_start() {
     assert_eq!(
         footer(&app),
         "+5 lines (9s · wait 2m)",
-        "the footer still counts under a picker"
+        "the footer still counts under a picker, less the hint for a key it swallows"
     );
 }
 
@@ -382,14 +380,14 @@ fn preview_shows_the_whole_parallel_batch_running_plus_waiting() {
             .collect();
     app.start_tool_batch(&batch);
     app.start_tool("Bash", "ping google.com", None); // the front call → Running
-    // Past the hint delay so the running cell's Ctrl+B hint row shows.
+    // Past the hint delay: the running cell's Ctrl+B hint is due, and it
+    // closes that cell's clock clause rather than adding a row.
     app.set_command_elapsed(Some(Duration::from_secs(3)));
-    // Three 2-row cells (header + peek) with two blank separators, plus
-    // the running cell's Ctrl+B hint row = 9 rows.
+    // Three 2-row cells (header + peek) with two blank separators = 8 rows.
     assert_eq!(
         preview_rows(&app, 40),
-        9,
-        "the whole batch (3 cells + 2 gaps + the running cell's hint) is previewed"
+        8,
+        "the whole batch (3 cells + 2 gaps) is previewed"
     );
     let pv = preview_rows(&app, 40);
     let h = live_height(&app.input, 40, 30, true, pv, 0, 0, 0, 0, 0, 0);
@@ -625,7 +623,7 @@ fn the_running_shell_preview_is_the_flush_running_peek() {
     render_live(buf.area, &mut buf, &app);
     assert_eq!(
         row(&buf, 0, 60).trim_end(),
-        "  ⎿  Running… (5s)",
+        "  ⎿  Running… (5s · ctrl+b to run in background)",
         "the strip preview is the cell's running peek with its elapsed, flush \
          under the committed `! sleep 5` header just above the live region"
     );
@@ -763,9 +761,10 @@ fn cursor_position_stays_in_the_live_region_when_the_box_collapses() {
 
 #[test]
 fn the_running_preview_hints_ctrl_b_but_the_committed_cell_does_not() {
-    // The hint is live-only: the preview renderer appends it under the
-    // running cell; the committed `tool_lines` never carry it. The hint
-    // waits a few seconds (see below), so inject an elapsed past the delay.
+    // The hint is live-only: the preview renderer closes the running cell's
+    // clock clause with it; the committed `tool_lines` never carry it. The
+    // hint waits a few seconds (see below), so inject an elapsed past the
+    // delay.
     let mut app = App::new();
     app.begin_stream();
     app.start_tool("Bash", "ping google.com -c 50", None);
@@ -774,7 +773,7 @@ fn the_running_preview_hints_ctrl_b_but_the_committed_cell_does_not() {
     assert!(
         preview
             .iter()
-            .any(|l| l.trim() == "(ctrl+b to run in background)"),
+            .any(|l| l.trim() == "⎿  Running… (5s · wait 2m · ctrl+b to run in background)"),
         "the running preview hints Ctrl+B: {preview:?}"
     );
     let committed: Vec<String> =
@@ -802,7 +801,7 @@ fn the_ctrl_b_hint_waits_a_few_seconds_before_showing() {
         preview_tool_lines(app, 60)
             .iter()
             .map(plain)
-            .any(|l| l.trim() == TOOL_BACKGROUND_HINT)
+            .any(|l| l.contains(TOOL_BACKGROUND_HINT))
     };
 
     // Freshly started — no elapsed injected yet: no hint.
@@ -832,7 +831,7 @@ fn a_running_shell_only_hints_ctrl_b_after_the_delay() {
         preview_tool_lines(app, 60)
             .iter()
             .map(plain)
-            .any(|l| l.trim() == TOOL_BACKGROUND_HINT)
+            .any(|l| l.contains(TOOL_BACKGROUND_HINT))
     };
     app.set_command_elapsed(Some(Duration::from_secs(1)));
     assert!(!shows_hint(&app), "a fast `!` command shows no hint");
@@ -854,19 +853,25 @@ fn a_wait_on_a_session_hints_that_ctrl_b_stops_waiting() {
         app.begin_stream();
         app.start_tool(name, "gh run watch 36209800650", None);
         app.set_command_elapsed(Some(TOOL_BACKGROUND_HINT_DELAY));
-        preview_tool_lines(&app, 60)
+        // The hint is the clock clause's last part: what follows its last
+        // separator, less the closing paren.
+        preview_tool_lines(&app, 80)
             .iter()
             .map(plain)
             .filter(|l| l.contains("ctrl+b"))
-            .map(|l| l.trim().to_string())
+            .filter_map(|l| {
+                l.rsplit(" · ")
+                    .next()
+                    .map(|hint| hint.trim_end_matches(')').to_string())
+            })
             .collect::<Vec<_>>()
     };
-    assert_eq!(hints("Bash"), ["(ctrl+b to run in background)"]);
-    assert_eq!(hints("BashWait"), ["(ctrl+b to stop waiting)"]);
-    assert_eq!(hints("BashSend"), ["(ctrl+b to stop waiting)"]);
+    assert_eq!(hints("Bash"), ["ctrl+b to run in background"]);
+    assert_eq!(hints("BashWait"), ["ctrl+b to stop waiting"]);
+    assert_eq!(hints("BashSend"), ["ctrl+b to stop waiting"]);
     assert_eq!(hints("BashKill"), Vec::<String>::new());
     // A waiting `agentoutput` too — the agent runs on (docs/agent-tools.md).
-    assert_eq!(hints("AgentOutput"), ["(ctrl+b to stop waiting)"]);
+    assert_eq!(hints("AgentOutput"), ["ctrl+b to stop waiting"]);
     assert_eq!(hints("AgentSend"), Vec::<String>::new());
 }
 
@@ -896,7 +901,9 @@ fn a_waiting_agentoutput_tails_the_agents_calls_under_its_wait_clock() {
         "the newest call is on screen: {texts:?}"
     );
     assert!(
-        texts.iter().any(|t| t.contains("(12s · wait 5m)")),
+        texts
+            .iter()
+            .any(|t| t.contains("(12s · wait 5m · ctrl+b to stop waiting)")),
         "under the wait it runs: {texts:?}"
     );
 }
@@ -922,6 +929,92 @@ fn a_waiting_batch_sibling_gets_no_ctrl_b_hint() {
     let preview: Vec<String> = preview_tool_lines(&app, 60).iter().map(plain).collect();
     let hints = preview.iter().filter(|l| l.contains("ctrl+b")).count();
     assert_eq!(hints, 1, "only the running call hints: {preview:?}");
+}
+
+#[test]
+fn the_ctrl_b_hint_never_changes_how_many_rows_a_running_cell_takes() {
+    // The hint used to be a row of its own that appeared three seconds in:
+    // the cell grew a row mid-run, and gave it back the moment the command
+    // ended — one of the row changes behind the box's jump between cells
+    // (docs/settling.md). It closes the clock clause instead, so a running
+    // cell's height follows its output and nothing else.
+    let cell = |output: &[&str], elapsed: Duration| {
+        let mut app = App::new();
+        app.begin_stream();
+        app.start_tool("Bash", "make test", None);
+        for line in output {
+            app.push_tool_output(&format!("{line}\n"));
+        }
+        app.set_command_elapsed(Some(elapsed));
+        preview_tool_lines(&app, 100)
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+    };
+    let early = TOOL_BACKGROUND_HINT_DELAY - Duration::from_millis(1);
+    let late = TOOL_BACKGROUND_HINT_DELAY + Duration::from_secs(5);
+    for output in [
+        &[][..],
+        &["one"][..],
+        &["one", "two", "three", "four"][..],
+        &["1", "2", "3", "4", "5", "6", "7", "8"][..],
+    ] {
+        let before = cell(output, early);
+        let after = cell(output, late);
+        assert!(
+            !before.iter().any(|l| l.contains("ctrl+b")),
+            "no hint before the delay: {before:?}"
+        );
+        assert!(
+            after.iter().any(|l| l.contains(TOOL_BACKGROUND_HINT)),
+            "the hint shows after it: {after:?}"
+        );
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the hint took a row of its own: {before:?} -> {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_clock_row_too_narrow_for_the_hint_says_it_shorter_then_not_at_all() {
+    // The clock row is one row at every width: where the whole hint does not
+    // fit beside the clock it is said in the shortcut band's shorter words,
+    // and where that does not fit either it is left out — the key works the
+    // whole time, and `?` lists it.
+    let footer = |width: u16| {
+        let mut app = App::new();
+        app.begin_stream();
+        app.start_tool("Bash", "make", None);
+        for i in 1..=9 {
+            app.push_tool_output(&format!("{i}\n"));
+        }
+        app.set_command_elapsed(Some(Duration::from_secs(22)));
+        let lines: Vec<String> = preview_tool_lines(&app, width).iter().map(plain).collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "header, four rows, the clock row: {lines:?}"
+        );
+        lines.last().expect("the clock row").trim().to_string()
+    };
+    assert_eq!(
+        footer(80),
+        "+5 lines (22s · wait 2m · ctrl+b to run in background)"
+    );
+    assert_eq!(
+        footer(52),
+        "+5 lines (22s · wait 2m · ctrl+b to background)"
+    );
+    assert_eq!(footer(40), "+5 lines (22s · wait 2m)");
+    for width in [80, 52, 40] {
+        assert!(
+            cols(&footer(width)) + cols(TOOL_RESULT_PREFIX) <= usize::from(width),
+            "the row runs past a {width}-column terminal: {:?}",
+            footer(width)
+        );
+    }
 }
 
 #[test]

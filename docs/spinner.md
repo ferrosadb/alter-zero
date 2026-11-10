@@ -232,7 +232,7 @@ Space chooses and closes**; Esc clears the query first, then closes; Ctrl+C
 closes. The picker owns every key while open (routed at the top of
 `App::on_key`, before the composer's global Ctrl+C/Ctrl+O), pastes are
 swallowed (nothing anyone pastes is a style name), and the running cell's
-`(ctrl+b to run in background)` hint is blanked while it is open
+`ctrl+b to run in background` hint is blanked while it is open
 (`App::background_hint_elapsed`, the rule every composer-replacing picker follows —
 `/mascot` joins the list with it). It works **mid-turn** like `/mascot`: it
 only replaces the composer, and the streaming strip keeps its rows above it

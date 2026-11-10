@@ -53,6 +53,7 @@ mod reasoning;
 mod resume;
 mod secrets;
 mod settings;
+mod settling;
 mod skill_picker;
 mod skills_menu;
 mod spinner;
@@ -112,6 +113,7 @@ pub(crate) use self::reasoning::snap_reasoning_tokens;
 pub use self::resume::{ResumeControl, ResumeFilter, ResumePicker, ResumeSort};
 pub use self::secrets::{SecretField, SecretForm, SecretsPage};
 pub use self::settings::{SettingRow, SettingsPicker};
+pub use self::settling::{Settling, SettlingBody, SettlingDress, SettlingHead};
 pub use self::skill_picker::SkillPicker;
 pub use self::skills_menu::{SkillMenuRow, SkillsMenu};
 pub use self::spinner::{Spinner, SpinnerPicker, SpinnerRow};
@@ -244,6 +246,12 @@ pub struct App {
     /// when the display is off (`ALTER_ZERO_SHOW_THINKING=0`), because the
     /// boundary then never opens one. See `docs/thinking-stream.md`.
     reasoning: Option<String>,
+    /// The live cells that have **ended** and are still on screen, oldest
+    /// first: each keeps the rows it stood on until whatever comes next
+    /// takes them, so the box never jumps up between one cell and the next. Display state only: the cells are recorded in
+    /// [`history`](Self::history) already, and the boundary holds their
+    /// committed lines back in step (`docs/settling.md`).
+    settling: Vec<Settling>,
     /// Where this round's settled [`HistoryItem::Reasoning`] items landed in
     /// [`history`](Self::history) — the snap targets for the round's usage
     /// frame, which reports the *real* `reasoning_tokens` the cells were built
@@ -1291,6 +1299,9 @@ impl App {
         // An open thinking phase goes with the rest of the in-flight turn —
         // the user asked for a blank screen (docs/thinking-stream.md).
         self.drop_reasoning();
+        // …and so do the cells that were still giving their rows up: the
+        // conversation they belonged to is gone (docs/settling.md).
+        self.clear_settling();
         // A fresh slate — but the system prompt and the standing AGENTS.md
         // instructions still ride the next request, so the gauge re-seats on
         // the estimate rather than hard-zeroing (a bare session still reads

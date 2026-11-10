@@ -75,7 +75,17 @@ which Ctrl+V reads the clipboard from.
   codex); the preview appears only once the reply streams (or a tool runs — a
   running backend tool previews its whole `header + ⎿ Running…` cell, so a long
   command isn't clipped, `docs/tools.md`), and the first chunk flips the arrow
-  `↓`. While a
+  `↓`. A live cell that **ends** — a thinking block, a running command, a
+  read/search group — is taller than what it commits, and the region is
+  anchored at its top, so it does not collapse at once: it **keeps the rows
+  it stood on** and gives them up one for one as whatever comes next needs
+  them, its committed lines reaching scrollback the frame it is down to
+  them. A thought and a read group stay exactly as they were, blink and all,
+  and their settled line appears alone in the frame the next cell lands — it
+  is never drawn over what it stands for; a command shows that it finished,
+  its bullet in the outcome's colour over its output and a stopped clock.
+  The box never jumps up between two cells, no row is ever held blank, and
+  nothing is timed (`docs/settling.md`). While a
   turn is active the draw branch re-arms an animation frame every 32 ms (codex's
   cadence), so the spinner runs, the shimmer waves, and the timer moves even
   with no events. On
@@ -858,9 +868,9 @@ logic is unit-testable without a real terminal.
 | `project_doc.rs` | **AGENTS.md project-doc discovery** (`docs/project-doc.md`) — codex's `agents_md`: the pure `doc_chain` (project root → cwd, root first), `budget_docs` (the total byte budget, char-boundary truncation, blanks skipped — the docs kept separate, one `ProjectDoc { path, text }` each), `doc_budget` (the `ALTER_ZERO_PROJECT_DOC_MAX_BYTES` override; `0` disables), `doc_heading` (`Contents of {path} (project instructions, checked into the codebase):`, the override captioned `not checked in`) and `instructions_section` (the reference's override paragraph over one heading + text per file — the `<system-reminder>`'s first section, the codex `<INSTRUCTIONS>` fragment retired), over a thin fs probe (`find_project_root` — nearest `.git` dir *or* worktree gitfile; `load_user_instructions` — the first of `AGENTS.override.md`/`AGENTS.md` per directory, read **capped at the budget** and decoded lossily). `App::user_instructions` carries the section; `context::context_messages_full` wraps it into the block the derived context leads with. | Pure core: yes (fs probes: temp dirs) |
 | `reminder.rs` | **The `<system-reminder>` the context leads with** (`docs/context.md`): `reminder_message` (the tags and the `Use the following contexts and instructions:` preamble over the non-blank sections, blank-line separated; empty when no section says anything, so a session with nothing to remind the model of sends no block) and `join_sections` (the shared join). The sections come from `project_doc::instructions_section`, `skills::skill_section` and `subagents::agent_section` (the latter two joined into `App::listings` by `subagents::listing_sections`); `context::context_messages_full` composes the block at derivation, `skills::listing_message` wraps the skills section alone as a subagent's briefing. | Pure core: yes |
 | `context_usage.rs` | **What fills the context window, counted** (`docs/context-usage.md`): `breakdown` over `Sources` — the system prompt split at its headings, the tool schemas (`ToolDefinition`: the wire name and the JSON the client sends) with the `mcp__server__tool` ones grouped by server, the `<system-reminder>` split into project docs (the stored instructions, found whole) then skills, agent types and secrets by the header each contributor writes, the derived messages split by kind and their user-role text by origin (`context::context_messages_with_origins`) — into a `Breakdown` of `Slice`s of `Part`s, the counter injected so a test can count bytes; `UsageLedger` sums the provider's usage frames and their cache share. The page over it is `app::context_usage` + `ui::context_usage_view`, kept live by `tui::context_usage`. | Yes |
-| `term.rs`   | The custom inline viewport over `CrosstermBackend`: dynamic content-anchored height, `insert_before` (queues scrollback lines for the next frame — `docs/flicker.md`), `draw` (pending-flush + re-pin + diff + cursor, one synchronized update; the region is repainted **in place**, never blanked first, and only the rows the previous region left below it are cleared — `docs/slow-stream.md`), `reflow` (tail rebuild + live-region paint, one frame), the alternate-screen overlay (`enter_overlay`/`exit_overlay`/`draw_overlay`), init/restore (restore flushes leftovers), and the OSC 8 link emitter (`draw_cells` — the choke point every cell write goes through: strips the link-id carrier, brackets marked runs so a wrapped URL opens whole — `docs/links.md`). | No (I/O boundary) |
+| `term.rs`   | The custom inline viewport over `CrosstermBackend`: dynamic content-anchored height, `insert_before` (queues scrollback lines for the next frame — `docs/flicker.md`), `hold`/`release_held` (a settling cell's committed lines, kept back from the flush until the frame that lets the cell go, and always queued ahead of whatever commits next — `docs/settling.md`), `draw` (pending-flush + re-pin + diff + cursor, one synchronized update; the region is repainted **in place**, never blanked first, and only the rows the previous region left below it are cleared — `docs/slow-stream.md`), `reflow` (tail rebuild + live-region paint, one frame), the alternate-screen overlay (`enter_overlay`/`exit_overlay`/`draw_overlay`), init/restore (restore flushes leftovers), and the OSC 8 link emitter (`draw_cells` — the choke point every cell write goes through: strips the link-id carrier, brackets marked runs so a wrapped URL opens whole — `docs/links.md`). | No (I/O boundary) |
 | `main.rs`   | The 77-line shell: the detached-exec hook (first statement — `docs/tty-detach.md`), the `--continue`/`--resume` resolution, `InlineViewport::init`, `tui::event_loop::run`, `restore` + the exit hint. | No (I/O boundary) |
-| `tui/`      | The terminal shell, 20 area modules over one **`Session`** struct (`docs/module-layout.md`): the single-threaded **async (tokio) `select!`** loop over nine sources (`event_loop`), the `Action` dispatch (`actions`), turn lifecycle (`turn`), the reply and subagent folds (`stream`, `agent`), background shells (`background`), the permission gate's session rules (`permission`), drawing and repaints (`view`, `commit`), the backend selection (`models`, `config`), assembly and teardown (`bootstrap`, `startup`), the on-disk mirrors (`recorder`, `resume`, `history_store`), the `!` runner (`shell`), the off-thread workers (`workers`), and the raw impurities — clocks, dates, ids (`host`). | No (I/O boundary) |
+| `tui/`      | The terminal shell, 20 area modules over one **`Session`** struct (`docs/module-layout.md`): the single-threaded **async (tokio) `select!`** loop over nine sources (`event_loop`), the `Action` dispatch (`actions`), turn lifecycle (`turn`), the reply and subagent folds (`stream`, `agent`), background shells (`background`), the permission gate's session rules (`permission`), drawing and repaints (`view`, `commit`, `settle`), the backend selection (`models`, `config`), assembly and teardown (`bootstrap`, `startup`), the on-disk mirrors (`recorder`, `resume`, `history_store`), the `!` runner (`shell`), the off-thread workers (`workers`), and the raw impurities — clocks, dates, ids (`host`). | No (I/O boundary) |
 
 The real backend also retains one bounded request prefix (`llm::wire_history`)
 to preserve provider tool IDs and parallel-call grouping across human turns.
@@ -908,7 +918,11 @@ burst must finish rendering near-instantly) and Phase 15 (a raw byte recording o
 streaming turn must show every live-region clear inside a sync block) — and,
 since a commit repaints the region **in place** rather than blanking it first,
 Phase 121 pins that a token-paced 65 s turn records no live-region clear at all
-(`docs/slow-stream.md`).
+(`docs/slow-stream.md`). A frame can also move the box *up*: one that sheds
+more rows from the strip than it commits. A finished cell therefore keeps its
+rows until the next one takes them (`docs/settling.md`), and Phase 153 samples
+whole turns for a footer that rose or a status line under more than one blank
+row.
 
 ```
 keyboard / resize ──► EventStream ─┐

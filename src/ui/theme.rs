@@ -390,17 +390,31 @@ pub(super) const REASONING_PEEK_LINES: usize = 3;
 /// the stored output (the model-facing launch text) is never shown.
 pub(super) const TOOL_BACKGROUNDED: &str = "Running in the background (↓ to manage)";
 
-/// The dim live-only hint under a running command's preview cell: Ctrl+B
-/// moves it to the background. Never committed to scrollback.
-pub(super) const TOOL_BACKGROUND_HINT: &str = "(ctrl+b to run in background)";
+/// The live-only hint that closes a running command's clock clause — `(22s ·
+/// wait 2m · ctrl+b to run in background)`: Ctrl+B moves it to the
+/// background. Never committed to scrollback.
+///
+/// Part of the clock row rather than a row of its own, which it used to be:
+/// a row that appeared three seconds into a command and went the moment it
+/// ended made the cell's height follow the clock, and every row a live cell
+/// gives up without committing one is a row the box jumps by
+/// (`docs/settling.md`).
+pub(super) const TOOL_BACKGROUND_HINT: &str = "ctrl+b to run in background";
 
-/// The same hint under a running `bashwait` or `bashsend`, whose session
+/// [`TOOL_BACKGROUND_HINT`] where the clock row is too narrow for the whole
+/// of it — the `?` band's own words for the key ([`SHORTCUTS`]).
+pub(super) const TOOL_BACKGROUND_HINT_SHORT: &str = "ctrl+b to background";
+
+/// The same hint on a running `bashwait` or `bashsend`, whose session
 /// already runs in the background: there Ctrl+B ends the wait, not the
 /// command.
-pub(super) const TOOL_STOP_WAITING_HINT: &str = "(ctrl+b to stop waiting)";
+pub(super) const TOOL_STOP_WAITING_HINT: &str = "ctrl+b to stop waiting";
 
-/// How long a command must have been running before its preview shows the
-/// `(ctrl+b to run in background)` hint — Claude-Code-style, so a command that
+/// [`TOOL_STOP_WAITING_HINT`] on a narrow clock row.
+pub(super) const TOOL_STOP_WAITING_HINT_SHORT: &str = "ctrl+b to stop";
+
+/// How long a command must have been running before its clock clause closes
+/// on the `ctrl+b to run in background` hint — Claude-Code-style, so a command that
 /// finishes right away never flashes it (Ctrl+B itself still works the whole
 /// time; only the discoverability hint waits). Gated on the boundary-injected
 /// [`App::background_hint_elapsed`]. See `docs/background.md`.

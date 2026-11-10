@@ -254,7 +254,7 @@ A **library** (`src/lib.rs` → `app`, `stream`, `ui`, `term`, `frame`, `paste`,
 the detached-exec hook, the CLI resolution, the viewport, the loop — over
 **`src/tui/`**, the binary-private tree that drives the codex-style **async
 (tokio) `select!`** loop (`event_loop`, `actions`, `turn`, `stream`, `agent`,
-`background`, `permission`, `ask`, `view`, `commit`, `models`, `config`, `bootstrap`,
+`background`, `permission`, `ask`, `view`, `commit`, `settle`, `models`, `config`, `bootstrap`,
 `startup`, `recorder`, `resume`, `history_store`, `settings`, `telemetry`, `update`, `update_cli`, `herdr`, `shell`, `workers`, `host`, `mascot`, `spinner`, `theme`, `donate`, `export`, `context_usage`, `usage`, `secrets`, `mcp`, `trust`, `login`,
 with the **`Session`** struct itself in `mod.rs` — every handler is an `impl
 Session` block in its area module, reaching the private fields the way `app/`'s
@@ -262,10 +262,10 @@ submodules reach `App`'s). The four big ones are **directories
 of per-area modules**, not single files — `src/app/` (`types`, `action`, `keys`,
 `composer`, `commands`, `file_picker`, `input_history`, `queue`, `tools`, `turn`,
 `compact`, `backtrack`, `views`, `resume`, `model_picker`, `login`, `settings`, `look`, `mascot`, `spinner`, `theme`, `donate`, `export`, `context_usage`, `usage`, `secrets`, `hooks_menu`, `mcp_menu`, `config_review`, `background`,
-`agent`, `status`, `tips`, `permission`, `tool_group`, with the `App` struct itself in `mod.rs` so every submodule and
+`agent`, `status`, `tips`, `permission`, `tool_group`, `settling`, with the `App` struct itself in `mod.rs` so every submodule and
 the test tree keeps its private-field access), `src/ui/` (`theme`, `wrap`,
 `layout`, `assistant`, `inline`, `table`, `message`, `conversation`, `tool`,
-`file_cell`, `inline_diff`, `tool_group`, `status`, `tips`, `offline`, `agent`, `menu`, `footer`, `header`, `hooks_view`, `live`, `transcript`,
+`file_cell`, `inline_diff`, `tool_group`, `settling`, `status`, `tips`, `offline`, `agent`, `menu`, `footer`, `header`, `hooks_view`, `live`, `transcript`,
 `context_view`, `resume_view`, `model_view`, `login_view`, `background_view`,
 `permission_view`, `settings_view`, `mascot_view`, `spinner_view`, `palette`, `theme_view`, `donate_view`, `export_view`, `context_usage_view`, `usage_view`, `secrets_view`, `mcp_view`, `config_review_view`, `view_flow`, `stream_render`), and **`src/stream/`** — the backend seam
 kept apart from the offline demo that used to crowd it: `event` (the whole
@@ -971,7 +971,11 @@ the open group outranking the block in `ui::live::preview_lines`) and whose
 line the thought then settles into unseen, Ctrl+O its only view
 (`docs/tool-groups.md` *Thoughts*); at the phase's end the cell shape goes
 away entirely and it **collapses** into one committed **bullet-less** two-tone
-`Thought for 1m 5s · 1.5k tokens (ctrl+o to expand)` line — the `summary_lines`
+`Thought for 1m 5s · 1.5k tokens (ctrl+o to expand)` line — in the frame the
+next cell lands, not the moment the phase ends: the block stands exactly as
+it was until its rows are taken, so the box never jumps up in between, and
+the line is never drawn over the thought it stands for
+(`docs/settling.md`) — the `summary_lines`
 shape, because nothing is happening any more and what is left is a fact about
 the turn — **dim throughout** (`reasoning_label_color()` = `status_done_color()`,
 `Done for Ns`'s exact dress, so the pair bracketing a turn reads as a pair);
@@ -1037,7 +1041,64 @@ height less every row `commit` has since moved to scrollback, padded with
 blank rows the next content lands on — so the preview never loses more
 rows than a step committed, the invariant the differential harness now
 carries over the fuzz corpus at every width, with `matches_up_to_padding`
-as the contract's one tolerance; the **clickable OSC 8 links** (every URL an assistant
+as the contract's one tolerance — and the **settling cells** in
+`docs/settling.md`: a live cell is taller than what it commits (a
+`● Thinking…` block's three rows of thought over its one `Thought for …`
+line; a running command's four-row tail and clock row over its three-row
+peek, three rows more where the peek is cut at a blank line; a read group's
+`⎿` value over its line) and the region is anchored at its top, so a cell
+that collapsed the moment it ended pulled the box **up** by the difference
+until the next cell pushed it back — the reported flicker between a thought
+and the tool call it leads to, and between one command and the next (four
+jumps of 3, 3, 1 and 3 rows over one think → skill → think → bash → bash →
+answer turn, recorded a synchronized frame at a time; a provider ends a
+phase the moment it starts writing what follows, and a call has no cell
+until its batch is announced). A cell that ends now **keeps the rows it
+stood on** and gives them up one for one as whatever comes next needs them:
+the pure `app::Settling` holds its head, its body and the lines it commits —
+the pictures (`ui::thought_picture`, `command_picture`, `group_picture`) are
+built from the very walk the live renderer draws from and taken **before**
+the call that resolves the cell. What it looks like meanwhile is the record
+of what did not read well: a **thought** and a **read group** stay *exactly
+as they were* (`SettlingHead::Thinking`/`Running` — header, blink, shimmer,
+the status line's `Thinking for Ns` clause via `App::lingering_thought`) and
+their settled line is drawn **alone**, in the frame the next cell lands —
+drawn over the thought it stood for it read as a flash of stale thought, and
+over empty rows as newlines reserved; a **command** shows that it finished,
+its bullet in the outcome's colour over its tail and a stopped clock; a cell
+that has given a row up stands at rest (`Settling::is_whole`), and one down
+to its committed height *is* its committed lines (`ui::settling_lines`).
+Nothing is timed — a timed linger bounced on every call slower than the
+guess — so a cell stands until its rows are taken, however long that is.
+The strip draws the settling cells above whatever is live
+(`ui::live::preview_lines`, sized by `ui::preview_rows`), and before every
+inline frame `ui::settle_plan` gives each cell as few rows as hold the
+region's bottom where it was last painted (`painted_bottom − (view_top +
+pending_rows + height − extras)`, kept by the **newest** cells first so the
+oldest are down to their committed height first) while `settle_frame`
+releases the prefix that is. The boundary only holds lines back
+(`tui::settle`): `Session::commit_cell` is the one commit site for a
+**cell** — `InlineViewport::hold` + `App::push_settling`, or the old
+reseat-and-commit — `Session::sync_settling` runs before each frame, and
+`InlineViewport::insert_before` queues whatever is held **first**, so
+scrollback keeps the order things happened in with no commit site knowing a
+line is held (an empty commit — a reply that has completed no line —
+releases nothing); a cell that lands behind a settling one (a steered
+message's bubble, a notice, a hook's cell) waits behind it instead of
+pushing it out with its rows untaken; a rebuild **drops** the hold, history
+carrying the cells, and `restore` **flushes** it. Nothing is held outside a
+turn, under a modal, under an overlay, on a terminal too short for the strip
+or under a flowed view (`ui::settling_holds`), and no row is ever blank
+padding — the first fix padded the strip instead and left three empty rows
+over the status line between rounds. The Ctrl+B hint **closes a running
+cell's clock clause** (`+18 lines (22s · wait 2m · ctrl+b to run in
+background)`, in its shorter wording or not at all where the row is narrow —
+`ui::tool::clock_row`) rather than taking a row of its own three seconds in,
+so a cell's height never depends on the clock; `smoke.sh` Phase 153 samples
+whole turns — the dummy's, and the real backend against a paced stub — for a
+footer that rose, a status line under more than one blank row, or a settled
+thought line over its thought, and fails on the build before this; the
+**clickable OSC 8 links** (every URL an assistant
 reply shows — a bare URL in prose/lists/table cells, inline/fenced/indented
 code, a heading, or a `[text](url)` target — is painted inside an OSC 8
 hyperlink carrying the whole URL, so a wrapped URL's every fragment opens the
@@ -1488,12 +1549,15 @@ interim-output path, and a call whose `wait` passes hands its command here
 still running rather than killing it, `docs/bash-tools.md`; the output
 path — `{session}/tasks/{id}.output` — while a `BackgroundRegistry` process streams on its own channel; **Ctrl+B** moves a
 running model-`bash`/`!` command to the background mid-run (the live cell hints
-it with a dim `(ctrl+b to run in background)` row that waits a few seconds —
+it with a dim `ctrl+b to run in background` that **closes its clock clause** —
+`+18 lines (22s · wait 2m · ctrl+b to run in background)`, never a row of its
+own, so the cell's height does not move with the clock, `docs/settling.md` —
+once the command has run a few seconds:
 `ui::TOOL_BACKGROUND_HINT_DELAY`, gated on the command's own boundary-injected
 `App::background_hint_elapsed` — so a fast command never flashes it, Claude-Code-style;
-Ctrl+B itself works the whole time; a `bashwait`/`bashsend` cell's row reads
-`(ctrl+b to stop waiting)` instead, its session already running there, and a
-`bashkill`'s none — `ui::tool::ctrl_b_hint`); the cell resolves `⎿ Running in the
+Ctrl+B itself works the whole time; a `bashwait`/`bashsend` cell's clause reads
+`ctrl+b to stop waiting` instead, its session already running there, and a
+`bashkill`'s nothing — `ui::tool::ctrl_b_hint`); the cell resolves `⎿ Running in the
 background (↓ to manage)`, the footer
 counts `· N shells` — and that count is the band's **entry point**: **↓ from an
 empty composer lights the indicator on cyan** (`App::background_focus`, the
@@ -3326,7 +3390,13 @@ of bug:
    coincide with a flush *mid-stream* too — a forming table's whole block commits
    at its close while the multi-row preview drops to one row — `term::paint_live`
    syncs the tracked height to the frame's height before `flush_pending` whenever
-   lines are pending, `docs/table-streaming.md`, guarded by Phase 41). (`insert_before` itself only
+   lines are pending, `docs/table-streaming.md`, guarded by Phase 41). The
+   same arithmetic is why a live **cell** that ends does not leave the strip at
+   once: it is taller than what it commits, so a frame that shed the
+   difference would pull the box *up* until the next cell pushed it back — it
+   settles in place and gives its rows up as they are taken, its lines held
+   back from the flush until then (`InlineViewport::hold`,
+   `docs/settling.md`, guarded by Phase 153). (`insert_before` itself only
    **queues**: the next `term::draw` writes the lines and repaints the live region
    inside one synchronized update, so a commit can never flash a boxless frame —
    `docs/flicker.md`, guarded by `smoke.sh` Phase 15.) On **any** size change the

@@ -37,10 +37,13 @@ sleep 0.6
 bg_early_pane="$(tmux capture-pane -t "$S42" -p)"
 echo "==== Phase 42: early in the run — Running… but no Ctrl+B hint yet ===="
 printf '%s\n' "$bg_early_pane"
-# The running `!` cell shows the live-only Ctrl+B hint under its Running row —
-# but only after the command has run a few seconds, Claude-Code-style, so a
-# fast command never flashes it. Poll well past the delay.
-bg_hint_pane="$(wait_pane 8 "$S42" -F "(ctrl+b to run in background)")"
+# The running `!` cell shows the live-only Ctrl+B hint closing its Running
+# row's clock clause — `Running… (3s · ctrl+b to run in background)`, never a
+# row of its own, so the cell's height does not change when it appears
+# (docs/settling.md) — but only after the command has run a few seconds,
+# Claude-Code-style, so a fast command never flashes it. Poll well past the
+# delay.
+bg_hint_pane="$(wait_pane 8 "$S42" -F "· ctrl+b to run in background)")"
 echo "==== Phase 42: running ! command with the Ctrl+B hint ===="
 printf '%s\n' "$bg_hint_pane"
 # Ctrl+B: the runner hands the child to the registry; the cell resolves to the
@@ -116,9 +119,15 @@ sleep 0.3
 bg_closed_pane="$(tmux capture-pane -t "$S42" -p)"
 tmux kill-session -t "$S42" 2>/dev/null
 
-expect_lacks "$bg_early_pane" -F "(ctrl+b to run in background)" "the Ctrl+B hint showed immediately (it must wait a few seconds so a fast command never flashes it)"
+expect_lacks "$bg_early_pane" -F "ctrl+b to run in background" "the Ctrl+B hint showed immediately (it must wait a few seconds so a fast command never flashes it)"
 expect_has "$bg_early_pane" -F "Running…" "the ! command was not visibly running early in its run (can't trust the no-hint check)"
-expect_has "$bg_hint_pane" -F "(ctrl+b to run in background)" "the running ! command never showed the Ctrl+B hint (even after the delay)"
+expect_has "$bg_hint_pane" -F "· ctrl+b to run in background)" "the running ! command never showed the Ctrl+B hint (even after the delay)"
+# The hint rides the clock row: the cell is the same height with it as without.
+if [ "$(printf '%s\n' "$bg_hint_pane" | grep -c "Running…")" != "$(printf '%s\n' "$bg_early_pane" | grep -c "Running…")" ] ||
+	printf '%s\n' "$bg_hint_pane" | grep -qE '^ *\(ctrl\+b'; then
+	fail "the Ctrl+B hint took a row of its own (it must close the Running row's clock clause)"
+	printf '%s\n' "$bg_hint_pane" >&2
+fi
 expect_has "$bg_cell_pane" -F "Running in the background (↓ to manage)" "Ctrl+B did not resolve the cell as backgrounded"
 expect_has "$bg_cell_pane" -F "· 1 shell" "the footer never counted the running background shell"
 # ↓ must FOCUS the footer's count, not open the band: the whole footer row

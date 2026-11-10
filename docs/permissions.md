@@ -152,7 +152,7 @@ and one mystery. A call that is truly executing (the main turn's own tool,
 under a *subagent's* request) keeps its running row instead, drawn at rest —
 the prompt is a still frame (`docs/tool-pulse.md`). `App::background_hint_elapsed`
 reads as `None` while a prompt is open, which drops the delayed
-`(ctrl+b to run in background)` hint: the prompt owns every key, so that one
+`ctrl+b to run in background` hint: the prompt owns every key, so that one
 would be advertising a binding it swallows.
 
 The context must not crowd out the prompt itself, though. A model's big

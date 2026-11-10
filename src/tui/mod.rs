@@ -92,6 +92,7 @@ pub(crate) mod donate;
 pub(crate) mod event_loop;
 pub(crate) mod export;
 pub(crate) mod git_diff_loader;
+pub(crate) mod headless;
 pub(crate) mod herdr;
 pub(crate) mod history_store;
 pub(crate) mod host;

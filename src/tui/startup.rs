@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use alter_zero::app::HistoryItem;
 use alter_zero::cli::{self, Cli, HelpPage, HelpStyle, SessionArgs, SessionStart};
+use alter_zero::output::OutputFormat;
 use alter_zero::session::{self, SessionMeta};
 
 use super::resume::{find_session_by_id, list_sessions, sessions_root};
@@ -29,6 +30,9 @@ use super::resume::{find_session_by_id, list_sessions, sessions_root};
 pub(crate) struct Startup {
     pub(crate) session: Option<StartupSession>,
     pub(crate) prompt: Option<String>,
+    /// `-p/--print` / `--output-format {FMT}`: run headless and write that
+    /// format to stdout instead of opening the interface (`docs/cli.md`).
+    pub(crate) output: Option<OutputFormat>,
 }
 
 /// The `--continue`/`--resume` directive — the session to install before the
@@ -85,9 +89,17 @@ pub(crate) fn resolve_cli() -> Result<Startup, i32> {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             Err(0)
         }
-        Cli::Session(SessionArgs { start, prompt }) => {
+        Cli::Session(SessionArgs {
+            start,
+            prompt,
+            output,
+        }) => {
             let session = resolve_session(start)?;
-            Ok(Startup { session, prompt })
+            Ok(Startup {
+                session,
+                prompt,
+                output,
+            })
         }
     }
 }

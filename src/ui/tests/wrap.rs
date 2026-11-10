@@ -392,17 +392,15 @@ fn running_command_lines_wraps_a_long_tail_line_instead_of_clipping() {
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
+        None,
     );
-    // width 40 − the 5-col `  ⎿  ` gutter = 35 content cols → 2 rows, then
-    // the clock row (docs/tool-streaming.md).
+    // width 40 − the 5-col `  ⎿  ` gutter = 35 content cols → 2 rows, and
+    // no row more: the clock rides the last row where it has room, and
+    // never at the output's cost (docs/live-cells.md).
     let body: Vec<String> = lines[1..].iter().map(plain).collect();
-    assert_eq!(
-        body.len(),
-        3,
-        "the 60-col line wraps to two rows over the clock row: {body:?}"
-    );
+    assert_eq!(body.len(), 2, "the 60-col line wraps to two rows: {body:?}");
     // Strip the 5-char `  ⎿  ` gutter / continuation indent off each row.
-    let joined: String = body[..2]
+    let joined: String = body
         .iter()
         .map(|l| l.chars().skip(5).collect::<String>())
         .collect::<Vec<_>>()
@@ -413,21 +411,21 @@ fn running_command_lines_wraps_a_long_tail_line_instead_of_clipping() {
 #[test]
 fn preview_rows_counts_a_wrapped_running_tail() {
     // Strip sizing and paint agree when the tail wraps: preview_rows
-    // counts the wrapped rows (header + windowed tail + the clock row + the
-    // Ctrl+B hint), not one row per source line.
+    // counts the wrapped rows (the header and the tail's), not one row per
+    // source line.
     let mut app = App::new();
     // The per-call cell: a reading command collapses into the read/search
     // group's cell otherwise (docs/tool-groups.md).
     app.settings_mut().verbose = true;
     app.begin_stream();
     app.start_tool("Bash", "cat log", None);
-    // Past the hint delay so the Ctrl+B hint row is part of the preview.
+    // Past the hint delay: the hint is due, and it never adds a row.
     app.set_command_elapsed(Some(Duration::from_secs(3)));
     app.push_tool_output(&"y".repeat(70)); // 35 content cols → 2 rows
     assert_eq!(
         preview_rows(&app, 40),
-        5,
-        "header + 2 wrapped tail rows + the clock row + the Ctrl+B hint"
+        3,
+        "header + 2 wrapped tail rows, the clock with no room beside the last"
     );
 }
 

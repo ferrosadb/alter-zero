@@ -16,8 +16,7 @@ use super::layout::{
 use super::reasoning::live_reasoning_lines;
 use super::theme::*;
 use super::tool::{
-    ctrl_b_hint, is_command_tool, live_tool_lines, result_row, running_command_lines,
-    shell_running_line,
+    ctrl_b_hint, is_command_tool, live_tool_lines, running_command_lines, shell_running_line,
 };
 use super::*;
 
@@ -165,17 +164,32 @@ pub(super) fn preview_lines(
 
 /// The strip while the model generates a `write`: the open group — which a
 /// write into the scratchpad joins, counting its lines as they arrive — over
-/// the cells of the writes that are no part of it, among them one whose path
-/// is not out yet (`docs/tool-groups.md` *Scratchpad edits*). The one walk
+/// the cells of the writes that are no part of it; one whose path is not out
+/// yet has a cell only where no group is open to claim it
+/// (`docs/tool-groups.md` *Scratchpad edits*). The one walk
 /// [`preview_lines`] and `preview_rows` share for the branch, so the rows
 /// reserved and the rows drawn agree.
 pub(super) fn drafting_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let mut lines = open_group_lines(app, width);
-    for draft in app
+    // Whether the open group has a cell to show at all — its header, built
+    // the way the strip builds it, so the answer cannot drift from the paint.
+    let grouped = !super::tool_group::live_group_lines(app, width, None, true, false).is_empty();
+    let others: Vec<_> = app
         .tool_drafts()
         .previews()
         .filter(|draft| !app.is_group_draft(draft))
-    {
+        // Under an open group a write gets no cell until its path is out:
+        // in the scratchpad it joins the group, anywhere else it ends it and
+        // takes a cell under the group's line. A cell put up before the path
+        // said which stood on rows the group took back when the write turned
+        // out to be its own (docs/live-cells.md).
+        .filter(|draft| !grouped || draft.path().is_some())
+        .collect();
+    // The group wears its hint row only while it is the strip's one cell
+    // (docs/live-cells.md): a write streaming under it ends it, and ends it
+    // a row short.
+    let mut lines =
+        super::tool_group::live_group_lines(app, width, Some(app.pulse()), true, others.is_empty());
+    for draft in others {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
@@ -196,7 +210,7 @@ pub(super) fn drafting_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 /// `preview_rows` share for the branches the group shows in alone, so the
 /// rows reserved and the rows drawn agree (`docs/tool-groups.md`).
 pub(super) fn open_group_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    super::tool_group::live_group_lines(app, width, Some(app.pulse()), true)
+    super::tool_group::live_group_lines(app, width, Some(app.pulse()), true, true)
 }
 
 /// Trim built preview rows to the `rows` the strip reserved — from the front
@@ -225,11 +239,12 @@ fn trim_preview(mut lines: Vec<Line<'static>>, rows: usize, tail: bool) -> Vec<L
 /// ([`super::agent::agent_view_preview_lines`]) — a subagent's running
 /// command tails its output exactly like the main turn's, which a second
 /// thinner copy of this walk did not (`docs/agent-view-streaming.md`).
-/// `elapsed` is the **running command's own** runtime — what every `(Ns)`
+/// `run` is what the session knows of its running command ([`CommandRun`]).
+/// Its `elapsed` is the **command's own** runtime — what every `(Ns)`
 /// here shows: the main strip's boundary-injected [`App::command_elapsed`],
 /// the agent view's [`AgentRun::command_elapsed`](crate::agents::AgentRun::command_elapsed)
 /// — never the turn's or the agent's elapsed, which the status line counts.
-/// `live` is that session's running call's live rows and when each last
+/// Its `tail` is that session's running call's live rows and when each last
 /// changed ([`App::live_tail`], [`AgentRun::live_tail`](crate::agents::AgentRun::live_tail)),
 /// which the command tail's window follows (`docs/tool-streaming.md`).
 ///
@@ -241,8 +256,7 @@ fn trim_preview(mut lines: Vec<Line<'static>>, rows: usize, tail: bool) -> Vec<L
 pub(super) fn live_call_lines(
     tool: &ToolCall,
     draft: Option<&crate::app::ToolDraft>,
-    live: &LiveTail,
-    elapsed: Duration,
+    run: &CommandRun<'_>,
     pulse: Duration,
     width: u16,
     paths: &PathDisplay,
@@ -253,12 +267,29 @@ pub(super) fn live_call_lines(
         return draft_cell_lines(draft, Some(tool), Some(pulse), width, paths, false);
     }
     if tool.shell && tool.status == ToolStatus::Running {
-        return vec![shell_running_line(elapsed)];
+        return vec![shell_running_line(run.elapsed, run.hint, width)];
     }
     if is_command_tool(tool) && tool.status == ToolStatus::Running {
-        return running_command_lines(tool, live, elapsed, pulse, width, paths);
+        return running_command_lines(tool, run.tail, run.elapsed, pulse, width, paths, run.hint);
     }
     live_tool_lines(tool, width, pulse, paths)
+}
+
+/// What a session knows about its **running command** beyond the call
+/// itself — the three things [`live_call_lines`] hands the command's cell,
+/// read off [`App`] by the main strip and off the viewed
+/// [`AgentRun`](crate::agents::AgentRun) by a session view's.
+pub(super) struct CommandRun<'a> {
+    /// The call's live rows and when each last changed, which the tail's
+    /// window follows (`docs/tool-streaming.md`).
+    pub(super) tail: &'a LiveTail,
+    /// How long the command has run — the `(Ns)` its cell shows, never the
+    /// turn's or the agent's own elapsed.
+    pub(super) elapsed: Duration,
+    /// The Ctrl+B hint once it is due ([`ctrl_b_hint`]), to close a row the
+    /// cell already has (`docs/live-cells.md`); `None` where the key would
+    /// not reach the command.
+    pub(super) hint: Option<&'static str>,
 }
 
 /// The live tool queue rendered as preview rows: each call's collapsed cell,
@@ -305,29 +336,19 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
     // The open collapsed group (docs/tool-groups.md): the reads it holds and
     // the ones leading the queue are one live cell; the queue's other calls
-    // keep cells of their own below it.
-    let group = super::tool_group::live_group_lines(app, width, Some(pulse), true);
-    let grouped = if group.is_empty() {
-        0
-    } else {
-        crate::app::leading_group_calls(app.tool_queue(), app.path_display()).count()
-    };
+    // keep cells of their own below it. It wears its hint row only while it
+    // is the strip's one cell — beside an agent tree or other calls it is
+    // its header alone, the height of the line it settles into
+    // (docs/live-cells.md).
+    let leading = crate::app::leading_group_calls(app.tool_queue(), app.path_display()).count();
+    let alone = lines.is_empty() && app.tool_queue().len() == leading;
+    let group = super::tool_group::live_group_lines(app, width, Some(pulse), true, alone);
+    let grouped = if group.is_empty() { 0 } else { leading };
     if !group.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
         lines.extend(group);
-        // A long search can go to the background like any command — its
-        // cell is the group's, so the hint hangs off the group's.
-        if let Some(front) = app.tool_queue().front().filter(|_| grouped > 0)
-            && front.status == ToolStatus::Running
-            && let Some(hint) = ctrl_b_hint(front)
-            && app
-                .background_hint_elapsed()
-                .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-        {
-            lines.push(result_row(1, hint.to_string()));
-        }
     }
     // Each queued previewed call owns the next adopted draft, in queue order
     // (docs/write-streaming.md) — the group's own included: a scratchpad
@@ -345,19 +366,10 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         let draft = crate::app::previewed_display(&tool.name)
             .then(|| drafts.next())
             .flatten();
-        lines.extend(live_call_lines(
-            tool,
-            draft,
-            app.live_tail(),
-            elapsed,
-            pulse,
-            width,
-            app.path_display(),
-        ));
         // A running command (a model `bash` call or the `!` shell) can be
         // moved to the background with Ctrl+B, and a wait on a session that
-        // already runs there ended — hint what the key does under the live
-        // cell (`ctrl_b_hint`), but only once the command has been running a
+        // already runs there ended — the live cell hints what the key does
+        // (`ctrl_b_hint`), but only once the command has been running a
         // few seconds (`TOOL_BACKGROUND_HINT_DELAY`), Claude-Code-style: a
         // command that finishes right away never flashes the hint (Ctrl+B
         // still works the whole time — only the hint waits). The command's
@@ -365,14 +377,25 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         // (`App::command_elapsed`). Live-only by construction: this renderer
         // never feeds scrollback commits, so the hint is never committed
         // (docs/background.md).
-        if tool.status == ToolStatus::Running
-            && let Some(hint) = ctrl_b_hint(tool)
-            && app
-                .background_hint_elapsed()
-                .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-        {
-            lines.push(result_row(1, hint.to_string()));
-        }
+        let hint = (tool.status == ToolStatus::Running)
+            .then(|| ctrl_b_hint(tool))
+            .flatten()
+            .filter(|_| {
+                app.background_hint_elapsed()
+                    .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
+            });
+        lines.extend(live_call_lines(
+            tool,
+            draft,
+            &CommandRun {
+                tail: app.live_tail(),
+                elapsed,
+                hint,
+            },
+            pulse,
+            width,
+            app.path_display(),
+        ));
     }
     lines
 }

@@ -502,7 +502,9 @@ fn the_managers_list_page_signs_its_rows_like_every_other_menu() {
 }
 
 /// A turn with a `bash` call streaming its output — the strip content the
-/// user reported losing on a short terminal (`docs/strip-flow.md`).
+/// user reported losing on a short terminal (`docs/strip-flow.md`). The cell
+/// stands five rows tall: its header, the three rows it will settle into,
+/// and the clock row (`docs/live-cells.md`).
 fn streaming_bash_app() -> App {
     let mut app = App::new();
     app.begin_stream();
@@ -523,7 +525,7 @@ fn a_squeezed_strip_flows_the_rows_it_cannot_paint() {
     // They flow into real scrollback now, so the cell **scrolls**: its top
     // freezes above the region and the newest rows keep the screen.
     let app = streaming_bash_app();
-    let (width, height) = (60u16, 11u16);
+    let (width, height) = (60u16, 9u16);
     let want = crate::ui::preview_rows(&app, width);
     let painted = crate::ui::fitted_preview_rows(&app, width, height);
     assert!(
@@ -551,7 +553,7 @@ fn the_strips_flow_freezes_while_the_command_streams() {
     // what the strip is *of* and the flowed rows freeze (the ↓ manager's
     // rule, `docs/view-flow.md`).
     let mut app = streaming_bash_app();
-    let (width, height) = (60u16, 11u16);
+    let (width, height) = (60u16, 9u16);
     let before = view_flow_signature(&app, width, height, NO_CAP).expect("overflows");
     app.push_tool_output("64 bytes from 1e100.net: icmp_seq=21\n");
     app.set_status_times(std::time::Duration::from_secs(65), None);
@@ -561,7 +563,7 @@ fn the_strips_flow_freezes_while_the_command_streams() {
 
 #[test]
 fn a_new_call_and_a_resize_re_sign_the_strips_flow() {
-    let (width, height) = (60u16, 11u16);
+    let (width, height) = (60u16, 9u16);
     let app = streaming_bash_app();
     let first = view_flow_signature(&app, width, height, NO_CAP).expect("overflows");
 

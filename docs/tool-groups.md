@@ -79,7 +79,13 @@ go and the rebuild paints its calls as cells.
   `2 directories`), the line closed by a `…`.
 - The `⎿` row says what the group is doing, **one call's value at a time,
   in the order the calls ran** (*The hint row*, below), and between rounds it
-  keeps saying what the group last did. A read or a scratchpad edit names its
+  keeps saying what the group last did. The group wears it only while it is
+  the strip's **only** cell: beside the rest of a mixed batch, an agent tree
+  or a `write` streaming under it, the group is its header alone — the height
+  of the line it settles into — and the other cells say what is running. A
+  hint row beside other cells was a row the strip gave back the moment the
+  group closed under them, and the box rose by it (`docs/live-cells.md`).
+  A read or a scratchpad edit names its
   file (by the session's path display rule, `docs/tools.md` *Path display*),
   **wrapped** under the corner when the row is too narrow for it — a path's
   file name is at its end, which a cut would take — over as many rows as it
@@ -142,12 +148,17 @@ of its own there.
 A command that is still running after two seconds (`TOOL_GROUP_CLOCK_DELAY`,
 the reference's threshold) wears its own **clock** at the end of the row —
 `$ grep -rn todo . (12s)`, then `(12s · 34 lines)` once it has printed — so a
-long search reads as alive rather than frozen. The clock stays whole: it
-rides the command's last row while it fits there, and moves to a row of its
-own under the command when it does not. The clock is the command's own
+long search reads as alive rather than frozen. The clock stays whole and
+never takes a row: it rides the command's last row where it fits there, and
+is left out where it does not. On a row of its own it was a row the cell grew
+two seconds into a search and gave back when the search ended, the group
+still open, and the box moved with it (`docs/live-cells.md`); the status line
+counts the turn either way. The clock is the command's own
 (`App::command_elapsed`) and rides only its own value: while the row is still
 showing an earlier call, it shows no clock at all. A command running long
-enough for Ctrl+B keeps that hint too, hung off the group's cell.
+enough for Ctrl+B wears that hint the same way — after the clock, on the
+command's last row, or not at all (`group_ctrl_b_hint`,
+`ui::tool::with_hint`).
 
 **Settled**, in scrollback, once the group closes:
 
@@ -317,10 +328,14 @@ no-op with none open):
   group, one led by anything else closes it;
 - a **subagent launch**, a **`write` starting to stream** into a cell of
   its own — one whose path is out and lies outside every scratchpad; until
-  its path is out nothing says where it writes, so its cell streams **under**
-  the open group, which stays up over it, and a scratchpad write joins it
-  instead —, a **steered message** landing, a **notice** (an error notice, a
-  background shell's or an agent's completion);
+  its path is out nothing says where it writes, so it has **no cell yet**:
+  the open group stays up alone, and the write joins it (a scratchpad path)
+  or closes it and takes its cell (any other) once the path arrives. A
+  `● Write` cell put up before the path said which stood on two rows the
+  group took back when the write turned out to be its own
+  (`ui::live::drafting_lines`, `docs/live-cells.md`) —, a **steered message**
+  landing, a **notice** (an error notice, a background shell's or an agent's
+  completion);
 - a **permission prompt** about a call that is no read, so the line commits
   above the question; a prompt about a *read* (manual mode asking about `ls`)
   keeps the group open and shows it at rest above the asked-about call's own
@@ -382,8 +397,10 @@ hint row's queue (every value in order, each held, none skipped, a new group
 starting over) in `app/tests/tool_group.rs`, with the scratchpad edits'
 membership, line counts and streaming drafts beside them; the two looks, the
 path display, the narrow-width fit, a wrapped path and command, the clock
-moving under a command too wide for it, the `+A -D` counts, a parallel batch's
-first value then its next, a thought inside the open group leaving the strip
+left out beside a command too wide for it, the hint row given up beside other
+cells, a write with no path yet waiting under the group, the `+A -D` counts, a
+parallel batch's first value then its next, a thought inside the open group
+leaving the strip
 to its cell and the conversation to the group's line, and the rebuild in
 `ui/tests/tool_group.rs`; `read_kind` and `is_read_only` over the reference's
 own cases plus adversarial ones (redirect spellings, unicode spaces, `find`

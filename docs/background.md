@@ -388,12 +388,20 @@ inside the band.
 
 ### Ctrl+B
 
-The running `bash` cell's live preview appends a dim
-`(ctrl+b to run in background)` row (live-only — never committed); the
-running `!` shell cell gets the same row. A running `bashwait` or `bashsend`
+The running `bash` cell's live preview carries a dim
+`(ctrl+b to run in background)` hint (live-only — never committed); the
+running `!` shell cell gets the same one. It is **not a row of its own**: it
+closes a row the cell already has — the clock row
+(`+34 lines (22s · wait 1m 38s) (ctrl+b to run in background)`), the
+`⎿ Running… (5s)` row, an agent tree's header — and is left out whole where
+that row has no room for it (`ui::tool::with_hint`). A hint on its own row was
+a row the cell took three seconds in and gave back when the command ended, so
+the box under it rose a row at every slow command's end
+(`docs/live-cells.md`); the key works whether the hint is showing or not.
+A running `bashwait` or `bashsend`
 cell gets `(ctrl+b to stop waiting)` instead: its session already runs in the
 background, so there the key ends the wait and the command keeps going. A
-`bashkill` gets no row at all, since the key does nothing to a kill
+`bashkill` gets no hint at all, since the key does nothing to a kill
 (`ui::tool::ctrl_b_hint` picks which). The hint is **delayed**,
 Claude-Code-style: it appears only once the command has been running for
 `ui::TOOL_BACKGROUND_HINT_DELAY` (3s), so a command that finishes right away
@@ -404,7 +412,7 @@ model `bash` call's clock starts at its `ToolStart`, a `!` shell run's in
 `run_shell`, cleared at the command's resolution and each turn start. Turn
 elapsed won't do — a model tool can start deep into a turn. The same clock
 is what the running cell **displays** — the `bash` cell's `+N lines (Ns ·
-timeout …)` clock row and the `!` shell's `⎿ Running… (Ns)` row read it through the plain
+wait …)` clock row and the `!` shell's `⎿ Running… (Ns)` row read it through the plain
 `App::command_elapsed`, what `set_command_elapsed` set; `background_hint_elapsed`
 is that value *masked* for the hint's one job: the band and every
 composer-replacing picker blank it (they swallow the key) while keeping the

@@ -1,22 +1,26 @@
-//! The thinking stream's cells: the live block the strip previews, the
+//! The thinking stream's cells: the live row the strip previews, the
 //! collapsed `Thought for …` line it commits, and the Ctrl+O expansion.
 //! See `docs/thinking-stream.md`.
 //!
-//! While a phase runs it wears the **tool cell's shape** — a `● Thinking…`
-//! header over the chain-of-thought in the `⎿` gutter — because that is what
-//! it is: something working, with output under it. When it settles the shape
-//! goes away entirely: the committed line is bullet-less
+//! While a phase runs it wears the **tool cell's bullet** — a blinking `●`
+//! beside a shimmering `Thinking…` — because that is what it is: something
+//! working. The thought itself rides the same row, its newest line beside
+//! the label, and the block is **one row** whatever was thought: one row is
+//! what it settles into, so the phase ends without the strip giving up a
+//! single row and the box holds still (`docs/live-cells.md`). When it
+//! settles the shape goes away entirely: the committed line is bullet-less
 //! (`Thought for 3s · 228 tokens (ctrl+o to expand)`), the
 //! [`summary_lines`](super::summary_lines) shape, because a finished thought
 //! is turn meta rather than a cell — dim on both surfaces, `Done for Ns`'s
-//! exact dress. The weight and the motion live in the block above, which is
+//! exact dress. The weight and the motion live in the row above, which is
 //! where something is still happening.
 //!
 //! Nothing here ever renders the chain-of-thought into a *committed* row —
 //! [`reasoning_lines`] (the one renderer scrollback and the resize repaint
-//! use) is a single line. The text lives in the live block while the phase
-//! runs and in [`reasoning_full_lines`] afterwards, which is exactly the
-//! collapsed-inline / expanded-in-Ctrl+O contract a tool call has.
+//! use) is a single line. The whole text lives in the Ctrl+O transcript,
+//! while the phase runs ([`reasoning_live_full_lines`]) and afterwards
+//! ([`reasoning_full_lines`]) — the collapsed-inline / expanded-in-Ctrl+O
+//! contract a tool call has.
 
 use super::file_cell::gutter_row_styled;
 use super::status::shimmer_spans_from;
@@ -174,49 +178,68 @@ fn gutter_body(text: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 /// The **live** block for an open thinking phase, drawn in the strip's preview
-/// slot: a `● Thinking…` header — the bullet blinking at the frame `pulse`
-/// and the label carrying the status line's **shimmer** sweep
+/// slot: **one row** — the `● Thinking…` label, its bullet blinking at the
+/// frame `pulse` and its text carrying the status line's **shimmer** sweep
 /// ([`shimmer_spans_from`], the same wave the `Working…` verb below it wears,
 /// but floored at the near-white [`reasoning_shimmer_base`] so it reads as
-/// bold white between crests rather than codex's grey) — over the **tail** of
-/// the thought so far in the `⎿` gutter: the last [`REASONING_PEEK_LINES`]
-/// wrapped rows, dim and italic.
+/// bold white between crests rather than codex's grey) — and, beside it, the
+/// row of thought still being written ([`newest_row`]), dim and italic.
 ///
-/// Two animations off one clock, and neither can ever be committed: the whole
-/// block is live-only by construction (only the strip calls this), which is
-/// why the pulse and the shimmer are unconditional here and absent from every
-/// other renderer in this module.
+/// One row because one row is what the phase **settles into**
+/// ([`reasoning_lines`]): the strip trades this row for that line and its gap
+/// for the line's spacer, so the box does not move when the phase ends —
+/// whatever follows it, and however long that takes to arrive. A block that
+/// stood taller gave its extra rows up at that moment, and the box rose until
+/// the round's next cell pushed it back down (`docs/live-cells.md`). The whole
+/// thought is one Ctrl+O away, while it streams and after.
 ///
-/// Blank source lines are skipped: reasoning is full of paragraph breaks, and
-/// spending the small window on them would show a third as much thought.
-/// Walking newest-first wraps only what the window can show, so redrawing this
-/// every animation frame costs O(window), not O(reasoning).
+/// Two animations off one clock, and neither can ever be committed: the row
+/// is live-only by construction (only the strip calls this), which is why the
+/// pulse and the shimmer are unconditional here and absent from every other
+/// renderer in this module.
 pub(super) fn live_reasoning_lines(text: &str, pulse: Duration, width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![thinking_header(
+    let mut line = thinking_header(
         Some(pulse),
         shimmer_spans_from(REASONING_RUNNING, pulse, reasoning_shimmer_base()),
-    )];
-    let inner = body_width(width);
-    let mut window: VecDeque<String> = VecDeque::new();
-    for source in text.split('\n').rev() {
-        if source.trim().is_empty() {
-            continue;
-        }
-        for row in wrap_output(source, inner).into_iter().rev() {
-            window.push_front(row);
-        }
-        if window.len() >= REASONING_PEEK_LINES {
-            break;
-        }
-    }
-    while window.len() > REASONING_PEEK_LINES {
-        window.pop_front();
-    }
-    lines.extend(
-        window
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| body_row(i, row)),
     );
-    lines
+    if let Some(row) = newest_row(text, width) {
+        line.spans.push(Span::raw(REASONING_TAIL_GAP));
+        line.spans.push(Span::styled(
+            row,
+            Style::new()
+                .fg(reasoning_text_color())
+                .add_modifier(REASONING_TEXT_MODIFIER),
+        ));
+    }
+    vec![line]
+}
+
+/// The row of thought the live block shows beside its label: the **last
+/// display row** of the newest line that says anything, wrapped in the
+/// columns left of a `width`-column row once the label is seated.
+///
+/// The last *wrapped row* rather than the line's last columns: it starts at
+/// a word and grows to the right until it wraps, so it reads as text
+/// arriving — a window sliding over the line's tail would move every glyph
+/// on every token. Blank lines are skipped (reasoning is full of paragraph
+/// breaks, and a delta often ends on one), and the row is fitted here rather
+/// than left to the paint, which would clip a wide glyph in half.
+///
+/// `None` when nothing has been thought yet, or when the terminal leaves
+/// fewer than [`REASONING_TAIL_MIN_COLS`] beside the label — a syllable at a
+/// time says nothing. Only the newest line is wrapped, so a long think costs
+/// O(that line) per animation frame, not O(reasoning).
+fn newest_row(text: &str, width: u16) -> Option<String> {
+    let room = usize::from(width)
+        .checked_sub(cols(TOOL_BULLET) + cols(REASONING_RUNNING) + cols(REASONING_TAIL_GAP))?;
+    if room < REASONING_TAIL_MIN_COLS {
+        return None;
+    }
+    let source = text
+        .split('\n')
+        .rev()
+        .find(|line| !line.trim().is_empty())?;
+    let row = wrap_output(source, u16::try_from(room).unwrap_or(u16::MAX)).pop()?;
+    let row = row.trim();
+    (!row.is_empty()).then(|| row.to_string())
 }

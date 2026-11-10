@@ -251,10 +251,15 @@ off (the default): once its path is out and inside a session's scratchpad
 `⎿` row names its file (`docs/tool-groups.md` *Scratchpad edits*). The branch
 is one walk, `ui::live::drafting_lines`, shared by the rows reserved and the
 rows drawn: the open group, then a cell for every draft that is not part of
-it. A draft whose path has not finished arriving is one of those — nothing
-says yet where it writes — so its cell streams under the group, which stays
-open over it; only a path outside every scratchpad closes the group
-(`App::draft_ends_group`, asked by the boundary after each piece). Once the
+it. A draft whose path has not finished arriving is neither yet — nothing
+says where it writes — so under an open group it has **no cell**: the group
+stays up alone until the path arrives, and then the write joins it or, with a
+path outside every scratchpad, closes it and takes its cell
+(`App::draft_ends_group`, asked by the boundary after each piece). A cell put
+up before the path said which stood on two rows that the group took back
+whenever the write turned out to be a scratchpad one, and the box moved with
+them (`docs/live-cells.md`); with no group open a pathless draft streams its
+cell as before. Once the
 batch adopts the drafts, a scratchpad `Write` the group counts takes its
 adopted draft along, so the k-th previewed cell outside the group still pairs
 with its own.

@@ -784,9 +784,9 @@ fn an_agent_views_running_command_tails_its_streamed_output() {
     let lines = preview_lines(&app, 60, None, preview_rows(&app, 60));
     let all: String = lines.iter().map(|l| plain(l) + "\n").collect();
     assert!(all.contains("line 9"), "the newest line tails: {all:?}");
-    assert!(!all.contains("line 4"), "older lines are hidden: {all:?}");
+    assert!(!all.contains("line 6"), "older lines are hidden: {all:?}");
     assert!(
-        all.contains("+5 lines (9s · wait 2m)"),
+        all.contains("+6 lines (9s · wait 2m)"),
         "the footer counts the command's own runtime, against its timeout: {all:?}"
     );
     assert_eq!(usize::from(preview_rows(&app, 60)), lines.len());

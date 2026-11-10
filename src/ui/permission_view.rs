@@ -389,7 +389,7 @@ fn context_chunks(app: &App, width: u16) -> Vec<Vec<Line<'static>>> {
     // The open read/search group the asked-about call follows, at rest
     // (docs/tool-groups.md) — merged into that call's chunk, so the budget
     // that may collapse the siblings never drops the call being asked about.
-    let group = super::tool_group::live_group_lines(app, width, None, false);
+    let group = super::tool_group::live_group_lines(app, width, None, false, true);
     if !group.is_empty() {
         match queue.first_mut() {
             Some(first) => {

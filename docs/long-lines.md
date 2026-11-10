@@ -91,12 +91,17 @@ output happens to be shaped is a cell you cannot skim.
 The block was given a row budget: so many display rows, whatever the output
 looks like — first four, beside a four-source-line budget, whichever ran out
 first; then, once Claude Code's own fold was measured (§5), **three over the
-hint**. The ceiling of the settled block is `TOOL_PEEK_ROWS` (4) either way,
-hint included, and that is also the window the **running** tail shows
-(`running_command_lines` shows the last four *rows*), so head and tail stay
-budgeted alike: a `bash` cell does not *grow* when it settles. (It can settle
-shorter — §4 ends the block at the first blank line — but the tail is still
-the ceiling.)
+hint**. The ceiling of the settled block is four rows either way
+(`TOOL_FOLD_ROWS` + 1, hint included), and the **running** tail is budgeted
+by the same fold, so head and tail are sized alike: a `bash` cell does not
+*grow* when it settles. Nor does it shrink any more. The tail used to be a
+flat four rows over a clock row of its own, which a cell that settled shorter
+— §4 ends the block at the first blank line — gave back in one frame, and the
+box under it hopped up a row or two at every command's end. The tail now
+stands on the fewest rows the output so far can settle into
+(`settled_command_rows`: the rows printed, or the first block's fold over its
+hint, whichever is fewer), with the clock on the row the hint will take — see
+[`live-cells.md`](live-cells.md).
 
 ### 1. A per-line row budget (`TOOL_LINE_MAX_ROWS = 3`) — retired
 
@@ -524,12 +529,12 @@ grep, three rows instead of ten:
 
 | Piece | Where |
 | --- | --- |
-| `TOOL_FOLD_ROWS`, `TOOL_PEEK_ROWS`, `TOOL_JSON_PRETTY_MAX_BYTES`, `FILE_PEEK_LINES` | `ui/theme.rs` |
+| `TOOL_FOLD_ROWS`, `TOOL_JSON_PRETTY_MAX_BYTES`, `FILE_PEEK_LINES` | `ui/theme.rs` |
 | `WrapMode::{wrap, rows}` — one scan, two uses; `fills_from_here` | `ui/wrap.rs` |
 | The display lines (`exec_display_lines`, `prettify_json_lines`, `pretty_json_line`) | `ui/tool.rs` |
 | The collapsed output fold (`result_peek_block`) | `ui/tool.rs` |
 | The first-block window (`BlankPolicy`, `is_blank_row`) | `ui/tool.rs` |
-| The running tail's `+N lines ({secs}s · timeout …)` clock row | `ui/tool.rs` (`running_command_lines`) |
+| The running tail's height and its `+N lines ({secs}s · wait …)` clock row | `ui/tool.rs` (`running_command_lines`, `settled_command_rows`, `clocked_output_row`) |
 | The numbered file cell's whole-line peek (§7) and its ceiling (§8) | `ui/file_cell.rs` (`file_cell_lines`, the draft's head, `numbered_row_lines`' `LineRows`, `peek_hint_line`), `ui/assistant.rs` (`code_content_head_rows`) |
 | The streaming `write`'s newest-rows tail (§7) | `ui/file_cell.rs` (`draft_cell_lines`), `ui/assistant.rs` (`code_content_tail_rows`) |
 

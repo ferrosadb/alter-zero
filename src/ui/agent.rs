@@ -3,8 +3,8 @@
 //! See `docs/agent-tool.md`.
 
 use super::theme::*;
-use super::tool::{bullet_span, result_row, shown_args};
-use super::wrap::{cols, truncate_cols};
+use super::tool::{bullet_span, shown_args, with_hint};
+use super::wrap::{cols, spans_cols, truncate_cols};
 use super::*;
 
 /// The group header's noun phrase: `2 agents` / `1 agent`.
@@ -215,25 +215,40 @@ fn single_live_agent_lines(
 ) -> Vec<Line<'static>> {
     // The same blinking grey bullet a running tool cell has — this *is* the
     // round's running cell (`docs/tool-pulse.md`).
-    let mut lines = vec![agent_cell_header(
-        tool_running_color(),
-        Some(app.pulse()),
-        &run.description,
-    )];
-    lines.push(agent_activity_row(
-        TOOL_RESULT_PREFIX,
-        &run.activity_shown(|name, args| shown_args(name, args, app.path_display())),
-        agent_status_color(run.status),
-        width,
-    ));
-    if !background
+    let mut header = agent_cell_header(tool_running_color(), Some(app.pulse()), &run.description);
+    // The Ctrl+B hint rides the header where it fits whole — never a row of
+    // its own, which the cell this settles into has no row for: moved to the
+    // background it is the header over one row (docs/live-cells.md).
+    let hint = with_hint(
+        String::new(),
+        background_hint(app, background),
+        usize::from(width).saturating_sub(spans_cols(&header.spans)),
+    );
+    if !hint.is_empty() {
+        header
+            .spans
+            .push(Span::styled(hint, Style::new().fg(tool_dim_color())));
+    }
+    vec![
+        header,
+        agent_activity_row(
+            TOOL_RESULT_PREFIX,
+            &run.activity_shown(|name, args| shown_args(name, args, app.path_display())),
+            agent_status_color(run.status),
+            width,
+        ),
+    ]
+}
+
+/// The Ctrl+B hint a live **foreground** agent cell wears once the group has
+/// run long enough to show one (`docs/background.md`): the whole group can be
+/// moved to the background like a running command.
+fn background_hint(app: &App, background: bool) -> Option<&'static str> {
+    (!background
         && app
             .background_hint_elapsed()
-            .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-    {
-        lines.push(result_row(1, TOOL_BACKGROUND_HINT.to_string()));
-    }
-    lines
+            .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY))
+    .then_some(TOOL_BACKGROUND_HINT)
 }
 
 /// A **committed** agent group's tree cell (`docs/agent-tool.md`):
@@ -348,11 +363,23 @@ pub fn live_agent_group_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     if let [run] = runs.as_slice() {
         return single_live_agent_lines(app, run, live.background, width);
     }
+    // The whole group can be moved to the background with Ctrl+B — the
+    // delayed discoverability hint, exactly like a running bash cell's
+    // (docs/background.md), and like that cell's it rides a row the cell
+    // already has: after the header's own hint, where the two fit. A row of
+    // its own under the tree was a row the settled tree has no row for
+    // (docs/live-cells.md). Live-only by construction.
+    let text = format!("Running {}…", agent_count_phrase(runs.len()));
+    let hint = with_hint(
+        EXPAND_HINT.to_string(),
+        background_hint(app, live.background),
+        usize::from(width).saturating_sub(cols(TOOL_BULLET) + cols(&text)),
+    );
     let mut lines = vec![agent_group_header(
         tool_running_color(),
         Some(app.pulse()),
-        format!("Running {}…", agent_count_phrase(runs.len())),
-        EXPAND_HINT,
+        text,
+        &hint,
     )];
     let count = runs.len();
     for (i, run) in runs.iter().enumerate() {
@@ -364,16 +391,6 @@ pub fn live_agent_group_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             Some((activity.as_str(), agent_status_color(run.status))),
             width,
         ));
-    }
-    // The whole group can be moved to the background with Ctrl+B — the
-    // delayed discoverability hint, exactly like a running bash cell's
-    // (docs/background.md). Live-only by construction.
-    if !live.background
-        && app
-            .background_hint_elapsed()
-            .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
-    {
-        lines.push(result_row(1, TOOL_BACKGROUND_HINT.to_string()));
     }
     lines
 }
@@ -883,8 +900,12 @@ pub(super) fn agent_view_preview_lines(
             lines.extend(super::live::live_call_lines(
                 tool,
                 draft,
-                run.live_tail(),
-                run.command_elapsed.unwrap_or(Duration::ZERO),
+                &super::live::CommandRun {
+                    tail: run.live_tail(),
+                    elapsed: run.command_elapsed.unwrap_or(Duration::ZERO),
+                    // Ctrl+B does not reach a subagent's command.
+                    hint: None,
+                },
                 pulse,
                 width,
                 paths,

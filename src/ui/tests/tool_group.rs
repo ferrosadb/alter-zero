@@ -229,7 +229,7 @@ fn the_live_cell_counts_the_held_and_the_running_reads_under_a_blinking_bullet()
     app.advance_group_hint(Duration::ZERO);
     app.start_tool("Bash", "ls -la", None);
     app.advance_group_hint(crate::app::GROUP_HINT_HOLD);
-    let lines = live_group_lines(&app, 80, Some(Duration::ZERO), true);
+    let lines = live_group_lines(&app, 80, Some(Duration::ZERO), true, true);
     assert_eq!(
         texts(&lines),
         [
@@ -238,7 +238,7 @@ fn the_live_cell_counts_the_held_and_the_running_reads_under_a_blinking_bullet()
         ]
     );
     assert_eq!(lines[0].spans[0].style.fg, Some(tool_running_color()));
-    let hidden = live_group_lines(&app, 80, Some(TOOL_PULSE_PERIOD / 2), true);
+    let hidden = live_group_lines(&app, 80, Some(TOOL_PULSE_PERIOD / 2), true, true);
     assert!(
         plain(&hidden[0]).starts_with("  Reading 1 file"),
         "the bullet blinks, the text holds its column: {:?}",
@@ -269,7 +269,7 @@ fn a_parallel_batch_shows_its_first_calls_value_first_then_the_next() {
     let t0 = Duration::from_secs(5);
     app.advance_group_hint(t0);
     assert_eq!(
-        texts(&live_group_lines(&app, 80, None, true)),
+        texts(&live_group_lines(&app, 80, None, true, true)),
         [
             "● Reading 1 file, listing 1 directory… (ctrl+o to expand)",
             "  ⎿  README.md",
@@ -277,7 +277,7 @@ fn a_parallel_batch_shows_its_first_calls_value_first_then_the_next() {
     );
     app.advance_group_hint(t0 + crate::app::GROUP_HINT_HOLD);
     assert_eq!(
-        texts(&live_group_lines(&app, 80, None, true)),
+        texts(&live_group_lines(&app, 80, None, true, true)),
         [
             "● Reading 1 file, listing 1 directory… (ctrl+o to expand)",
             "  ⎿  $ ls -la",
@@ -293,20 +293,39 @@ fn a_command_running_two_seconds_shows_its_clock_on_the_hint_row() {
     app.begin_stream();
     app.start_tool("Bash", "grep -rn todo .", None);
     app.set_command_elapsed(Some(Duration::from_millis(1900)));
-    let row = |app: &App| texts(&live_group_lines(app, 80, None, true))[1].clone();
+    let row = |app: &App| texts(&live_group_lines(app, 80, None, true, true))[1].clone();
     assert_eq!(row(&app), "  ⎿  $ grep -rn todo .");
+    app.set_command_elapsed(Some(Duration::from_millis(2500)));
+    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (2s)");
+    // A second later the Ctrl+B hint is due, and follows the clock
+    // (docs/background.md).
     app.set_command_elapsed(Some(Duration::from_secs(12)));
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s) (ctrl+b to run in background)"
+    );
     app.push_tool_output("a.rs:1: todo\n");
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s · 1 line)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s · 1 line) (ctrl+b to run in background)"
+    );
     app.push_tool_output("b.rs:2: todo\n");
     app.set_command_elapsed(Some(Duration::from_secs(65)));
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (1m 5s · 2 lines)");
-    // A row too narrow for both keeps the whole command and moves the clock,
-    // whole, under it.
     assert_eq!(
-        texts(&live_group_lines(&app, 34, None, true))[1..],
-        ["  ⎿  $ grep -rn todo .", "       (1m 5s · 2 lines)"]
+        row(&app),
+        "  ⎿  $ grep -rn todo . (1m 5s · 2 lines) (ctrl+b to run in background)"
+    );
+    // A row with room for the clock and none for the hint keeps the clock…
+    assert_eq!(
+        texts(&live_group_lines(&app, 60, None, true, true))[1..],
+        ["  ⎿  $ grep -rn todo . (1m 5s · 2 lines)"]
+    );
+    // …and one too narrow for either keeps the whole command and lets the
+    // clock go: a row of its own under the command would be a row the cell
+    // gives back when the command ends (docs/live-cells.md).
+    assert_eq!(
+        texts(&live_group_lines(&app, 34, None, true, true))[1..],
+        ["  ⎿  $ grep -rn todo ."]
     );
 }
 
@@ -319,16 +338,19 @@ fn the_clock_rides_only_the_running_commands_own_value() {
     app.set_command_elapsed(Some(Duration::from_secs(12)));
     let t0 = Duration::from_secs(5);
     app.advance_group_hint(t0);
-    let row = |app: &App| texts(&live_group_lines(app, 80, None, true))[1].clone();
+    let row = |app: &App| texts(&live_group_lines(app, 80, None, true, true))[1].clone();
     assert_eq!(row(&app), "  ⎿  mathutil.py");
     app.advance_group_hint(t0 + crate::app::GROUP_HINT_HOLD);
-    assert_eq!(row(&app), "  ⎿  $ grep -rn todo . (12s)");
+    assert_eq!(
+        row(&app),
+        "  ⎿  $ grep -rn todo . (12s) (ctrl+b to run in background)"
+    );
 }
 
 #[test]
 fn between_calls_the_open_group_keeps_its_last_read_as_the_hint() {
     let app = holding_a_read("mathutil.py");
-    let lines = live_group_lines(&app, 80, Some(Duration::ZERO), true);
+    let lines = live_group_lines(&app, 80, Some(Duration::ZERO), true, true);
     assert_eq!(
         texts(&lines),
         ["● Reading 1 file… (ctrl+o to expand)", "  ⎿  mathutil.py",]
@@ -346,7 +368,7 @@ fn a_command_hint_shows_every_line_of_the_command() {
         "grep -rn  \"def add\"   src\ngrep -rn \"def sub\" src",
         None,
     );
-    let lines = live_group_lines(&app, 80, None, true);
+    let lines = live_group_lines(&app, 80, None, true, true);
     assert_eq!(
         texts(&lines),
         [
@@ -367,7 +389,7 @@ fn a_long_command_wraps_under_the_hint_instead_of_being_cut() {
         None,
     );
     assert_eq!(
-        texts(&live_group_lines(&app, 34, None, true))[1..],
+        texts(&live_group_lines(&app, 34, None, true, true))[1..],
         [
             "  ⎿  $ grep -rn \"fn render\" src/ui",
             "       src/app src/tui",
@@ -379,7 +401,7 @@ fn a_long_command_wraps_under_the_hint_instead_of_being_cut() {
 fn verbose_output_has_no_live_group() {
     let mut app = holding_a_read("a.py");
     app.settings_mut().verbose = true;
-    assert!(live_group_lines(&app, 80, None, true).is_empty());
+    assert!(live_group_lines(&app, 80, None, true, true).is_empty());
 }
 
 #[test]
@@ -413,11 +435,13 @@ fn the_strip_shows_the_group_over_the_rest_of_its_batch() {
     let rows = preview_rows(&app, 80);
     let preview = texts(&preview_lines(&app, 80, None, rows));
     assert_eq!(usize::from(rows), preview.len());
+    // Beside the batch's other cells the group is its header alone — the
+    // height of the line it settles into when the write starts
+    // (docs/live-cells.md).
     assert_eq!(
-        preview[..4],
+        preview[..3],
         [
             "● Reading 1 file, listing 1 directory… (ctrl+o to expand)".to_string(),
-            "  ⎿  $ ls -la".to_string(),
             String::new(),
             "● Write(b.py)".to_string(),
         ],
@@ -455,7 +479,7 @@ fn a_thought_with_no_group_open_keeps_its_own_block() {
     let rows = preview_rows(&app, 80);
     let preview = texts(&preview_lines(&app, 80, None, rows));
     assert_eq!(usize::from(rows), preview.len());
-    assert_eq!(preview, ["● Thinking…", "  ⎿  Before anything is read."]);
+    assert_eq!(preview, ["● Thinking… Before anything is read."]);
 }
 
 #[test]
@@ -569,7 +593,7 @@ fn an_open_scratchpad_edit_is_making_over_its_whole_path() {
     app.start_tool("Write", &pad("guess_the_number.py"), None);
     app.end_tool("Wrote 55 lines to guess_the_number.py", true);
     app.place_resolved_tool();
-    let lines = live_group_lines(&app, 100, None, true);
+    let lines = live_group_lines(&app, 100, None, true, true);
     assert_eq!(
         texts(&lines),
         [
@@ -587,7 +611,7 @@ fn an_open_scratchpad_edit_is_making_over_its_whole_path() {
     // Too wide for the row, the path wraps under the corner instead of
     // losing its file name to a cut…
     assert_eq!(
-        texts(&live_group_lines(&app, 40, None, true))[1..],
+        texts(&live_group_lines(&app, 40, None, true, true))[1..],
         [
             "  ⎿  /tmp/alter-zero-0/s1/scratchpad/gue",
             "     ss_the_number.py",
@@ -595,7 +619,7 @@ fn an_open_scratchpad_edit_is_making_over_its_whole_path() {
     );
     // …over as many rows as it takes.
     assert_eq!(
-        texts(&live_group_lines(&app, 20, None, true))[1..],
+        texts(&live_group_lines(&app, 20, None, true, true))[1..],
         [
             "  ⎿  /tmp/alter-zero",
             "     -0/s1/scratchpa",
@@ -648,7 +672,11 @@ fn a_scratchpad_write_joins_the_reads_while_it_streams() {
 }
 
 #[test]
-fn a_write_whose_path_is_not_out_yet_keeps_the_group_over_its_cell() {
+fn a_write_whose_path_is_not_out_yet_waits_under_the_open_group() {
+    // Nothing says yet whether the write is the group's own: in the
+    // scratchpad it joins the cell, anywhere else it ends it. A `● Write`
+    // cell put up meanwhile stood on rows the group took back when the path
+    // turned out to be the scratchpad's (docs/live-cells.md).
     let mut app = holding_a_read("mathutil.py");
     app.push_tool_call_fragment(&write_piece("write", r#"{"pa"#));
     let rows = preview_rows(&app, 80);
@@ -656,14 +684,19 @@ fn a_write_whose_path_is_not_out_yet_keeps_the_group_over_its_cell() {
     assert_eq!(usize::from(rows), lines.len());
     assert_eq!(
         texts(&lines),
-        [
-            "● Reading 1 file… (ctrl+o to expand)",
-            "  ⎿  mathutil.py",
-            "",
-            "● Write",
-            "  ⎿  Writing…",
-        ]
+        ["● Reading 1 file… (ctrl+o to expand)", "  ⎿  mathutil.py"]
     );
+}
+
+#[test]
+fn a_write_whose_path_is_not_out_yet_has_its_cell_where_no_group_is_open() {
+    let mut app = App::new();
+    app.begin_stream();
+    app.push_tool_call_fragment(&write_piece("write", r#"{"pa"#));
+    let rows = preview_rows(&app, 80);
+    let lines = preview_lines(&app, 80, None, rows);
+    assert_eq!(usize::from(rows), lines.len());
+    assert_eq!(texts(&lines), ["● Write", "  ⎿  Writing…"]);
 }
 
 #[test]

@@ -797,37 +797,34 @@ fn settled_one_liners_start_at_the_edge_like_the_turn_summary() {
 fn render_live_shell_run_shows_running_elapsed_and_hides_the_status_line() {
     // A `!` shell run suppresses the spinner status line entirely and shows
     // its elapsed in the `⎿ Running… (Ns)` preview (req 3): the strip is
-    // the preview cell — the running row + the live-only Ctrl+B hint
-    // (docs/background.md) — plus its gap, then the box's top rule — no
-    // status row, no `esc to interrupt` hint. See docs/shell-command.md.
+    // the preview cell — the running row, the live-only Ctrl+B hint riding
+    // the end of it (docs/background.md, docs/live-cells.md) — plus its
+    // gap, then the box's top rule — no status row, no `esc to interrupt`
+    // hint. See docs/shell-command.md.
     let mut app = App::new();
     app.begin_shell("sleep 30");
     app.set_status_times(Duration::from_secs(3), None);
-    // Past the hint delay so the Ctrl+B hint row shows (docs/background.md).
+    // Past the hint delay so the Ctrl+B hint shows (docs/background.md).
     app.set_command_elapsed(Some(Duration::from_secs(3)));
-    let mut buf = buffer(40, 6); // preview (2) + gap + (two rules + one input)
+    let mut buf = buffer(60, 5); // preview (1) + gap + (two rules + one input)
     render_live(buf.area, &mut buf, &app);
 
     assert_eq!(
-        row(&buf, 0, 40).trim_end(),
-        "  ⎿  Running… (3s)",
-        "the running preview carries the elapsed the status line would have"
-    );
-    assert_eq!(
-        row(&buf, 1, 40).trim(),
-        "(ctrl+b to run in background)",
-        "the live cell hints the Ctrl+B background handoff"
+        row(&buf, 0, 60).trim_end(),
+        "  ⎿  Running… (3s) (ctrl+b to run in background)",
+        "the running preview carries the elapsed the status line would have, \
+         and hints the Ctrl+B background handoff on the same row"
     );
     assert!(
-        row(&buf, 2, 40).trim().is_empty(),
+        row(&buf, 1, 60).trim().is_empty(),
         "blank gap row below the preview"
     );
     assert_eq!(
-        buf[(0, 3)].symbol(),
+        buf[(0, 2)].symbol(),
         "─",
         "the box's top rule sits right under the preview gap — no status line between"
     );
-    let all: String = (0..6).map(|y| row(&buf, y, 40)).collect();
+    let all: String = (0..5).map(|y| row(&buf, y, 60)).collect();
     assert!(
         !all.contains("esc to interrupt"),
         "a shell run shows no status line (and so no interrupt hint): {all:?}"
@@ -836,6 +833,24 @@ fn render_live_shell_run_shows_running_elapsed_and_hides_the_status_line() {
         all.matches("Running…").count(),
         1,
         "`Running…` appears only in the preview, not also in a status line"
+    );
+}
+
+#[test]
+fn a_shell_run_too_narrow_for_the_hint_keeps_its_one_running_row() {
+    // The hint joins the running row or sits out whole — it never takes a
+    // row of its own, which the cell this settles into has no row for.
+    let mut app = App::new();
+    app.begin_shell("sleep 30");
+    app.set_command_elapsed(Some(Duration::from_secs(3)));
+    assert_eq!(preview_rows(&app, 40), 1);
+    let mut buf = buffer(40, 5);
+    render_live(buf.area, &mut buf, &app);
+    assert_eq!(row(&buf, 0, 40).trim_end(), "  ⎿  Running… (3s)");
+    assert_eq!(
+        buf[(0, 2)].symbol(),
+        "─",
+        "the box sits right under the gap"
     );
 }
 

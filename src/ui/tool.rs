@@ -436,11 +436,54 @@ pub(super) fn more_hint_line(hidden: usize) -> Line<'static> {
 /// line's timer (`1m 5s`, never a bare `65s`). Only shown live in
 /// [`render_live`]; the committed cell renders its output, not `Running…`.
 /// See `docs/shell-command.md`.
-pub(super) fn shell_running_line(elapsed: Duration) -> Line<'static> {
+///
+/// `hint` is the Ctrl+B hint once it is due ([`ctrl_b_hint`]): it rides this
+/// row, after the clock, where the `width` has room for it whole
+/// ([`with_hint`]) — never a row of its own under it, which the cell this
+/// settles into has no counterpart for (`docs/live-cells.md`).
+pub(super) fn shell_running_line(
+    elapsed: Duration,
+    hint: Option<&'static str>,
+    width: u16,
+) -> Line<'static> {
     result_row(
         0,
-        format!("{TOOL_RUNNING} ({})", format_elapsed(elapsed.as_secs())),
+        with_hint(
+            format!("{TOOL_RUNNING} ({})", format_elapsed(elapsed.as_secs())),
+            hint,
+            gutter_room(width),
+        ),
     )
+}
+
+/// The columns a `⎿` gutter row's content has at `width`: what is left of the
+/// row past the [`TOOL_RESULT_PREFIX`] corner (or a continuation row's
+/// matching indent).
+fn gutter_room(width: u16) -> usize {
+    usize::from(width)
+        .saturating_sub(cols(TOOL_RESULT_PREFIX))
+        .max(1)
+}
+
+/// `text` with the live `hint` after it — `Running… (10s · wait 2m)
+/// (ctrl+b to run in background)` — when the two fit `room` columns
+/// together, else `text` alone.
+///
+/// A live cell's hint used to be a row of its own under the cell, and a row
+/// the settled cell does not have is a row the strip gives up when the call
+/// resolves: the box rose by it as every long command ended
+/// (`docs/live-cells.md`). So the hint joins a row the cell already has, or
+/// is left out **whole** — the key works either way, and a hint that wrapped
+/// would cost the very row it was folded in to save, while one cut mid-word
+/// says nothing.
+pub(super) fn with_hint(mut text: String, hint: Option<&str>, room: usize) -> String {
+    if let Some(hint) = hint
+        && cols(&text) + 1 + cols(hint) <= room
+    {
+        text.push(' ');
+        text.push_str(hint);
+    }
+    text
 }
 
 /// The output of `tool` split into display lines (a single trailing blank from a
@@ -630,39 +673,55 @@ fn command_clock_clause(elapsed: Duration, wait_ms: u64) -> String {
 }
 
 /// The live preview for a **running** command-style backend tool (`bash`): the
-/// coloured `● name(args)` header, a window of [`TOOL_PEEK_ROWS`] display
-/// **rows** of its output under the `⎿` gutter — the *tail*, what just
-/// streamed, ending at the lowest row **still moving** (`live`'s
-/// [`LiveTail::anchor`]): the output's last row for every command whose
-/// newest output is at its end, and the bar still redrawing for a program
-/// that leaves finished rows below it, pacman's parallel downloads
-/// (`docs/tool-streaming.md` *The window follows what is still moving*) —
-/// then the **clock row** — `+{hidden} lines ({elapsed} · wait
-/// {limit})` when any display rows are fully hidden, above or below the
-/// window, the bare `({elapsed} · wait {limit})` when none are, and for a
-/// command that has printed nothing yet the clause rides the corner row itself:
-/// `⎿ Running… ({elapsed} · wait {limit})`. The clause is on the cell in
-/// **every** shape, so a silent `sleep 100` no longer sits on a bare
-/// `Running…` for as long as it takes, and the limit is the model's own
-/// `wait` read off the call's verbatim arguments
+/// coloured `● name(args)` header over a body that stands on the rows the
+/// cell is **sure to settle into** ([`settled_command_rows`],
+/// `docs/live-cells.md`) — the finished peek's own rows in [`tool_lines`],
+/// spent on the *tail* instead of the head:
+///
+/// - **nothing printed** — `⎿ Running… ({elapsed} · wait {limit})`, the
+///   row the settled `(no output)` stands on;
+/// - **an output that fits those rows** — every row of it, the clock riding
+///   the end of the last one where it has room ([`clocked_output_row`]): the
+///   settled cell has no row under them for a clock to stand on;
+/// - **an output that does not** — as many rows as the fold keeps above its
+///   hint, ending at the lowest row **still moving** (`live`'s
+///   [`LiveTail::anchor`]: the output's last row for every command whose
+///   newest output is at its end, and the bar still redrawing for a program
+///   that leaves finished rows below it, pacman's parallel downloads —
+///   `docs/tool-streaming.md` *The window follows what is still moving*),
+///   over the clock row `+{hidden} lines ({elapsed} · wait {limit})`, which
+///   stands where the settled `… +N lines (ctrl+o to expand)` will. A cell
+///   sure of one row only has no window: the clock row stands alone.
+///
+/// So the cell changes its *rows* when the command ends — tail to head,
+/// clock to hint — and never its *height*: the strip gives up exactly the
+/// rows scrollback takes, and the box holds still. A window sized by its own
+/// constant stood a row or more taller than the fold it became (four rows
+/// over the clock against three over the hint, and against one when a blank
+/// line closes the peek early), and the box rose by the difference as each
+/// command ended, then dropped back when the round's next cell arrived.
+///
+/// The clock clause is on the cell in every shape — a silent `sleep 100`
+/// shows it is alive and for how much longer at most — save one: beside a
+/// last row that leaves it no room, where the output wins. The limit is the
+/// model's own `wait` read off the call's verbatim arguments
 /// ([`bash_wait_ms`](crate::llm::tools::bash_wait_ms) — the executor's
 /// default-and-clamp rule, so the cell names exactly what the call waits).
-/// This is Claude-Code's running-command look (the mock;
-/// `docs/tool-streaming.md`) with the wait beside the clock — the asymmetric twin of the finished
-/// head peek in [`tool_lines`]. The `elapsed` is boundary-supplied (like the
-/// shell running row and the status timer), so this is drawn from
-/// [`preview_tool_lines`] where `App` is in hand.
+/// `hint` is the Ctrl+B hint once it is due ([`ctrl_b_hint`]): it joins the
+/// clock's row where that has room for it whole ([`with_hint`]), never a row
+/// of its own.
 ///
 /// Long lines **word-wrap, spaces preserved** ([`wrap_output`] — the same
 /// wrapper the finished peek and the Ctrl+O view use, so alignment survives
 /// and prose breaks at words) instead of clipping at the width; the window is
 /// counted in wrapped rows so a single long line tail-follows its own newest
-/// rows without growing the strip past its budget. Walking the source lines
-/// newest-first wraps only what the window can show — never the whole
-/// retained buffer — per animation frame.
+/// rows. Walking the source lines newest-first wraps only what the window can
+/// show — never the whole retained buffer — per animation frame. Trailing
+/// blank lines are nothing to tail and are left out, as the settled cell
+/// leaves them out; everything else shows as it was printed.
 ///
 /// Two clocks ride in: `elapsed` is how long the command has run (the clock
-/// row's first number), `pulse` is the frame phase its bullet blinks at.
+/// clause's first number), `pulse` is the frame phase its bullet blinks at.
 /// Live-only by construction — only the strip calls this — so the blink is
 /// unconditional here (`docs/tool-pulse.md`).
 pub(super) fn running_command_lines(
@@ -672,6 +731,7 @@ pub(super) fn running_command_lines(
     pulse: Duration,
     width: u16,
     paths: &PathDisplay,
+    hint: Option<&'static str>,
 ) -> Vec<Line<'static>> {
     let mut lines = tool_header_lines(tool, width, /*collapsed=*/ true, Some(pulse), paths);
     // The wait the call runs under — a session call's own, not `bash`'s
@@ -690,57 +750,100 @@ pub(super) fn running_command_lines(
         other => crate::llm::tools::session_wait_ms(&other.to_ascii_lowercase(), arguments),
     };
     let clock = command_clock_clause(elapsed, wait_ms);
-    let display = command_display_lines(tool);
+    let peek_width = gutter_room(width);
+    let mut display = command_display_lines(tool);
+    // The live rows are the last ones *printed* — counted before the blank
+    // lines a command closes on are left out below.
+    let printed = display.len();
+    while display.last().is_some_and(|line| is_blank_row(line)) {
+        display.pop();
+    }
     if display.is_empty() {
         // Nothing printed yet: the clause rides the `⎿ Running…` row, so a
         // silent command still shows it is alive and how long it may be.
-        lines.push(result_row(0, format!("{TOOL_RUNNING} {clock}")));
+        lines.push(result_row(
+            0,
+            with_hint(format!("{TOOL_RUNNING} {clock}"), hint, peek_width),
+        ));
         return lines;
     }
-    let peek_width = (width as usize)
-        .saturating_sub(cols(TOOL_RESULT_PREFIX))
-        .max(1);
     let wrap_width = u16::try_from(peek_width).unwrap_or(u16::MAX);
+    // Display **rows**, counted without being built (`WrapMode::rows`):
+    // counting source lines called a 2 KB line that scrolled past "1 line"
+    // (`docs/long-lines.md`). Counted **once** per line — the total, the
+    // settled height and the window's place below are all read off this one
+    // pass, since the count is the whole cost of a build over a long output
+    // and the strip builds this cell several times a frame.
+    let rows: Vec<usize> = display
+        .iter()
+        .map(|line| WrapMode::Output.rows(line, wrap_width))
+        .collect();
+    let total: usize = rows.iter().sum();
+    // The rows this cell is sure to settle into, whatever the command goes
+    // on to print — the height it stands on now.
+    let budget = settled_command_rows(tool, &display, &rows, wrap_width);
+    if total <= budget {
+        // All of it fits, and the settled cell has no row under it: so the
+        // clock rides the end of the last row.
+        let rows: Vec<String> = display
+            .iter()
+            .flat_map(|line| wrap_output(line, wrap_width))
+            .collect();
+        let last = rows.len().saturating_sub(1);
+        for (i, row) in rows.into_iter().enumerate() {
+            lines.push(if i == last {
+                clocked_output_row(i, &row, &clock, hint, peek_width)
+            } else {
+                output_row(i, row)
+            });
+        }
+        return lines;
+    }
+    // The fold's shape: its rows above the hint are this window's, and its
+    // hint row is the clock row's.
+    let window_rows = budget.saturating_sub(1);
+    if window_rows == 0 {
+        // A cell sure of one row only and an output that does not fit it —
+        // a line the settled cell reshapes into fewer rows than it printed
+        // (a padded empty JSON document settles as `[]`). There is no room
+        // for a window, so the clock row stands alone and counts every row.
+        lines.push(result_row(
+            0,
+            with_hint(format!("+{total} lines {clock}"), hint, peek_width),
+        ));
+        return lines;
+    }
     // The line the window ends at: the lowest row still moving, else the last
     // one. A program redrawing rows above finished ones (pacman's parallel
     // downloads, every bar within the terminal's reach and so live) used to
     // fill the window with the rows that had stopped while the motion sat
     // in the hidden count (docs/tool-streaming.md).
-    let anchor = live.anchor(display.len());
-    // Display **rows**, counted without being built (`WrapMode::rows`, so
-    // the whole retained buffer is cheap to measure every animation frame):
-    // counting source lines called a 2 KB line that scrolled past "1 line"
-    // (`docs/long-lines.md`).
-    let rows_of = |line: &String| WrapMode::Output.rows(line, wrap_width);
-    let above: usize = display[..anchor].iter().map(rows_of).sum();
-    let total: usize = above + display[anchor..].iter().map(rows_of).sum::<usize>();
+    let anchor = live.anchor(printed).min(display.len() - 1);
+    let above: usize = rows[..anchor].iter().sum();
     // The window's last row: the anchor line's last row — its newest rows
     // for a line taller than the window, the tail rule for a long newest
     // line — pushed down only as far as it takes for the window to keep
-    // its TOOL_PEEK_ROWS when fewer rows sit above the anchor: a window
-    // that hid rows it had room for would be folding for nothing.
-    let anchor_end = above + rows_of(&display[anchor]) - 1;
-    let end = anchor_end
-        .max(TOOL_PEEK_ROWS - 1)
-        .min(total.saturating_sub(1));
-    let start = (end + 1).saturating_sub(TOOL_PEEK_ROWS);
+    // its rows when fewer sit above the anchor: a window that hid rows it
+    // had room for would be folding for nothing.
+    let anchor_end = above + rows[anchor] - 1;
+    let end = anchor_end.max(window_rows - 1).min(total.saturating_sub(1));
+    let start = (end + 1).saturating_sub(window_rows);
     // Build only the rows the window holds: count past the lines above it,
     // wrap the ones it reaches, stop at its end.
-    let mut window: Vec<String> = Vec::with_capacity(TOOL_PEEK_ROWS);
+    let mut window: Vec<String> = Vec::with_capacity(window_rows);
     let mut at = 0usize;
-    for line in &display {
+    for (line, &line_rows) in display.iter().zip(&rows) {
         if at > end {
             break;
         }
-        let rows = rows_of(line);
-        if at + rows > start {
+        if at + line_rows > start {
             for (offset, row) in wrap_output(line, wrap_width).into_iter().enumerate() {
                 if (start..=end).contains(&(at + offset)) {
                     window.push(row);
                 }
             }
         }
-        at += rows;
+        at += line_rows;
     }
     // Every row the window leaves out — above it, and below it when it
     // ends on a moving line with finished rows after it: what Ctrl+O adds.
@@ -749,17 +852,118 @@ pub(super) fn running_command_lines(
     for (i, row) in window.into_iter().enumerate() {
         lines.push(output_row(i, row));
     }
-    // The clock row closes the cell whatever is hidden: `+N lines` in front
-    // of the clause when rows sit outside the window, the clause alone when
-    // the output fits. A continuation row (index ≥ 1) so it indents under
-    // the content column; it is meta, so it stays the dim `result_row`.
-    let footer = if hidden > 0 {
-        format!("+{hidden} lines {clock}")
-    } else {
-        clock
-    };
-    lines.push(result_row(shown, footer));
+    // The clock row closes the cell, the hidden count in front of the
+    // clause. A continuation row (index ≥ 1) so it indents under the
+    // content column; it is meta, so it stays the dim `result_row`.
+    lines.push(result_row(
+        shown,
+        with_hint(format!("+{hidden} lines {clock}"), hint, peek_width),
+    ));
     lines
+}
+
+/// The fewest body rows the cell of a running command `tool` can **settle
+/// into**, whatever it goes on to print — the height
+/// [`running_command_lines`] stands on (`docs/live-cells.md`).
+///
+/// What [`tool_lines`] builds under a finished command's header is the
+/// output whole when it is at most `TOOL_FOLD_ROWS + 1` rows, and otherwise
+/// the **first block**'s rows up to the fold over the hint
+/// ([`result_peek_block`]). The fold can be *shorter* than the whole output
+/// it replaces: `title`, a blank line and one more row show as three rows
+/// today and as `title` over the hint — two — once two more rows have
+/// printed. So the height a tail can count on is the smaller of the two:
+/// every row printed so far, or the fold the output would settle into if it
+/// went on past it. Both only grow as the command prints — the row count
+/// plainly, the first block until a blank line closes it — so the tail never
+/// shrinks while the command runs, and never stands taller than the cell it
+/// becomes.
+///
+/// `printed` is the running cell's own display lines, trailing blanks
+/// dropped, and `printed_rows` the display rows of each. They are the
+/// settled cell's lines too ([`exec_display_lines`]) but for one that is a
+/// JSON document, which the settled cell reshapes — so such a line is
+/// measured as it will be shown, and only an output within the reshaping's
+/// size cap can hold one.
+///
+/// The walk stops at the first line past which neither number can change
+/// the answer: the fold caps the first block at `TOOL_FOLD_ROWS` and the
+/// whole at one row more, so a long build log is measured from its first
+/// few lines, and at most that many are ever parsed as JSON — on every
+/// frame of a running command, which is why it is not the whole output.
+fn settled_command_rows(
+    tool: &ToolCall,
+    printed: &[String],
+    printed_rows: &[usize],
+    wrap_width: u16,
+) -> usize {
+    let body = command_display_output(&tool.output);
+    let reshapes = body.len() <= TOOL_JSON_PRETTY_MAX_BYTES;
+    // Every row so far, and the first block's: the leading blank lines the
+    // fold skips, then the lines up to the first blank one after them
+    // ([`BlankPolicy::FirstBlock`]).
+    let mut total = 0usize;
+    let mut block = 0usize;
+    let mut block_open = true;
+    // A display line is its source line with the tabs expanded
+    // ([`split_display_lines`]), so the two walk in step — and the settled
+    // cell reshapes the *source* line ([`prettify_json_lines`]).
+    for ((line, &rows), source) in printed.iter().zip(printed_rows).zip(body.split('\n')) {
+        let blank = is_blank_row(line);
+        let rows = match (!blank && reshapes)
+            .then(|| pretty_json_line(source))
+            .flatten()
+        {
+            Some(pretty) => pretty
+                .split('\n')
+                .map(|row| WrapMode::Output.rows(row, wrap_width))
+                .sum(),
+            None => rows,
+        };
+        total += rows;
+        if !blank && block_open {
+            block += rows;
+        } else if blank && block > 0 {
+            block_open = false;
+        }
+        if total > TOOL_FOLD_ROWS && (!block_open || block >= TOOL_FOLD_ROWS) {
+            break;
+        }
+    }
+    total.min(block.min(TOOL_FOLD_ROWS) + 1).max(1)
+}
+
+/// The last row of a running command's output with its clock beside it —
+/// `beta (9s · wait 2m)` — for an output the settled cell shows whole: that
+/// cell has no row under its output, so the clock rides the end of the last
+/// one rather than standing on a row the strip would give up when the
+/// command ends (`docs/live-cells.md`). The read group's rule for its own
+/// command row (`docs/tool-groups.md` *The hint row*).
+///
+/// The output keeps its ink and the clock its dim. **Output is never cut to
+/// seat it**: a row with no room left beside it shows whole and the clock
+/// sits that frame out — what a command just printed ends at the right
+/// edge, a progress bar's rate and its ETA included, and the status line
+/// still counts the turn. `hint` follows the clock where the row has room
+/// for it whole too ([`with_hint`]).
+fn clocked_output_row(
+    index: usize,
+    text: &str,
+    clock: &str,
+    hint: Option<&str>,
+    peek_width: usize,
+) -> Line<'static> {
+    let text = text.trim_end();
+    let Some(room) = peek_width.checked_sub(cols(text) + 1 + cols(clock)) else {
+        return output_row(index, text.to_string());
+    };
+    let meta = with_hint(clock.to_string(), hint, cols(clock) + room);
+    let mut line = output_row(index, text.to_string());
+    line.spans.push(Span::styled(
+        format!(" {meta}"),
+        Style::new().fg(tool_dim_color()),
+    ));
+    line
 }
 
 /// The auto mode classifier's provenance row (`docs/permissions.md`): a
@@ -1430,7 +1634,7 @@ fn result_full_block(out_lines: &[String], peek_width: usize) -> Vec<Line<'stati
 /// receives the **source** line, so a diff cell can colour a wrapped
 /// continuation by the source's `+`/`-` marker). An output of exactly
 /// `TOOL_FOLD_ROWS + 1` rows is shown **whole**: a hint hiding one row would
-/// cost the very row it hides, so the block is at most [`TOOL_PEEK_ROWS`]
+/// cost the very row it hides, so the block is at most `TOOL_FOLD_ROWS + 1`
 /// rows either way, hint included (`docs/long-lines.md`).
 ///
 /// `blanks` picks the window the fold is then spent inside

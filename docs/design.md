@@ -88,6 +88,19 @@ which Ctrl+V reads the clipboard from.
   the timestamp clock — the loop owns the `Instant`s and feeds the pure status
   only computed `Duration`s (`App::set_status_times`; the same value drives the
   displayed seconds and both animation phases). See `docs/status-indicator.md`.
+- **Live cells settle in place.** The region is content-anchored, so a live
+  cell that stood taller than the rows it commits lifted the box the moment it
+  settled, and the next cell dropped it again — the jump between a thought
+  and its tool call, between one command and the next. So **a live cell is
+  never taller than the rows it leaves behind** (`docs/live-cells.md`): the
+  thinking block is one row (the `● Thinking…` label and the thought's newest
+  row beside it), a running command tails on exactly the rows its settled
+  peek will take with its clock on the row the hint takes, the Ctrl+B hint
+  closes a row its cell already has, and the collapsed read group wears its
+  hint row only while it is the strip's only cell. Nothing is held back and
+  nothing is padded, and nothing that reaches scrollback changed; the rule is
+  pinned cell by cell and hand-off by hand-off in `ui::tests::live_cells`, and
+  on the real binary by `smoke.sh` Phase 153.
 - **Responsive:** every draw re-wraps to the current terminal width, measured in
   **display columns** (`unicode-width`) so CJK/emoji wrap and pad correctly.
 - **Growing input box.** The input field is multi-line and grows downward as the
@@ -1524,6 +1537,13 @@ stream for their own reasons).
   `insert_before` over-scroll and the box rises off the bottom, leaving blank rows
   beneath. Covered by `scripts/smoke.sh` Phase 5 (a short terminal where one
   exchange overflows the screen, asserting no blank rows below the settled box).
+- **The box still settles one way in a few places** (`docs/live-cells.md`
+  *What it does not change*): a turn that ends with a spinner tip showing
+  leaves the idle box one row higher, since the tip has no committed
+  counterpart; a toast expiring or the lost-connection row going mid-turn
+  gives back its one row; and a command that erases what it printed on its
+  way out settles into less than its running cell showed. None of them is a
+  hand-off between two cells, so none of them bounces.
 - On resize the on-screen chat is repainted (any dimension — a width change
   re-wraps, a height change reseats the box; `smoke.sh` Phase 17), but lines
   already in the terminal's own scrollback keep their original wrapping (so

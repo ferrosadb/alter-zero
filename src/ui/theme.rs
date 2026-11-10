@@ -246,19 +246,6 @@ pub(super) const TOOL_GROUP_COMMAND_PROMPT: &str = "$ ";
 /// slow one does not look frozen (`docs/tool-groups.md` *The hint row*).
 pub(super) const TOOL_GROUP_CLOCK_DELAY: Duration = Duration::from_secs(2);
 
-/// The window the **running** command tail shows (`running_command_lines`):
-/// four wrapped display **rows** of what the command has printed, ending at
-/// the lowest row still moving (`LiveTail::anchor` — the last row for every
-/// command whose newest output is at its end, `docs/tool-streaming.md`),
-/// over the `+N lines (Ns · wait …)` clock row — the unit the user reads
-/// the cell in (`docs/long-lines.md`). It is also the ceiling of the
-/// **settled** block,
-/// hint included: [`TOOL_FOLD_ROWS`] rows over the `… +N lines` hint, or
-/// `TOOL_FOLD_ROWS + 1` rows shown whole — so a `bash` cell never *grows*
-/// when it settles, whatever shape its output has; the rest is one `ctrl+o`
-/// away.
-pub(super) const TOOL_PEEK_ROWS: usize = 4;
-
 /// The marker spliced in (before the closing `)`) when a collapsed header's
 /// command is cut at [`TOOL_HEADER_MAX_LINES`] lines,
 /// [`TOOL_HEADER_MAX_COLS`] columns or [`TOOL_HEADER_MAX_ROWS`] rows
@@ -286,8 +273,14 @@ pub(super) const TOOL_HEADER_MAX_ROWS: usize = 2;
 /// the fold* — Claude Code's three — before the rest collapses behind the
 /// `… +N lines (ctrl+o to expand)` hint (`docs/long-lines.md`). An output of
 /// exactly `TOOL_FOLD_ROWS + 1` rows shows whole: a hint hiding one row would
-/// cost the very row it hides. So the block is at most [`TOOL_PEEK_ROWS`]
-/// rows either way, hint included.
+/// cost the very row it hides. So the block is at most four rows either way,
+/// hint included.
+///
+/// It is the **running** tail's window too (`running_command_lines`): the
+/// tail takes the rows the fold would keep of the output so far, over the
+/// `+N lines (Ns · wait …)` clock row that stands where the hint will — so a
+/// `bash` cell never gives a row back when it settles, whatever shape its
+/// output has (`docs/live-cells.md`).
 pub(super) const TOOL_FOLD_ROWS: usize = 3;
 
 /// The size cap on the display-only JSON reshaping of an exec cell's output
@@ -320,28 +313,32 @@ pub(super) const TOOL_TRUNCATED_MARKER: &str = "…";
 pub(super) const TOOL_NO_OUTPUT: &str = "(no output)";
 
 // ---------------------------------------------------------------------------
-// The thinking stream (docs/thinking-stream.md). It borrows the tool cell's
-// shape while it runs — a [`TOOL_BULLET`] `● Thinking…` header (its bullet
-// blinking like a running tool's, its label carrying the status line's
-// white shimmer sweep) over the chain-of-thought in the
-// [`TOOL_RESULT_PREFIX`] `⎿` gutter — and then collapses into a **bullet-less**
-// `Thought for … · … tokens (ctrl+o to expand)` line: the [`summary_lines`]
-// shape *and* its dim, because a settled thought is turn meta, not a cell —
-// a footnote about work already done. The strip is where the weight and the
-// motion are: nothing there is ever committed, so it can afford both.
+// The thinking stream (docs/thinking-stream.md). While it runs it is one row
+// wearing the tool cell's [`TOOL_BULLET`] — `● Thinking…`, its bullet
+// blinking like a running tool's and its label carrying the status line's
+// white shimmer sweep, the thought's newest row beside it — and then it
+// settles into a **bullet-less** `Thought for … · … tokens (ctrl+o to
+// expand)` line: the [`summary_lines`] shape *and* its dim, because a settled
+// thought is turn meta, not a cell — a footnote about work already done. One
+// row live because one row is what it settles into: the strip gives up
+// nothing when the phase ends, so the box holds still (docs/live-cells.md).
+// The strip is where the weight and the motion are: nothing there is ever
+// committed, so it can afford both.
 // ---------------------------------------------------------------------------
 
 /// The chain-of-thought's own colour — dim, and italic
 /// ([`REASONING_TEXT_MODIFIER`]), so it reads as the model thinking aloud
-/// rather than as a tool's output in the same `⎿` gutter.
+/// rather than as the label beside it, or as a tool's output in the `⎿`
+/// gutter the Ctrl+O expansion shares.
 pub(super) fn reasoning_text_color() -> Color {
     tool_dim_color()
 }
 
-/// Italic: the one cue separating a thought's `⎿` body from a tool's.
+/// Italic: the one cue separating a thought from the label beside it and,
+/// in the Ctrl+O expansion, its `⎿` body from a tool's.
 pub(super) const REASONING_TEXT_MODIFIER: Modifier = Modifier::ITALIC;
 
-/// The live block's header, under which the thought tails.
+/// The live block's label, beside which the thought's newest row rides.
 pub(super) const REASONING_RUNNING: &str = "Thinking…";
 
 /// The **resting** colour of the live header's shimmer — what `Thinking…`
@@ -373,13 +370,14 @@ pub(super) fn reasoning_label_color() -> Color {
     status_done_color()
 }
 
-/// How many **wrapped display rows** of the thought the live block tails —
-/// three, so with its header the block is at most four rows tall. Rows, not
-/// source lines: a line that wraps onto two rows spends two of them. The
-/// window is small on purpose: it grows the live region upward (invariant 3),
-/// and what the user wants is the frontier — what the model is thinking
-/// *now*. The whole thing is in the Ctrl+O transcript.
-pub(super) const REASONING_PEEK_LINES: usize = 3;
+/// The space between the live label and the row of thought beside it —
+/// `● Thinking… weighing the options`.
+pub(super) const REASONING_TAIL_GAP: &str = " ";
+
+/// The fewest columns of thought worth showing beside the live label. A
+/// terminal that leaves less keeps the label alone: a syllable at a time
+/// says nothing, and the whole thought is in the Ctrl+O transcript.
+pub(super) const REASONING_TAIL_MIN_COLS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Background shells (docs/background.md): the backgrounded cell's fixed row,

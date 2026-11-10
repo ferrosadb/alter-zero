@@ -46,8 +46,8 @@ the strip. Two halves:
    them, so the rows `live_height`/`live_layout` reserve and the rows drawn
    agree by construction. `render_strip` paints it through the framed views'
    own `render_framed_tail`, so a strip whose content outgrew its rows keeps
-   its **last** ones: the newest streamed rows, the `+N lines` footer, the
-   ctrl+b hint, the status line.
+   its **last** ones: the newest streamed rows, the `+N lines` footer and
+   the ctrl+b hint on it, the status line.
 
 2. **The head flows into real scrollback, frozen.** `ui::view_flow` gains a
    branch for the strip, so the rows the anchor skips are committed above the

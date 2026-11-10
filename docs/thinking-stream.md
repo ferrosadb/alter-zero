@@ -6,30 +6,35 @@ peeled it out of the stream (`llm::thinking::ThinkingSplitter`), wrapped it in
 — counting its tokens so the tally kept ticking, and showing nothing but a
 `· Thinking for 12s` clause in the status line.
 
-Now it **streams live**, then **collapses**:
+Now it **streams live**, then **settles**:
 
 ```
-● Thinking…
-  ⎿  I need to look at the file first. The user asked for a modern
-      landing page, so the structure should be: a hero, three feature
-      cards, a footer. Let me check the repo before writing…
+● Thinking… cards, a footer. Let me check the repo before writing…
 ```
 
-…and when the phase ends, the whole block gives way to one committed line:
+…and when the phase ends, the row gives way to one committed line:
 
 ```
 Thought for 1m 5s · 1.5k tokens (ctrl+o to expand)
 ```
 
-Two shapes, deliberately: while it runs it **is** a tool cell — a `●` bullet
-over a `⎿` gutter, because that is what is happening (something working, with
-output under it) — and it is the **only** part of the feature that moves: the
-bullet blinks like any running tool's, and `Thinking…` carries the status
-line's shimmer sweep. When it settles the cell shape goes away entirely: no
-bullet, because nothing is happening any more. What is left is a fact about
-the turn, in the bullet-less shape `Done for 7s` already uses, with the
-`(ctrl+o to expand)` hint saying where the thought went — the same promise a
-capped tool peek makes.
+Two shapes, deliberately: while it runs it wears a running tool's `●` bullet,
+because that is what is happening (something working), with the row of
+thought still being written beside the label — and it is the **only** part of
+the feature that moves: the bullet blinks like any running tool's, and
+`Thinking…` carries the status line's shimmer sweep. When it settles the cell
+shape goes away entirely: no bullet, because nothing is happening any more.
+What is left is a fact about the turn, in the bullet-less shape `Done for 7s`
+already uses, with the `(ctrl+o to expand)` hint saying where the thought
+went — the same promise a capped tool peek makes.
+
+**One row live, because one row is what it settles into** (updated
+2026-11-10, `docs/live-cells.md`). The block used to stand a header over
+three rows of thought, and gave those rows up the moment the phase ended —
+before the round's tool call had a cell to put on them — so the input box
+rose three rows and dropped back when the cell landed: the reported flicker
+between a thought and the tool after it. A live cell is never taller than
+what it leaves behind.
 
 ## Where the weight goes
 
@@ -37,7 +42,7 @@ All of it to the live block, none to the settled line:
 
 | Surface | Renders | Why |
 | --- | --- | --- |
-| **Strip** (live) | `● Thinking…` — blinking bullet, shimmering bold-white label | the one place something is still happening, and nothing here is ever committed, so motion is free |
+| **Strip** (live) | `● Thinking… {newest row of thought}` — blinking bullet, shimmering bold-white label, the thought dim and italic beside it | the one place something is still happening, and nothing here is ever committed, so motion is free |
 | **Inline** (settled) | one dim row, `Done for Ns`'s exact dress | a finished thought is a footnote about work already done |
 | **Ctrl+O** (expanded) | the same dim row, minus the hint | no hint to make room for — this *is* the expansion |
 
@@ -67,33 +72,44 @@ machinery in `term.rs`.
 
 ### The live block (strip preview)
 
-`ui::live_reasoning_lines` renders
+`ui::live_reasoning_lines` renders **one row**:
 
-- the `● Thinking…` header — the tool cell's own `TOOL_BULLET`, **blinking**
+- the `● Thinking…` label — the tool cell's own `TOOL_BULLET`, **blinking**
   at the shared frame pulse (`docs/tool-pulse.md`) exactly like a running
   tool's, beside a label carrying the status line's **shimmer** sweep
   (`ui::status::shimmer_spans_from`, the same wave the `Working…` verb below it
   wears, off the same frame clock); and
-- the **tail** of the reasoning so far in the `⎿` gutter
-  (`TOOL_RESULT_PREFIX`, via `ui::file_cell::gutter_row_styled` — the corner on
-  the first row, the rest aligned under it): the last `REASONING_PEEK_LINES`
-  (three) wrapped display rows, word-wrapped with spaces preserved
-  (`ui::wrap_output`, the same wrapper the streaming `bash` tail and the Ctrl+O
-  view use), dim and **italic** — the one cue separating a thought's `⎿` body
-  from a tool's.
+- beside it, after one space, the **row of thought still being written**
+  (`newest_row`): the last wrapped display row of the newest line that says
+  anything, wrapped in the columns the label leaves (`ui::wrap_output`, the
+  wrapper the streaming `bash` tail and the Ctrl+O view use), dim and
+  **italic** — the cue separating the thought from the label, and in the
+  Ctrl+O expansion from a tool's output in the same `⎿` gutter.
 
-**Three rows** (updated 2026-10-15; the window was five). The count is of
-display rows, not source lines, so a line that wraps onto two rows spends two
-of them: three lines of thought at 87 columns — the reported screen — filled
-all five and stood the block six rows tall over the box, every one of them
-pushing the conversation up (invariant 3). Three rows keep what the model is
-writing now in view, the same body height a settled `bash` cell shows above
-its fold (`TOOL_FOLD_ROWS`); the whole thought is one Ctrl+O away.
+**The last wrapped row, not the line's last columns.** The row starts at a
+word and grows to the right until it wraps, then starts over on the next: it
+reads as text arriving. A window sliding over the line's tail would keep the
+row full and move every glyph on every token.
 
-Blank source lines are skipped: reasoning is full of paragraph breaks, and
-spending the small window on them would show a third as much thought. Walking
-the source lines newest-first wraps only what the window shows, so a long think
-costs O(window) per animation frame, not O(reasoning).
+**One row** (updated 2026-11-10; the block was a header over three rows, and
+five before 2026-10-15). The live region is content-anchored (invariant 3), so
+a block taller than the line it settles into gave its extra rows up the
+moment the phase ended, and the box rose until whatever came next pushed it
+back down — up to three rows, for as long as the model took to write the
+round's tool call, since the phase ends at the call's first piece and the
+call has a cell only once its arguments are in. A block of `n` rows needs
+`n - 1` rows of the next cell landing in the same frame, and what comes next
+brings two (a tool's cell), one (the reply's first row) or none (a task
+call): only one row needs nothing, whatever follows and however long it
+takes. See `docs/live-cells.md`. The whole thought is one Ctrl+O away, while
+it streams and after.
+
+Blank source lines are skipped: reasoning is full of paragraph breaks, and a
+delta often ends on one. Only the newest line is wrapped, so a long think
+costs O(that line) per animation frame, not O(reasoning). A terminal that
+leaves fewer than `REASONING_TAIL_MIN_COLS` (8) columns beside the label
+keeps the label alone, and the row is fitted to the width rather than left to
+the paint, which would cut a wide glyph in half.
 
 **The shimmer's floor is raised here.** Codex rests its verb on grey
 `#888888`, so it reads as *grey text with a white wave* — right for a metric,
@@ -107,7 +123,7 @@ left codex's grey too, for the page titles' gradient — `docs/status-indicator.
 feature that draws the eye — deliberately, because it is the one place
 something is still happening.
 
-`ui::preview_rows` sizes the same block from the same state (the strip's
+`ui::preview_rows` sizes the same row from the same state (the strip's
 `debug_assert` holds it to that), so the box and cursor stay seated.
 
 The reasoning branch sits **after** the agent/tool branches and **before** the
@@ -118,10 +134,10 @@ executing wins, because that is what the user is waiting on.
 The status line keeps its `· Thinking for 12s` clause: it is the *timer*, the
 block is the *content*.
 
-**No block, and no cell, while a collapsed read/search group is open.** A
+**No row, and no cell, while a collapsed read/search group is open.** A
 thought between two reads leaves the strip to the group's cell, which outranks
 the reasoning branch in `ui::live::preview_lines` and `ui::preview_rows`
-alike, so the cell does not grow a block on every thought and shrink back at
+alike, so the group's cell does not give way to a thought and come back at
 the next call; the status line's clause is all the strip says, and Ctrl+O
 shows the text as it streams. Settled, the thought is held with the group and
 commits nothing of its own: the group's line is all the conversation shows,
@@ -301,10 +317,12 @@ strip geometry (`ui::tests::reasoning`), the record round-trip (`session`), and
 the context skip (`context`).
 
 The boundary wiring is covered by `scripts/smoke.sh` **Phase 66**, which drives
-the real binary in tmux: the live block appears while the dummy "thinks", it is
-replaced by the collapsed cell, the chain-of-thought is **not** in scrollback,
-Ctrl+O expands it back — and the same turn under `ALTER_ZERO_SHOW_THINKING=0`
-shows neither while still settling to its `Done for Ns` summary.
+the real binary in tmux: the live row appears while the dummy "thinks", the
+thought beside its label and nothing under it, it is replaced by the
+collapsed cell, the chain-of-thought is **not** in scrollback, Ctrl+O expands
+it back — and the same turn under `ALTER_ZERO_SHOW_THINKING=0` shows neither
+while still settling to its `Done for Ns` summary. **Phase 153** watches the
+box through the hand-offs after a thought (`docs/live-cells.md`).
 
 Two `#[ignore]`d live tests in `tests/live_openrouter.rs` pin the provider end
 (run with a real key):

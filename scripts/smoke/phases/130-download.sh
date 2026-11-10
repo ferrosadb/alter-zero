@@ -23,14 +23,16 @@ for _ in $(seq 1 600); do
 	cap="$(pane "$S130")"
 	if has "$cap" -F "$SETTLED_REPLY"; then break; fi
 	# The report's own picture, inverted: each bar wraps to two rows at this
-	# width, and the sample shows core's and extra's percentage rows both
-	# still below 100% while the finished multilib bar is hidden below the
-	# window, under a footer counting the heading above and the two bars
-	# below — the five rows the old tail showed instead.
-	if has "$cap" -F " core " && has "$cap" -F " extra " &&
+	# width, and the sample's window — three rows, the ones the settled peek
+	# will take (docs/live-cells.md) — ends on extra's percentage row: core's
+	# and extra's percentages both still below 100% while the finished
+	# multilib bar is hidden below the window, under a footer counting the
+	# rows above it and the two bars below — the rows the old tail showed
+	# instead.
+	if has "$cap" -F " extra " &&
 		[ "$(printf '%s\n' "$cap" | grep -cE '\] +[0-9]{1,2}%$')" = "2" ] &&
 		lacks "$cap" -F " multilib" && lacks "$cap" -F "100%" &&
-		has "$cap" -E '\+5 lines \([0-9]+s · wait 3m\)'; then
+		has "$cap" -E '\+6 lines \([0-9]+s · wait 3m\)'; then
 		followed=1
 		followed_cap="$cap"
 	fi

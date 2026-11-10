@@ -838,12 +838,13 @@ fn preview_rows_counts_the_running_backend_tool_cell() {
         "a streaming reply previews one row"
     );
     app.start_tool("Bash", "sleep 1", None);
-    // Past the hint delay so the Ctrl+B hint row is part of the preview.
+    // Past the hint delay: the Ctrl+B hint is due, and it joins the running
+    // row or sits out — never a row of its own (docs/live-cells.md).
     app.set_command_elapsed(Some(Duration::from_secs(3)));
     assert_eq!(
         preview_rows(&app, 40),
-        3,
-        "a running backend tool previews header + ⎿ Running… + the Ctrl+B hint"
+        2,
+        "a running backend tool previews header + ⎿ Running…"
     );
 }
 

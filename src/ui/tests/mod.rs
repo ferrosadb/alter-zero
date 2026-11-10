@@ -33,6 +33,7 @@ mod inline;
 mod inline_diff;
 mod layout;
 mod live;
+mod live_cells;
 mod login_view;
 mod mascot_view;
 mod mcp_view;

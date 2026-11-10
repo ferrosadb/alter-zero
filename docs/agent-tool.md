@@ -309,7 +309,12 @@ again (`docs/agent-tools.md` *A resume is news when it starts*).
   agents… (ctrl+o to expand)` over the tree —
   `   ├ {description} · {n} tool uses · {tokens} tokens` with a
   `   │ ⎿  {activity}` status row per agent — plus the delayed
-  `(ctrl+b to run in background)` hint (foreground only). The activity is
+  `(ctrl+b to run in background)` hint (foreground only), which rides the
+  **header** after `(ctrl+o to expand)` where it fits and is left out where
+  it does not, never a row of its own under the tree (a lone agent's rides
+  its `● Agent(…)` header the same way): a row the tree took three seconds in
+  was a row it gave back when the group settled (`docs/live-cells.md`). The
+  activity is
   **sticky**: `Initializing…` until the first event, then the newest tool's
   `{Name}: {detail}` — **one grammar for every call** (`agents::activity_line`):
   a `bash` call's model-supplied `description`

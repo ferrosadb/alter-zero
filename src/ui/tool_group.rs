@@ -22,7 +22,7 @@
 //! conversation shows of them.
 
 use super::theme::*;
-use super::tool::{bullet_span, command_display_lines, result_row};
+use super::tool::{bullet_span, command_display_lines, ctrl_b_hint, result_row, with_hint};
 use super::wrap::{cols, truncate_cols, wrap_output};
 use super::*;
 use crate::app::{
@@ -214,20 +214,31 @@ fn path_hint_rows(path: &str, room: usize) -> Vec<Line<'static>> {
 
 /// A command on the `⎿` row — `$ ` and then every line of it, **wrapped**
 /// rather than cut, each row after the first hanging under the text after
-/// the `$ ` — with its `clock` whole at the end: on the last row when it
-/// fits there, else on a row of its own.
-fn command_hint_rows(command: &str, clock: Option<&str>, room: usize) -> Vec<Line<'static>> {
+/// the `$ ` — with its `clock` whole at the end of the last row when it
+/// fits there, and the Ctrl+B `hint` after the clock when that fits too
+/// ([`with_hint`]).
+///
+/// Neither ever takes a row of its own: the clock is on the row only while
+/// the command runs and the hint only once it has run a few seconds, so a
+/// row holding one of them was a row the cell grew mid-command and gave
+/// back the moment the command ended, the group still open — the box moved
+/// down and back up with it (`docs/live-cells.md`). A row with no room
+/// keeps the whole command and lets them go.
+fn command_hint_rows(
+    command: &str,
+    clock: Option<&str>,
+    hint: Option<&str>,
+    room: usize,
+) -> Vec<Line<'static>> {
     let hang = " ".repeat(cols(TOOL_GROUP_COMMAND_PROMPT));
     let text_room = room.saturating_sub(cols(TOOL_GROUP_COMMAND_PROMPT)).max(1);
     let mut rows = wrap_output(command, u16::try_from(text_room).unwrap_or(u16::MAX));
-    if let Some(clock) = clock {
-        match rows.last_mut() {
-            Some(last) if cols(last.trim_end()) + cols(clock) <= text_room => {
-                last.truncate(last.trim_end().len());
-                last.push_str(clock);
-            }
-            _ => rows.push(clock.trim_start().to_string()),
-        }
+    if let Some(clock) = clock
+        && let Some(last) = rows.last_mut()
+        && let Some(spare) = text_room.checked_sub(cols(last.trim_end()) + cols(clock))
+    {
+        last.truncate(last.trim_end().len());
+        last.push_str(&with_hint(clock.to_string(), hint, cols(clock) + spare));
     }
     rows.into_iter()
         .enumerate()
@@ -250,11 +261,21 @@ fn command_hint_rows(command: &str, clock: Option<&str>, room: usize) -> Vec<Lin
 /// ([`App::group_hint`]) — so a batch that resolved within a frame still shows
 /// every call's value, its first call first — and between rounds it keeps
 /// saying what the group last did.
+///
+/// `alone` says the group is the strip's **only** cell, and only then does
+/// it wear the hint row. The group settles into one line, and what makes up
+/// for the row a header over a hint stands taller is whatever ends it — a
+/// reply's first row, the next call's cell. Beside other live cells nothing
+/// does: a read leading a batch of other calls closes the moment the next
+/// one starts, with those cells already up, and the box rose by the hint's
+/// row. So there the cell is its header alone, the height of the line it
+/// becomes (`docs/live-cells.md`); the other cells say what is running.
 pub(super) fn live_group_lines(
     app: &App,
     width: u16,
     pulse: Option<Duration>,
     with_queue: bool,
+    alone: bool,
 ) -> Vec<Line<'static>> {
     if app.settings().verbose {
         return Vec::new();
@@ -313,17 +334,35 @@ pub(super) fn live_group_lines(
     let mut spans = vec![bullet_span(tool_running_color(), pulse)];
     spans.extend(fit(summary_spans(counts, true, label, dim), dim, room));
     let mut lines = vec![Line::from(spans)];
+    if !alone {
+        return lines;
+    }
     if let Some(item) = app.group_hint(with_queue) {
         let room = usize::from(width).saturating_sub(cols(TOOL_RESULT_PREFIX));
         match hint_text(item, paths) {
             HintText::Path(path) => lines.extend(path_hint_rows(&path, room)),
             HintText::Command(command) => {
                 let clock = group_clock(app, item, with_queue);
-                lines.extend(command_hint_rows(&command, clock.as_deref(), room));
+                // A long search can go to the background like any command:
+                // the hint follows its clock, on the row that names it.
+                let hint = clock.as_ref().and_then(|_| group_ctrl_b_hint(app));
+                lines.extend(command_hint_rows(&command, clock.as_deref(), hint, room));
             }
         }
     }
     lines
+}
+
+/// The Ctrl+B hint of the command running at the front of the queue, once it
+/// has run long enough to show one (`docs/background.md`) — what the group's
+/// command row wears after its clock. Asked only where [`group_clock`] has
+/// already said the row is showing that very command.
+fn group_ctrl_b_hint(app: &App) -> Option<&'static str> {
+    let front = app.tool_queue().front()?;
+    ctrl_b_hint(front).filter(|_| {
+        app.background_hint_elapsed()
+            .is_some_and(|elapsed| elapsed >= TOOL_BACKGROUND_HINT_DELAY)
+    })
 }
 
 /// What the hint row adds while it shows a command that has run

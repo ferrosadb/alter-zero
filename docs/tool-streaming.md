@@ -11,12 +11,10 @@ and a **single** peek line once done. This document covers making it stream.
 Running (live, in the strip above the box):        Finished (committed to scrollback):
 
 ● Bash(ping -c 10 google.com)                       ● Bash(ping -c 10 google.com)
-  ⎿  64 bytes from … icmp_seq=6 … time=68.3 ms         ⎿  PING google.com (142.250.205.238) …
-     64 bytes from … icmp_seq=7 … time=247 ms             64 bytes from … icmp_seq=1 … time=32.1 ms
-     64 bytes from … icmp_seq=8 … time=332 ms             64 bytes from … icmp_seq=2 … time=71.1 ms
-     64 bytes from … icmp_seq=9 … time=144 ms             … +11 lines (ctrl+o to expand)
-     +5 lines (9s · wait 2m)
-     (ctrl+b to run in background)
+  ⎿  64 bytes from … icmp_seq=7 … time=247 ms          ⎿  PING google.com (142.250.205.238) …
+     64 bytes from … icmp_seq=8 … time=332 ms             64 bytes from … icmp_seq=1 … time=32.1 ms
+     64 bytes from … icmp_seq=9 … time=144 ms             64 bytes from … icmp_seq=2 … time=71.1 ms
+     +6 lines (9s · wait 2m) (ctrl+b to run …)            … +11 lines (ctrl+o to expand)
 
 ● Bash(ping -c 10 facebook.com)                     (a parallel batch's not-yet-run
   ⎿  Waiting…                                        siblings stay `⎿ Waiting…` until
@@ -25,17 +23,27 @@ Running (live, in the strip above the box):        Finished (committed to scroll
 
 The footer's clause is the **command's own clock beside the wait its call
 runs under** — `(9s · wait 2m)` — and it is on the live cell whatever
-the output's shape (*The clock row is always there*, below).
+the output's shape (*The clock is always there*, below).
 
-The two states are deliberately asymmetric — while **running** you want the
-**tail** (what just happened); once **finished** you want the **head** with an
-expand hint. The tail shows the last `TOOL_PEEK_ROWS` (4) display rows; the
-head **folds** at `TOOL_FOLD_ROWS` (3) rows over the hint — Claude Code's
-fold, at most the same four rows hint included — so the cell never grows when
-it settles. (It can settle *shorter*: the finished head is the output's first
-**block**, so a blank line ends it — `docs/long-lines.md`. The running tail
-keeps its blanks, being what the command just printed, and shows the output
-as printed where the settled cell reshapes a JSON line for display.)
+The two states are deliberately asymmetric in *what* they show — while
+**running** you want the **tail** (what just happened); once **finished** you
+want the **head** with an expand hint — and deliberately the same in *how
+tall* they are (updated 2026-11-10, `docs/live-cells.md`). The head **folds**
+at `TOOL_FOLD_ROWS` (3) rows over the hint — Claude Code's fold, at most four
+rows hint included — and the tail takes exactly the rows the fold would keep
+of the output so far, over the clock row that stands where the hint will. So
+the cell never gives a row back when it settles: the tail used to be four
+rows over the clock (and a Ctrl+B hint row under that), a row or two taller
+than the fold it became, and the input box rose by the difference as every
+command ended and dropped back when the next cell arrived.
+
+That includes the fold's shortest shape. The finished head is the output's
+first **block**, so a blank line ends it (`docs/long-lines.md`): `title`, a
+blank line and forty rows settle into `title` over the hint, and the tail of
+that output is its newest row over the clock row — two rows, like the cell it
+becomes. (The tail still shows its rows as printed where the settled cell
+reshapes a JSON line for display, and leaves out the blank lines a command
+closes on, as the settled cell does.)
 
 ## The protocol — `ToolOutput` and `ToolScreen`
 
@@ -132,15 +140,19 @@ A **command-style** tool (a non-shell backend tool that is not a `read`/`write`/
   code, never reflowed at spaces — with each wrapped row coloured by its
   *source* line's `+`/`-` marker, so a continuation row keeps its tint.)
 - **Running** (`running_command_lines`, drawn only in the live strip's preview
-  where the boundary-supplied `elapsed` is available): the header, the **last**
-  `TOOL_PEEK_ROWS` display **rows** of output, then the **clock row** —
-  `+{hidden} lines ({elapsed} · wait {limit})` when any rows are fully
-  hidden above the window, the bare `({elapsed} · wait {limit})` when
-  none are. No output yet → `⎿ Running… ({elapsed} · wait {limit})`, the
-  clause on the corner row itself. The `{elapsed}` is the **command's own**
-  runtime, never the turn's — *Whose clock the footer shows*, below — and
-  the `{limit}` is the wait the call runs under — *The clock row is
-  always there*, below. Long lines **word-wrap** the same way (`wrap_output`)
+  where the boundary-supplied `elapsed` is available): the header over a body
+  that stands on the rows the cell is **sure to settle into**
+  (`settled_command_rows` — the smaller of every row printed so far and the
+  fold the output would settle into if it went on, both of which only grow,
+  `docs/live-cells.md`). An output that fits those rows shows whole, the
+  clock on the end of its last row — `beta (9s · wait 2m)`; one that does not
+  shows the fold's rows of its **tail** over the **clock row**,
+  `+{hidden} lines ({elapsed} · wait {limit})`. No output yet →
+  `⎿ Running… ({elapsed} · wait {limit})`, the clause on the corner row
+  itself. The `{elapsed}` is the **command's own** runtime, never the turn's
+  — *Whose clock the footer shows*, below — and the `{limit}` is the wait the
+  call runs under — *The clock is always there*, below. Long lines
+  **word-wrap** the same way (`wrap_output`)
   instead of clipping at the terminal edge; the window is counted in wrapped
   rows, so a single long line tail-follows its own newest rows without
   growing the strip past its budget, and the newest-first walk wraps only
@@ -193,7 +205,7 @@ each of the four resolution events and two local settles, so no future
 resolution path has to remember it. The main strip needs no such pruning:
 its one `command_start` is cleared at the boundary's own resolution arms.
 
-### The clock row is always there
+### The clock is always there
 
 The footer used to exist only while the output had overflowed the tail
 window: a command whose output fit showed just its rows, and a command that
@@ -205,27 +217,34 @@ the wrong number (the reported "footer counts the turn" bug, above), and the
 timeout the model chose was known only to the executor.
 
 The live cell now shows the command's clock **beside the wait its call runs
-under**, in every shape the running cell takes:
+under**, in every shape the running cell takes — and never on a row the
+settled cell does not have (`docs/live-cells.md`):
 
 ```
 ● Bash(for i in $(seq 1 100); do echo $i; sleep 1; done)
-  ⎿  19
-     20
+  ⎿  20
      21
      22
-     +18 lines (22s · wait 1m 50s)             ← rows hidden above the window
-     (ctrl+b to run in background)
+     +19 lines (22s · wait 1m 50s) (ctrl+b to run in background)   ← rows hidden outside the window
 
 ● Bash(python3 -u -c "
       import time…)
-  ⎿  hello world
-     (10s · wait 10m)                          ← output that fits: the clause alone
-     (ctrl+b to run in background)
+  ⎿  hello world (10s · wait 10m) (ctrl+b to run in background)    ← output that fits: on its last row
 
 ● Bash(python3 -c "import time; time.sleep(100)")
-  ⎿  Running… (10s · wait 2m)                 ← nothing printed yet
-     (ctrl+b to run in background)
+  ⎿  Running… (10s · wait 2m) (ctrl+b to run in background)       ← nothing printed yet
 ```
+
+A folded output has a row for it — the one the settled `… +N lines (ctrl+o
+to expand)` hint takes. An output that fits has none, so the clock rides the
+end of the last row (`clocked_output_row`, the read group's rule for its
+command row), in its own dim beside the output's ink. **Output is never cut
+to seat it**: a last row with no room shows whole and the clock sits that
+frame out — what a command just printed ends at the right edge, a progress
+bar's rate and its ETA — which is the one shape without a clock. The Ctrl+B
+hint, due three seconds in (`docs/background.md`), follows the clock where
+the row has room for both and is left out whole where it has not
+(`with_hint`).
 
 The wait is the model's own: `llm::tools::bash_wait_ms` reads the `wait`
 (seconds — or the old `timeout`/`timeout_ms`, milliseconds) off the call's
@@ -250,14 +269,14 @@ thing twice) while the elapsed keeps its seconds because it moves. The
 `!` shell's `⎿ Running… (Ns)` row is unchanged: a `!` command has no
 timeout, so there is nothing to name.
 
-The row is live-only, like the tail it closes: `tool_lines` (scrollback
+The clock is live-only, like the tail it closes: `tool_lines` (scrollback
 commits, the permission prompt's context, the frozen Ctrl+O transcript)
 still renders a running command at rest as `⎿ Running…`, since those
 surfaces have no clock to tick.
 
 ### The window follows what is still moving
 
-The running window used to be the output's **last** four display rows, on
+The running window used to be the output's **last** display rows, on
 the assumption every command shares: the newest output is at the end. A
 terminal program that redraws in place breaks it. pacman downloads its
 databases in parallel and keeps one bar per file, moving the cursor up to
@@ -281,17 +300,18 @@ the strip:
 ```
 
 (Each bar is drawn at pacman's own width and wraps to two rows at the
-terminal's, which is why four rows hold two bars.) The window now **ends at
-the lowest row still moving** and fills upward; the finished bars are what
-hides:
+terminal's. The window was four rows then, which held two bars.) The window
+now **ends at the lowest row still moving** and fills upward; the finished
+bars are what hides — here in the three rows the window has since taken from
+the settled fold (`docs/live-cells.md`), which hold the bar still moving
+lowest and the percentage of the one above it:
 
 ```
 ● Bash(echo "<secret:ROOT_PASSWORD>" | sudo -S pacman -Syy)
-  ⎿   core                       130.6 KiB  21.6 KiB/s 00:06
-     [-----------------C  o  o  o  o  o  o  o]  45%
+  ⎿  [-----------------C  o  o  o  o  o  o  o]  45%
       extra                        8.2 MiB  21.6 KiB/s 00:48
      [----c  o  o  o  o  o  o  o  o  o  o  o]  12%
-     +5 lines (50s · wait 3m)
+     +6 lines (50s · wait 3m)
 ```
 
 What "still moving" means is decided in the pure core, beside the live

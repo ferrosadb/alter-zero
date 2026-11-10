@@ -596,11 +596,14 @@ identically — but only the inline peek (and the live preview) cuts the command
 the streaming strip's preview slot shows the *full* live cell — the wrapped
 header **plus** its output. Before any output a `bash` cell shows
 `⎿ Running… (10s · wait 2m)` — the command's own clock beside the wait its
-call runs under; once output streams it **tails** — the last `TOOL_PEEK_ROWS`
-rows and a `+N lines (22s · wait 1m 50s)` footer, or the bare clock row
-when nothing is hidden (`ui::running_command_lines`; see
-`docs/tool-streaming.md`) — so the running state is visible and a long command
-still isn't clipped mid-run. The preview slot is sized by `ui::preview_rows`
+call runs under; once output streams it **tails** — on exactly the rows the
+cell will settle into, so the box under it holds still when the command ends
+(`docs/live-cells.md`): the newest `TOOL_FOLD_ROWS` rows over a
+`+N lines (22s · wait 1m 50s)` footer where the settled cell folds, and every
+row with the clock on the end of the last where it does not
+(`ui::running_command_lines`; see `docs/tool-streaming.md`) — so the running
+state is visible and a long command still isn't clipped mid-run. The preview
+slot is sized by `ui::preview_rows`
 (0 idle · 1 for a streaming reply / `!` shell run · N for a running backend
 tool's cell); the status line (spinner + token tally + `esc to interrupt`) stays
 below it. On `ToolEnd` the strip's cell is replaced by the committed scrollback

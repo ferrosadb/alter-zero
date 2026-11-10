@@ -177,6 +177,23 @@ release heading when a version is cut.
   context you are reading. Tab's page, with what the auto-mode classifier
   reads, has the same look.
 
+- **The live thinking block is one row.** While a model thinks,
+  `● Thinking…` now shows the newest line of the thought beside it, where it
+  used to show three rows under it. The whole thought is still in Ctrl+O,
+  while it streams and after it settles into its `Thought for …` line
+  (`docs/thinking-stream.md`).
+
+- **A running command's cell is the size it will be when it finishes.** A
+  command's live output now tails three rows over its
+  `+N lines (22s · wait 2m)` row, the three rows and the
+  `… +N lines (ctrl+o to expand)` hint it settles into, where it used to
+  tail four. An output short enough to stay whole shows whole with the clock
+  at the end of its last row, and the `(ctrl+b to run in background)` hint
+  sits at the end of the clock's row instead of on a row of its own; where a
+  row has no room for the clock or the hint, the output keeps the row and
+  the key still works. The collapsed read group shows its `⎿` row only while
+  nothing else is running beside it (`docs/live-cells.md`).
+
 ### Removed
 
 - **`/help`.** It printed the list of commands into the conversation, which
@@ -184,6 +201,16 @@ release heading when a version is cut.
   browse them.
 
 ### Fixed
+
+- **The input box no longer jumps between a thought and what follows it, or
+  when a command finishes.** Each time a thought ended, the box rose up to
+  three rows and dropped back when the tool call's cell appeared, which
+  could take a second while the model wrote the call, and it did the same
+  before a reply's first line. A finishing command moved it too, by a row or
+  two, and by more when its output began with a title and a blank line. The
+  cells above the box now take, while they run, exactly the rows they keep
+  once they finish, so the box stays where it is through a whole turn, in a
+  subagent's session view too (`docs/live-cells.md`).
 
 - **Models an OpenAI-compatible gateway discovered stay in `/model`.**
   OmniRoute lists a model it found upstream, such as a Codex model, under

@@ -820,9 +820,10 @@ fn the_exit_code_a_failed_cell_hides_is_still_what_the_model_reads() {
 
 #[test]
 fn running_command_lines_tails_recent_output_with_the_elapsed() {
-    // The mock's running state: the header, the last TOOL_PEEK_ROWS output
-    // lines (the *tail* — what just happened), and a `+N lines (Ns)` footer
-    // counting the lines hidden above plus the elapsed.
+    // The mock's running state: the header, the last TOOL_FOLD_ROWS output
+    // lines (the *tail* — what just happened, on the rows the settled peek
+    // will take, docs/live-cells.md), and a `+N lines (Ns)` footer counting
+    // the lines hidden above plus the elapsed.
     let out = (1..=9)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
@@ -835,24 +836,25 @@ fn running_command_lines_tails_recent_output_with_the_elapsed() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     );
     assert_eq!(plain(&lines[0]), "● Bash(ping -c 10 x)");
     let body: Vec<String> = lines[1..].iter().map(plain).collect();
     assert!(
-        body[0].contains("line 6"),
-        "the tail starts at line 6: {body:?}"
+        body[0].contains("line 7"),
+        "the tail starts at line 7: {body:?}"
     );
     assert!(
-        body[3].contains("line 9"),
+        body[2].contains("line 9"),
         "the tail ends at the newest line: {body:?}"
     );
     assert!(
-        !body.iter().any(|l| l.contains("line 4")),
+        !body.iter().any(|l| l.contains("line 6")),
         "older lines are hidden above the tail: {body:?}"
     );
     assert_eq!(
         body.last().unwrap().trim(),
-        "+5 lines (9s · wait 2m)",
+        "+6 lines (9s · wait 2m)",
         "the footer counts hidden lines, the elapsed and the timeout: {body:?}"
     );
 }
@@ -862,7 +864,7 @@ fn the_running_footer_names_the_timeout_the_call_runs_under() {
     // The reported ask: beside the elapsed, the footer says how long the
     // command *may* run — the model's own `timeout`, read off the call's
     // verbatim arguments (`ToolCall::arguments`) and humanized as a limit:
-    // `+18 lines (22s · wait 1m 50s)` (docs/tool-streaming.md).
+    // `+19 lines (22s · wait 1m 50s)` (docs/tool-streaming.md).
     let command = "for i in $(seq 1 100); do echo $i; sleep 1; done";
     let out = (1..=22)
         .map(|i| i.to_string())
@@ -877,6 +879,7 @@ fn the_running_footer_names_the_timeout_the_call_runs_under() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     )
     .iter()
     .map(plain)
@@ -884,11 +887,10 @@ fn the_running_footer_names_the_timeout_the_call_runs_under() {
     assert_eq!(
         lines[1..],
         [
-            "  ⎿  19",
-            "     20",
+            "  ⎿  20",
             "     21",
             "     22",
-            "     +18 lines (22s · wait 1m 50s)",
+            "     +19 lines (22s · wait 1m 50s)",
         ],
         "{lines:?}"
     );
@@ -913,6 +915,7 @@ fn a_running_command_with_no_output_counts_on_its_running_row() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     )
     .iter()
     .map(plain)
@@ -943,15 +946,18 @@ fn running_footers_humanize_the_elapsed_past_a_minute() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     );
     assert_eq!(
         plain(lines.last().unwrap()).trim(),
-        "+5 lines (2m 3s · wait 2m)",
+        "+6 lines (2m 3s · wait 2m)",
         "the streaming footer humanizes"
     );
-    let row = plain(&crate::ui::tool::shell_running_line(Duration::from_secs(
-        75,
-    )));
+    let row = plain(&crate::ui::tool::shell_running_line(
+        Duration::from_secs(75),
+        None,
+        80,
+    ));
     assert!(
         row.ends_with("Running… (1m 15s)"),
         "the shell running row humanizes: {row:?}"
@@ -959,11 +965,12 @@ fn running_footers_humanize_the_elapsed_past_a_minute() {
 }
 
 #[test]
-fn running_command_lines_without_overflow_shows_the_clock_row_alone() {
-    // Fewer lines than the window: show them all, then the clock row with
-    // no `+N lines` count in front of it — `(1s · wait 2m)` — so a
-    // command whose output fits still says how long it has run and how long
-    // it may (docs/tool-streaming.md).
+fn running_command_lines_without_overflow_carries_the_clock_on_its_last_row() {
+    // Fewer rows than the settled cell folds: show them all, with the clock
+    // on the end of the last one and no `+N lines` count in front of it —
+    // `b (1s · wait 2m)` — so a command whose output fits still says how
+    // long it has run and how long it may, on the rows the settled cell will
+    // have (docs/tool-streaming.md, docs/live-cells.md).
     let t = tool("Bash", "echo", ToolStatus::Running, "a\nb");
     let lines = running_command_lines(
         &t,
@@ -972,23 +979,23 @@ fn running_command_lines_without_overflow_shows_the_clock_row_alone() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     );
     let body: Vec<String> = lines[1..].iter().map(plain).collect();
-    assert_eq!(body.len(), 3, "2 output rows + the clock row: {body:?}");
+    assert_eq!(body.len(), 2, "the 2 output rows and no row more: {body:?}");
     assert!(
         !body.iter().any(|l| l.contains("lines (")),
         "no hidden count when nothing is hidden: {body:?}"
     );
-    assert_eq!(body[2].trim(), "(1s · wait 2m)", "{body:?}");
+    assert_eq!(body[1].trim(), "b (1s · wait 2m)", "{body:?}");
 }
 
 #[test]
 fn running_command_lines_tail_window_counts_display_rows_when_lines_wrap() {
-    // The TOOL_PEEK_ROWS window is counted in *display rows*, so a wrapping tail
-    // can't grow the strip past its budget — a long newest line
-    // tail-follows its own newest rows. The `+N lines` footer keeps
-    // counting source lines, and only the ones *fully* hidden above the
-    // window (a partially shown wrapped line is on screen, not hidden).
+    // The window is counted in *display rows*, so a wrapping tail can't grow
+    // the strip past the rows the cell settles into — a long newest line
+    // tail-follows its own newest rows. The `+N lines` footer counts rows
+    // too, and only the ones *fully* hidden above the window.
     let long = "x".repeat(70); // 35 content cols → exactly 2 rows
     let out = format!("alpha\nbeta\ngamma\n{long}");
     let t = tool("Bash", "cat log", ToolStatus::Running, &out);
@@ -999,23 +1006,26 @@ fn running_command_lines_tail_window_counts_display_rows_when_lines_wrap() {
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
+        None,
     );
     let body: Vec<String> = lines[1..].iter().map(plain).collect();
-    assert_eq!(body.len(), 5, "4 tail rows + the footer: {body:?}");
+    assert_eq!(body.len(), 4, "3 tail rows + the footer: {body:?}");
     assert!(
-        !body.iter().any(|l| l.contains("alpha")),
-        "alpha is fully hidden above the window: {body:?}"
+        !body
+            .iter()
+            .any(|l| l.contains("alpha") || l.contains("beta")),
+        "alpha and beta are fully hidden above the window: {body:?}"
     );
     assert!(
-        body[0].contains("beta") && body[1].contains("gamma"),
-        "the window opens on the still-visible lines: {body:?}"
+        body[0].contains("gamma"),
+        "the window opens on the still-visible line: {body:?}"
     );
-    assert_eq!(body[2].trim(), "x".repeat(35), "the long line wraps…");
-    assert_eq!(body[3].trim(), "x".repeat(35), "…across the window's rows");
+    assert_eq!(body[1].trim(), "x".repeat(35), "the long line wraps…");
+    assert_eq!(body[2].trim(), "x".repeat(35), "…across the window's rows");
     assert_eq!(
         body.last().unwrap().trim(),
-        "+1 lines (7s · wait 2m)",
-        "the footer counts the one fully hidden line: {body:?}"
+        "+2 lines (7s · wait 2m)",
+        "the footer counts the two fully hidden rows: {body:?}"
     );
 }
 
@@ -3092,14 +3102,15 @@ fn the_running_tail_footer_counts_hidden_rows() {
         Duration::ZERO,
         40,
         &PathDisplay::VERBATIM,
+        None,
     )
     .iter()
     .map(plain)
     .collect();
     let footer = lines.last().unwrap();
     assert!(
-        footer.contains("+18 lines (3s · wait 2m)"),
-        "the 18 wrapped rows above the window: {lines:?}"
+        footer.contains("+19 lines (3s · wait 2m)"),
+        "the 18 wrapped rows and `w` above the window: {lines:?}"
     );
 }
 
@@ -4252,13 +4263,14 @@ fn the_running_tail_never_reshapes_what_is_still_streaming() {
         Duration::ZERO,
         60,
         &PathDisplay::VERBATIM,
+        None,
     )
     .iter()
     .map(plain)
     .collect();
     assert_eq!(
         lines[1..],
-        ["  ⎿  {\"a\":1,\"b\":2}", "     (1s · wait 2m)"],
+        ["  ⎿  {\"a\":1,\"b\":2} (1s · wait 2m)"],
         "{lines:?}"
     );
 }
@@ -4791,6 +4803,7 @@ fn a_running_session_call_shows_the_wait_it_runs_under() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     )
     .iter()
     .map(plain)
@@ -4838,21 +4851,22 @@ fn the_running_window_follows_the_rows_still_moving() {
         Duration::ZERO,
         44,
         &PathDisplay::VERBATIM,
+        None,
     )[1..]
         .iter()
         .map(plain)
         .collect();
     assert_eq!(
         body.len(),
-        5,
-        "four window rows over the clock row: {body:?}"
+        4,
+        "three window rows over the clock row: {body:?}"
     );
     assert!(
-        body[0].contains("core") && body[1].ends_with("45%"),
+        body[0].ends_with("45%"),
         "the window fills upward from the lowest moving row: {body:?}"
     );
     assert!(
-        body[2].contains("extra") && body[3].ends_with("12%"),
+        body[1].contains("extra") && body[2].ends_with("12%"),
         "the lowest moving bar ends the window: {body:?}"
     );
     assert!(
@@ -4860,15 +4874,15 @@ fn the_running_window_follows_the_rows_still_moving() {
         "the finished bars below are what hides: {body:?}"
     );
     assert_eq!(
-        body[4].trim(),
-        "+5 lines (50s · wait 2m)",
-        "the footer counts the heading above and the finished bars below: {body:?}"
+        body[3].trim(),
+        "+6 lines (50s · wait 2m)",
+        "the footer counts the rows above and the finished bars below: {body:?}"
     );
 }
 
 #[test]
 fn the_running_window_never_hides_rows_that_fit() {
-    // The lowest moving row near the top: the window still holds its four
+    // The lowest moving row near the top: the window still holds its three
     // rows, filling downward with what follows rather than shrinking — a
     // window that hid rows it had room for would be folding for nothing.
     let mut live = crate::app::LiveTail::default();
@@ -4886,20 +4900,21 @@ fn the_running_window_never_hides_rows_that_fit() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     )[1..]
         .iter()
         .map(plain)
         .collect();
-    assert_eq!(body.len(), 5, "four rows over the clock row: {body:?}");
+    assert_eq!(body.len(), 4, "three rows over the clock row: {body:?}");
     assert!(
         body[0].contains(":: Synchronizing") && body[1].contains("core  45%"),
         "{body:?}"
     );
     assert!(
-        body[2].contains("extra") && body[3].contains("multilib"),
-        "the rows after the moving one fill the window: {body:?}"
+        body[2].contains("extra"),
+        "the row after the moving one fills the window: {body:?}"
     );
-    assert_eq!(body[4].trim(), "+1 lines (50s · wait 2m)", "{body:?}");
+    assert_eq!(body[3].trim(), "+2 lines (50s · wait 2m)", "{body:?}");
 }
 
 #[test]
@@ -4924,15 +4939,16 @@ fn the_running_window_stays_a_tail_while_the_newest_output_is_at_the_end() {
         Duration::ZERO,
         80,
         &PathDisplay::VERBATIM,
+        None,
     )[1..]
         .iter()
         .map(plain)
         .collect();
     assert!(
-        body[0].contains("line 6") && body[3].contains("line 9"),
+        body[0].contains("line 7") && body[2].contains("line 9"),
         "the tail: {body:?}"
     );
-    assert_eq!(body[4].trim(), "+5 lines (9s · wait 2m)", "{body:?}");
+    assert_eq!(body[3].trim(), "+6 lines (9s · wait 2m)", "{body:?}");
 }
 
 #[test]

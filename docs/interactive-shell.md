@@ -775,7 +775,7 @@ once every 800 ms the cell emptied, fell back to `⎿ Running…` for a frame an
 moved the box a row each way. The wait sends at most every `STREAM_INTERVAL`
 (50 ms), only when something changed, `settled` capped at `STREAM_MAX_BYTES`
 (64 KB) a send, and once more as it settles, so the cell ends where the report
-begins. The cell's four-row window ends at the lowest live row **still moving**
+begins. The cell's window ends at the lowest live row **still moving**
 rather than at the output's end — pacman's finished bars sit below the
 ones still downloading, all in reach — `docs/tool-streaming.md` *The
 window follows what is still moving*.

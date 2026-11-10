@@ -956,16 +956,20 @@ provider's `/v1/models`, shown beside the model name in the footer, cycled
 with a `Thinking: {mode}` toast, riding the request as the unified `reasoning`
 parameter, persisted beside the `/model` selection) in `docs/reasoning.md`;
 the **thinking stream** — that reasoning, *shown* (a phase's
-chain-of-thought streams live in the strip wearing the **tool cell's shape**:
-a `● Thinking…` header — the same `TOOL_BULLET` a running tool wears, because
+chain-of-thought streams live in the strip on **one row**:
+a `● Thinking…` label — the same `TOOL_BULLET` a running tool wears, because
 it means the same thing, blinking at the frame pulse beside a label carrying
 the status line's **shimmer** (`ui::status::shimmer_spans_from`, the same wave
 `Working…` wears over the page titles' gradient, floored here at the near-white
 `reasoning_shimmer_base()`, since codex's grey base is unreadable for a
-header) — over the
-thought in the `⎿` gutter, dim and **italic** (the one cue separating it from a
-tool's output there), tail-following its last `REASONING_PEEK_LINES` (3)
-wrapped rows — none of it while a collapsed read/search group is open,
+header) — and beside it the thought's **newest wrapped row**, dim and
+**italic**, growing rightward from a word until it wraps
+(`ui::live_reasoning_lines`; the label alone under `REASONING_TAIL_MIN_COLS`
+columns of room). One row is the height of the line the phase settles into,
+which is the point: a block of the header over three rows of thought gave
+those rows up the moment the phase ended and the box hopped up, then back
+down when the round's next cell landed (`docs/live-cells.md`) — none of it
+while a collapsed read/search group is open,
 whose cell keeps the strip (the status line's `Thinking for Ns` the one sign,
 the open group outranking the block in `ui::live::preview_lines`) and whose
 line the thought then settles into unseen, Ctrl+O its only view
@@ -1350,7 +1354,9 @@ counted as it streams and its path wrapped under the corner rather than cut
 (`PathDisplay::in_scratchpad` — this session's directory or any session's by
 its layout, so a `/resume` repaints the same line; `docs/tool-groups.md`
 *Scratchpad edits*) —
-is one cell, the live `● Searching for 1 pattern, reading 2 files…` over a
+is one cell, the live `● Searching for 1 pattern, reading 2 files…` over —
+while it is the strip's only cell, since beside other cells it is its header
+alone, the height of the line it settles into (`docs/live-cells.md`) — a
 `⎿` hint naming the calls **one at a time in the order they ran** — a
 queue, not the reference's throttle, which drops the values a fast parallel
 batch produces during its hold and so jumps to the last: each value held
@@ -1371,7 +1377,13 @@ dummy's `explore` and `scratchpad` scenarios and `smoke.sh` Phases 146 and
 147, every other phase exporting `ALTER_ZERO_VERBOSE=1`) in
 `docs/tool-groups.md`; the
 **live-streaming `bash` tool** (a running command
-tails its output — a four-row window ending at the lowest row **still
+tails its output — **on the rows its cell will settle into**
+(`ui::tool`'s `settled_command_rows`, `docs/live-cells.md`: the fold's three
+rows over the clock row where the settled hint will stand, fewer where a
+blank line closes the settled peek early, and every row with the clock on
+the end of the last where the settled cell shows the output whole — so the
+box under it holds still when the command ends), the window ending at the
+lowest row **still
 moving** (`app::LiveTail`: each live row stamped with the command clock
 when its text last changed, a row active within `LIVE_ACTIVE_SPAN` (2 s)
 of the newest change, so pacman's finished bars below the ones still
@@ -1389,8 +1401,11 @@ running, the model's own `wait` (seconds; the old `timeout` in ms still
 read) off the recorded `ToolCall::arguments` (`llm::tools::bash_wait_ms`,
 the executor's default-and-clamp rule — a companion call's own via
 `session_wait_ms` — humanized whole by `app::format_timeout` — `2m`, never
-`2m 0s`); the clock clause is **always** on the live cell — a bare
-`(10s · wait 10m)` row under output that fits the window, and
+`2m 0s`); the clock clause is on the live cell in every shape but one —
+the footer of an output that folds, the end of the last row of one that
+fits (`beta (9s · wait 2m)`: never a row of its own, since the settled cell
+has none there, and never cutting output — a last row with no room for it
+shows whole and the clock sits that frame out), and
 `⎿ Running… (10s · wait 2m)` on
 the corner row of a command that has printed nothing, which used to sit on
 a bare `⎿ Running…` for as long as it took —
@@ -1409,9 +1424,9 @@ when they happened to be short. The **block** is budgeted in display rows now
 — it **folds** Claude Code's way, `TOOL_FOLD_ROWS` (3) rows over the `… +N
 lines` hint, an output of exactly four rows shown whole since a hint hiding
 one row costs the row it hides — so a `bash` cell is at most four rows
-whatever shape its output has, hint included, and the running tail's
-`TOOL_PEEK_ROWS` (4) window is the same ceiling, so the cell never *grows*
-when it settles. The fold is what bounds a blob: it shows three rows of it
+whatever shape its output has, hint included, and the running tail stands
+on the rows that fold leaves it (`docs/live-cells.md`), so the cell never
+gives a row back when it settles. The fold is what bounds a blob: it shows three rows of it
 as they are and the hint under them says the rest follows (Claude Code's
 look — no `…` on the row); and the numbered file cell's peek is ten rows
 at most: it starts lines while it has `FILE_PEEK_LINES` (10) rows left and
@@ -1488,10 +1503,14 @@ interim-output path, and a call whose `wait` passes hands its command here
 still running rather than killing it, `docs/bash-tools.md`; the output
 path — `{session}/tasks/{id}.output` — while a `BackgroundRegistry` process streams on its own channel; **Ctrl+B** moves a
 running model-`bash`/`!` command to the background mid-run (the live cell hints
-it with a dim `(ctrl+b to run in background)` row that waits a few seconds —
+it with a dim `(ctrl+b to run in background)` that waits a few seconds —
 `ui::TOOL_BACKGROUND_HINT_DELAY`, gated on the command's own boundary-injected
-`App::background_hint_elapsed` — so a fast command never flashes it, Claude-Code-style;
-Ctrl+B itself works the whole time; a `bashwait`/`bashsend` cell's row reads
+`App::background_hint_elapsed` — so a fast command never flashes it, Claude-Code-style,
+and that **closes a row the cell already has** — the clock row, the
+`⎿ Running…` row, an agent tree's header — or is left out whole where that
+row has no room (`ui::tool::with_hint`), never a row of its own, which the
+cell gave back when the command ended (`docs/live-cells.md`);
+Ctrl+B itself works the whole time; a `bashwait`/`bashsend` cell's hint reads
 `(ctrl+b to stop waiting)` instead, its session already running there, and a
 `bashkill`'s none — `ui::tool::ctrl_b_hint`); the cell resolves `⎿ Running in the
 background (↓ to manage)`, the footer
@@ -2996,13 +3015,14 @@ preview shows a running tool's cell when one is executing — its bullet a
 before any output a `⎿ Running… (10s · wait 2m)` row — the command's
 own clock and the wait its call runs under, so a silent command still shows
 it is alive — and once a `bash` command **streams** it
-**tails** its output — `TOOL_PEEK_ROWS` display **rows** ending at the lowest
+**tails** its output — on the display **rows** its cell will settle into
+(`docs/live-cells.md`), ending at the lowest
 row still moving (`App::live_tail`, `docs/tool-streaming.md` *The window
 follows what is still moving*), long lines
 word-wrapped like the Ctrl+O view (`ui::wrap_output` — never clipped at the
 width, spaces preserved), + a
 `+N lines (22s · wait 1m 50s)` footer counting the fully hidden display
-rows (a bare `(10s · wait 10m)` row when none are), its elapsed
+rows (the clock on the end of the last row when none are), its elapsed
 the command's own runtime (`App::command_elapsed`, never the turn's) and
 its wait the model's own `wait` off the call's verbatim arguments
 (`ui::running_command_lines`, `docs/tool-streaming.md`) — so a long
@@ -3326,7 +3346,20 @@ of bug:
    coincide with a flush *mid-stream* too — a forming table's whole block commits
    at its close while the multi-row preview drops to one row — `term::paint_live`
    syncs the tracked height to the frame's height before `flush_pending` whenever
-   lines are pending, `docs/table-streaming.md`, guarded by Phase 41). (`insert_before` itself only
+   lines are pending, `docs/table-streaming.md`, guarded by Phase 41). **The same
+   anchoring is why a live cell is never taller than the rows it leaves behind**
+   (`docs/live-cells.md`): rows committed push the box down and rows the strip
+   gives up pull it back, so a cell that stood taller live than it settles —
+   a thinking block of several rows over its one `Thought for …` line, a
+   command tail over its shorter peek, a hint on a row of its own — lifted
+   the box the moment it settled and the next cell dropped it again, which
+   read as flicker at every hand-off. A new live cell, or a new row on an old
+   one, has to settle into at least as many rows as it stands on; a row with
+   no settled counterpart joins a row the cell already has or is left out
+   (`ui::tool::with_hint`). Never answer a hop with padding or with rows held
+   back from scrollback — both were tried and both were taken out
+   (`ui::tests::live_cells` plays every hand-off, `smoke.sh` Phase 153 watches
+   the box through whole turns). (`insert_before` itself only
    **queues**: the next `term::draw` writes the lines and repaints the live region
    inside one synchronized update, so a commit can never flash a boxless frame —
    `docs/flicker.md`, guarded by `smoke.sh` Phase 15.) On **any** size change the
@@ -3751,14 +3784,17 @@ but bug fixes still get a failing test first (TDD applies to fixes too).
   `docs/parallel-tools.md`), the
   `⎿` peek prefix, the `(ctrl+o to expand)` hint), tool-view chrome
   (`TOOL_VIEW_*`), the thinking stream (`REASONING_*` — it *borrows* the tool
-  cell's `TOOL_BULLET`/`TOOL_RESULT_PREFIX` while it runs rather than owning a
+  cell's `TOOL_BULLET` while it runs and its `TOOL_RESULT_PREFIX` gutter in
+  the Ctrl+O expansion rather than owning a
   glyph, so its own consts are the dim italic `reasoning_text_color()`/
   `REASONING_TEXT_MODIFIER` the chain-of-thought renders in, the
   `REASONING_RUNNING`/`REASONING_DONE` labels, the near-white
   `reasoning_shimmer_base()` the live label's sweep rests at (codex's grey
   would read as dim), the `reasoning_label_color()` the settled
   line takes from `status_done_color()` on **both** surfaces, and the
-  `REASONING_PEEK_LINES` (3) live tail window — see `docs/thinking-stream.md`), the transcript timestamp (`timestamp_color()` — the dim
+  `REASONING_TAIL_GAP`/`REASONING_TAIL_MIN_COLS` of the live row, which is one
+  row by rule and not by a constant — see `docs/thinking-stream.md` and
+  `docs/live-cells.md`), the transcript timestamp (`timestamp_color()` — the dim
   `hh:mm AM/PM` stamp right-aligned on its own line under the *user* message,
   the only stamp shown, only in the Ctrl+O view), the status
   indicator (`STATUS_*` — the comet style's white head + mid-grey

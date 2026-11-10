@@ -50,6 +50,12 @@ pub(crate) struct SessionRecorder {
     active: Option<(PathBuf, SessionMeta)>,
     /// How many history items are already on disk.
     recorded: usize,
+    /// The next per-conversation sequence number for the rollout `id` (ADR-001 §1.3,
+    /// D053). One counter for the FILE, not per record kind: a `/resume` appends to the
+    /// same file with a rising count, so an appended turn is a new artifact rather than
+    /// a rewrite of an old one. Reset only by `start_new`, which begins a new
+    /// conversation and therefore a new file.
+    next_seq: u64,
     /// An adopted file's last line lost its newline (a torn write): the next
     /// append prefixes one so the first new item isn't glued onto it.
     repair_newline: bool,
@@ -118,6 +124,7 @@ impl SessionRecorder {
             root: sessions_root(),
             active: None,
             recorded: 0,
+            next_seq: 1,
             repair_newline: false,
             checkpoints: Vec::new(),
             checkpoints_written: 0,
@@ -349,10 +356,13 @@ impl SessionRecorder {
             if self.active.is_some() {
                 self.written = self.recorded_selection().cloned();
             }
+            // The create wrote the meta line at seq 0; the counter continues above it.
+            self.next_seq = 1;
         }
-        let Some((path, _)) = self.active.as_ref() else {
+        let Some((path, meta)) = self.active.as_ref() else {
             return; // recording disabled, or the create failed
         };
+        let conversation = meta.id.clone();
         let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) else {
             return;
         };
@@ -373,7 +383,14 @@ impl SessionRecorder {
             self.written = Some(selection);
         }
         for item in items {
-            text.push_str(&session::item_line(item, &stamp));
+            // The identity rides every recorded line (D053), so a hook reading this
+            // file can derive an artifact id that survives a re-read. `next_seq` is a
+            // counter on the FILE: a `/resume` appending here keeps rising.
+            let value = session::item_line_with_id(item, &stamp, &conversation, self.next_seq);
+            self.next_seq += 1;
+            text.push_str(
+                &serde_json::to_string(&value).unwrap_or_else(|_| session::item_line(item, &stamp)),
+            );
             text.push('\n');
         }
         // Flush any checkpoints recorded since the last append (docs/checkpoint.md)
@@ -409,7 +426,11 @@ impl SessionRecorder {
             originator: "alter-zero".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
-        let mut head = format!("{}\n", session::meta_line(&meta, &meta.timestamp));
+        let mut head = format!(
+            "{}\n",
+            serde_json::to_string(&session::meta_line_with_id(&meta))
+                .unwrap_or_else(|_| session::meta_line(&meta, &meta.timestamp))
+        );
         // The session's model, right after the meta (docs/session-model.md).
         if let Some(selection) = self.recorded_selection() {
             head.push_str(&session::model_line(selection, &meta.timestamp));

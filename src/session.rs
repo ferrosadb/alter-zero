@@ -85,6 +85,21 @@ pub struct SessionSummary {
 #[derive(Serialize, Deserialize)]
 struct LineRecord {
     timestamp: String,
+    /// The record's stable identity: `<conversation>:<seq>` (ADR-001 §1.3, D053).
+    ///
+    /// Absent on lines written before this field existed, which is why it is
+    /// `skip_serializing_if` and `default` — the rollout's forward-compatibility
+    /// contract is that a build skips a field it does not declare, and an older build
+    /// reading a newer file must behave exactly as it does today.
+    ///
+    /// A captured turn's hook derives its `artifact_id` from this id, so a re-read of
+    /// the same transcript re-derives the same artifact instead of recording a second
+    /// one. A timestamp cannot serve: it collides within a millisecond on a parallel
+    /// tool batch. A line offset cannot either: a backfill re-reads the same records
+    /// under a different window, which is the duplicate the derivation exists to
+    /// prevent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     #[serde(flatten)]
     item: ItemRecord,
 }
@@ -568,8 +583,17 @@ struct SummaryRecord {
 /// record types cannot fail (strings, bools, integers — no fallible impls, no
 /// non-string map keys), hence the `expect`.
 fn line(stamp: &str, item: ItemRecord) -> String {
+    line_at(stamp, item, None)
+}
+
+/// Serialize one line with its identity, when the recorder has one.
+///
+/// Kept separate from [`line`] so every writer that has no sequence — the tests, and
+/// any future pre-sequence path — keeps producing exactly the bytes it did before.
+fn line_at(stamp: &str, item: ItemRecord, id: Option<String>) -> String {
     serde_json::to_string(&LineRecord {
         timestamp: stamp.to_string(),
+        id,
         item,
     })
     .expect("session record types serialize infallibly")
@@ -658,7 +682,12 @@ pub fn parse_model(text: &str) -> Option<ModelSelection> {
 /// write-time line stamp (UTC, boundary-supplied).
 #[must_use]
 pub fn item_line(item: &HistoryItem, stamp: &str) -> String {
-    let record = match item {
+    line(stamp, item_record(item))
+}
+
+/// The record one history item serializes to.
+fn item_record(item: &HistoryItem) -> ItemRecord {
+    match item {
         HistoryItem::Message(message) => ItemRecord::Message(MessageRecord {
             role: role_name(message.role).to_string(),
             text: message.text.clone(),
@@ -801,8 +830,40 @@ pub fn item_line(item: &HistoryItem, stamp: &str) -> String {
             batch: record.batch,
             position: record.position,
         }),
-    };
-    line(stamp, record)
+    }
+}
+
+/// The `session_meta` line, carrying sequence 0 for the conversation it opens.
+///
+/// Every other line in the file is `1, 2, …` above it, so a `/resume` appending to the
+/// same file keeps issuing ids higher than anything already there (D053).
+#[must_use]
+pub fn meta_line_with_id(meta: &SessionMeta) -> serde_json::Value {
+    let line = line_at(
+        &meta.timestamp,
+        ItemRecord::SessionMeta(meta.clone()),
+        Some(format!("{}:0", meta.id)),
+    );
+    serde_json::from_str(&line).expect("a serialized line is valid JSON")
+}
+
+/// One history item as a tagged JSON object with its rollout identity.
+///
+/// Returns the parsed object rather than the string so a caller can read `id` beside
+/// the payload; the recorder writes the string form, which is these same bytes.
+#[must_use]
+pub fn item_line_with_id(
+    item: &HistoryItem,
+    stamp: &str,
+    conversation: &str,
+    seq: u64,
+) -> serde_json::Value {
+    let line = line_at(
+        stamp,
+        item_record(item),
+        Some(format!("{conversation}:{seq}")),
+    );
+    serde_json::from_str(&line).expect("a serialized line is valid JSON")
 }
 
 /// Serialize one filesystem checkpoint as a rollout line (`docs/checkpoint.md`).
@@ -1155,6 +1216,50 @@ mod tests {
     }
 
     // ===== the line format (docs/resume.md) =====
+
+    #[test]
+    fn every_recorded_line_carries_a_stable_per_conversation_id() {
+        // D053 / ADR-001 §1.3: a captured turn's `source_anchor` is the producing
+        // transcript entry id, and the rollout had none. The id is the PAIR
+        // `(conversation id, per-conversation sequence)`, never a timestamp (which
+        // collides inside a millisecond on a parallel batch) and never a line offset
+        // (which shifts when the read window does, producing a duplicate artifact).
+        let meta = meta();
+        let first = item_line_with_id(&message(Role::User, "one"), "t1", &meta.id, 1);
+        assert_eq!(
+            first["id"], "abc123:1",
+            "the pair, rendered <conversation>:<seq>"
+        );
+        assert_eq!(first["payload"]["role"], "user");
+
+        // Two records in one conversation never share an id.
+        let second = item_line_with_id(&message(Role::Assistant, "two"), "t2", &meta.id, 2);
+        assert_ne!(first["id"], second["id"]);
+    }
+
+    #[test]
+    fn the_session_meta_line_is_sequence_zero_and_every_other_line_rises() {
+        // The counter is per conversation and starts at the meta line, so a `/resume`
+        // appending to the same FILE keeps issuing ids above every existing one — a
+        // counter that restarted at a resume would collapse two turns onto one
+        // artifact.
+        let meta = meta();
+        assert_eq!(meta_line_with_id(&meta)["id"], "abc123:0");
+        assert_eq!(meta_line_with_id(&meta)["payload"]["id"], "abc123");
+        assert_eq!(
+            item_line_with_id(&message(Role::User, "x"), "t", &meta.id, 1)["id"],
+            "abc123:1"
+        );
+    }
+
+    #[test]
+    fn the_id_pair_survives_a_jsonl_round_trip_as_a_single_line() {
+        let meta = meta();
+        let text = item_line_with_id(&message(Role::User, "hi"), "t", &meta.id, 7).to_string();
+        assert!(!text.contains('\n'), "one line of JSONL");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(parsed["id"], "abc123:7");
+    }
 
     #[test]
     fn meta_line_is_a_tagged_session_meta_json_line() {

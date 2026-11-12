@@ -1226,7 +1226,10 @@ mod tests {
         // (which shifts when the read window does, producing a duplicate artifact).
         let meta = meta();
         let first = item_line_with_id(&message(Role::User, "one"), "t1", &meta.id, 1);
-        assert_eq!(first["id"], "abc123:1", "the pair, rendered <conversation>:<seq>");
+        assert_eq!(
+            first["id"], "abc123:1",
+            "the pair, rendered <conversation>:<seq>"
+        );
         assert_eq!(first["payload"]["role"], "user");
 
         // Two records in one conversation never share an id.

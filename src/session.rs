@@ -1255,7 +1255,8 @@ mod tests {
     #[test]
     fn the_id_pair_survives_a_jsonl_round_trip_as_a_single_line() {
         let meta = meta();
-        let text = item_line_with_id(&message(Role::User, "hi"), "t", &meta.id, 7).to_string();
+        let text = item_line_with_id(&message(Role::User, "hi"), "t", &meta.id, 7)
+            .to_string();
         assert!(!text.contains('\n'), "one line of JSONL");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
         assert_eq!(parsed["id"], "abc123:7");

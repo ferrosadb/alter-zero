@@ -614,6 +614,13 @@ impl ModelSession {
 
     /// Is this the test-only stalled backend? It ignores scripted replies, so
     /// `/compact` and auto-compaction opt out (`docs/interrupt.md`).
+    /// Is no real provider answering — is the built-in dummy playing its
+    /// scripted replies because nothing resolved (`docs/llm.md`)? The headless
+    /// run says so on stderr: a caller that hears canned text should know why.
+    pub(crate) fn is_offline(&self) -> bool {
+        !self.real_backend
+    }
+
     pub(crate) fn is_stalled_test_backend(&self) -> bool {
         self.stall_ms.is_some()
     }

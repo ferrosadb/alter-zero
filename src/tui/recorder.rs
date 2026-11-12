@@ -389,7 +389,8 @@ impl SessionRecorder {
             let value = session::item_line_with_id(item, &stamp, &conversation, self.next_seq);
             self.next_seq += 1;
             text.push_str(
-                &serde_json::to_string(&value).unwrap_or_else(|_| session::item_line(item, &stamp)),
+                &serde_json::to_string(&value)
+                    .unwrap_or_else(|_| session::item_line(item, &stamp)),
             );
             text.push('\n');
         }

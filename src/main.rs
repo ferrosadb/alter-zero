@@ -48,7 +48,20 @@ fn main() -> io::Result<()> {
         Ok(startup) => startup,
         Err(code) => std::process::exit(code),
     };
+    // `-p/--print` (`docs/cli.md`): the same agent loop with no viewport, no
+    // raw mode and no alternate screen. Nothing terminal-shaped is touched on
+    // this path — stdout is the NDJSON stream and stays pure.
+    if startup.output.is_some() {
+        return headless_main(startup);
+    }
     tui_main(startup)
+}
+
+/// The headless run's runtime: the same current-thread flavour the TUI builds,
+/// because the backend thread does the I/O and the loop only awaits records.
+#[tokio::main(flavor = "current_thread")]
+async fn headless_main(startup: Startup) -> io::Result<()> {
+    tui::headless::run(startup).await
 }
 
 #[tokio::main(flavor = "current_thread")]

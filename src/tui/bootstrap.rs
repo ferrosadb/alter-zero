@@ -63,6 +63,9 @@ impl<'t> Session<'t> {
         let Startup {
             session: startup,
             prompt,
+            // The interactive path: `main` routes a headless run to
+            // `tui::headless` before this ever runs.
+            output: _,
         } = startup;
         // Backend → loop (the streamed reply). A tokio channel so the loop can
         // `select!` on it; the backend thread sends without touching the runtime.

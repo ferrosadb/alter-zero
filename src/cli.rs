@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use unicode_width::UnicodeWidthStr;
 
 use crate::mcp::{self, McpServerConfig};
+use crate::output::{OutputFormat, STREAM_JSON};
 
 /// One parsed invocation: a TUI run ([`Cli::Session`] — the flagless
 /// default included), one of the two print-and-exit flags, or the `mcp`
@@ -58,11 +59,15 @@ pub enum Cli {
 pub struct SessionArgs {
     /// How the session starts.
     pub start: SessionStart,
-    /// The `[PROMPT]` positional, verbatim: the first turn of a fresh
+    /// `[PROMPT]` positional, verbatim: the first turn of a fresh
     /// session, or the next turn of the one `--continue`/`--resume {id}`
     /// reopens. Never blank (the parse refuses one), never combined with
     /// the bare picker (likewise).
     pub prompt: Option<String>,
+    /// `-p/--print` / `--output-format {FMT}`: run headless and write that
+    /// format to stdout, instead of opening the interface. `None` is the
+    /// interactive default (`docs/cli.md`).
+    pub output: Option<OutputFormat>,
 }
 
 /// How a TUI run begins — the session flags, one-to-one.
@@ -116,7 +121,8 @@ pub enum McpCli {
 /// every row on the page — nothing is wrapped at render time, so the page
 /// reads in the source exactly as it prints.
 pub const DESCRIPTION: &str = "\
-Starts an interactive session by default — a quoted PROMPT is its first turn.";
+Starts an interactive session by default — a quoted PROMPT is its first turn.
+Use -p/--print for a headless, machine-readable stream on stdout.";
 
 /// Which `--help` page: the binary's own, or the `mcp` subcommand's
 /// (`docs/mcp-cli.md`). Both render through the one [`help`] renderer, so
@@ -241,7 +247,8 @@ const MAIN_DOC: HelpDoc = HelpDoc {
                 literal: "",
                 placeholder: "[PROMPT]",
                 description: "Send this message as the first turn — of a new\n\
-                              conversation, or of the one --continue/--resume reopens",
+                              conversation, or of the one --continue/\n\
+                              --resume reopens",
             }],
         },
         Section {
@@ -256,8 +263,20 @@ const MAIN_DOC: HelpDoc = HelpDoc {
                 Row {
                     literal: "-r, --resume",
                     placeholder: " [ID]",
-                    description: "Resume a conversation — by the session id the exit hint\n\
-                                  prints, or picked from a list when no id is given",
+                    description: "Resume a conversation — by the session id the exit\n\
+                                  hint prints, or picked from a list when no id is given",
+                },
+                Row {
+                    literal: "-p, --print",
+                    placeholder: "",
+                    description: "Run headless — no interface, one JSON record per\n\
+                                  line on stdout — and take further turns from stdin",
+                },
+                Row {
+                    literal: "--output-format",
+                    placeholder: " <FMT>",
+                    description: "Machine-readable output to stdout (stream-json);\n\
+                                  implies --print",
                 },
                 Row {
                     literal: "-h, --help",
@@ -453,6 +472,7 @@ where
 {
     let mut start: Option<SessionStart> = None;
     let mut prompt: Option<String> = None;
+    let mut output: Option<OutputFormat> = None;
     let mut args = args.into_iter().peekable();
     // `mcp` routes as the FIRST argument only (docs/mcp-cli.md) — anywhere
     // else it is a prompt like any other word, so the session grammar is
@@ -491,6 +511,29 @@ where
         let picked = match flag.as_str() {
             "--help" | "-h" => return Ok(Cli::Help),
             "--version" | "-V" => return Ok(Cli::Version),
+            // Headless output (`docs/cli.md`): `--print` is the bare spelling,
+            // `--output-format` the one that names what it writes. Neither is
+            // a session flag, so neither joins the `start` slot.
+            "--print" | "-p" => {
+                if value.is_some() {
+                    return Err(format!("{flag} takes no value"));
+                }
+                output = Some(OutputFormat::StreamJson);
+                continue;
+            }
+            "--output-format" => {
+                let value = match value {
+                    Some(value) => value,
+                    None => args
+                        .next_if(|next| !next.starts_with('-'))
+                        .unwrap_or_default(),
+                };
+                if value.is_empty() {
+                    return Err(format!("{flag} needs a value (use {STREAM_JSON})"));
+                }
+                output = Some(OutputFormat::parse(&value)?);
+                continue;
+            }
             "--continue" | "-c" => {
                 if value.is_some() {
                     return Err(format!("{flag} takes no value"));
@@ -526,7 +569,18 @@ where
             "--resume needs a session id to send a prompt into (or use --continue)".to_string(),
         );
     }
-    Ok(Cli::Session(SessionArgs { start, prompt }))
+    // …and a headless run cannot open it at all: the picker is a screen, and a
+    // stream has none. Resolving a session by id is still fine.
+    if output.is_some() && start == SessionStart::Resume(None) {
+        return Err(
+            "--resume needs a session id in --print mode (the picker is interactive)".to_string(),
+        );
+    }
+    Ok(Cli::Session(SessionArgs {
+        start,
+        prompt,
+        output,
+    }))
 }
 
 /// A flag is a dash plus something; a lone `-` is a positional.
@@ -918,7 +972,74 @@ mod tests {
         Ok(Cli::Session(SessionArgs {
             start,
             prompt: prompt.map(str::to_string),
+            output: None,
         }))
+    }
+
+    /// A headless run (`-p/--print`, `--output-format stream-json`).
+    fn headless(start: SessionStart, prompt: Option<&str>) -> Result<Cli, String> {
+        Ok(Cli::Session(SessionArgs {
+            start,
+            prompt: prompt.map(str::to_string),
+            output: Some(OutputFormat::StreamJson),
+        }))
+    }
+
+    // ===== the headless output mode (docs/cli.md) =====
+
+    #[test]
+    fn print_selects_the_stream_json_headless_mode() {
+        assert_eq!(parsed(&["-p"]), headless(SessionStart::Fresh, None));
+        assert_eq!(parsed(&["--print"]), headless(SessionStart::Fresh, None));
+        assert_eq!(
+            parsed(&["--print", "say hello"]),
+            headless(SessionStart::Fresh, Some("say hello"))
+        );
+        // Every spelling of the format means the same run.
+        assert_eq!(
+            parsed(&["--output-format", "stream-json"]),
+            headless(SessionStart::Fresh, None)
+        );
+        assert_eq!(
+            parsed(&["--output-format=stream-json"]),
+            headless(SessionStart::Fresh, None)
+        );
+        assert_eq!(
+            parsed(&["-p", "--output-format", "stream-json"]),
+            headless(SessionStart::Fresh, None),
+            "the two spellings agree rather than conflict"
+        );
+    }
+
+    #[test]
+    fn headless_rides_continue_and_a_resumed_id_like_the_tui_does() {
+        assert_eq!(
+            parsed(&["-c", "-p", "and then?"]),
+            headless(SessionStart::Continue, Some("and then?"))
+        );
+        assert_eq!(
+            parsed(&["--resume", "18a9f2c3-1a2b", "-p"]),
+            headless(SessionStart::Resume(Some("18a9f2c3-1a2b".into())), None)
+        );
+    }
+
+    #[test]
+    fn headless_refuses_the_interactive_resume_picker() {
+        let err = parsed(&["-p", "--resume"]).expect_err("picker is a screen");
+        assert!(
+            err.contains("--resume") && err.contains("--print") && err.contains("id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_missing_output_format_is_a_usage_error() {
+        let err = parsed(&["--output-format", "yaml"]).expect_err("unknown format");
+        assert!(err.contains("yaml") && err.contains("stream-json"), "{err}");
+        let err = parsed(&["--output-format"]).expect_err("no value");
+        assert!(err.contains("--output-format") && err.contains("value"), "{err}");
+        let err = parsed(&["--print=now"]).expect_err("a value on --print");
+        assert!(err.contains("--print"), "{err}");
     }
 
     #[test]
@@ -1121,28 +1242,34 @@ mod tests {
 Alter Zero
 
 Starts an interactive session by default — a quoted PROMPT is its first turn.
+Use -p/--print for a headless, machine-readable stream on stdout.
 
 Usage: alter-zero [OPTIONS] [PROMPT]
        alter-zero mcp <COMMAND>
        alter-zero update
 
 Commands:
-  mcp                 Manage MCP servers in the user config file — see
-                      alter-zero mcp --help
-  update              Install the newest release over this binary, if one is
-                      out — the one-line installer, checksum-verified
+  mcp                     Manage MCP servers in the user config file — see
+                          alter-zero mcp --help
+  update                  Install the newest release over this binary, if one is
+                          out — the one-line installer, checksum-verified
 
 Arguments:
-  [PROMPT]            Send this message as the first turn — of a new
-                      conversation, or of the one --continue/--resume reopens
+  [PROMPT]                Send this message as the first turn — of a new
+                          conversation, or of the one --continue/
+                          --resume reopens
 
 Options:
-  -c, --continue      Continue the most recent conversation recorded in this
-                      directory
-  -r, --resume [ID]   Resume a conversation — by the session id the exit hint
-                      prints, or picked from a list when no id is given
-  -h, --help          Print help
-  -V, --version       Print version";
+  -c, --continue          Continue the most recent conversation recorded in this
+                          directory
+  -r, --resume [ID]       Resume a conversation — by the session id the exit
+                          hint prints, or picked from a list when no id is given
+  -p, --print             Run headless — no interface, one JSON record per
+                          line on stdout — and take further turns from stdin
+  --output-format <FMT>   Machine-readable output to stdout (stream-json);
+                          implies --print
+  -h, --help              Print help
+  -V, --version           Print version";
 
     /// Strip every `ESC[…m` sequence.
     fn strip_ansi(text: &str) -> String {
@@ -1214,10 +1341,10 @@ Options:
             "{styled}"
         );
         assert!(
-            styled.contains("\x1b[1m-r, --resume\x1b[0m [ID]   Resume"),
+            styled.contains("\x1b[1m-r, --resume\x1b[0m [ID]       Resume"),
             "{styled}"
         );
-        assert!(styled.contains("\n  [PROMPT]            Send"), "{styled}");
+        assert!(styled.contains("\n  [PROMPT]                Send"), "{styled}");
         assert!(!styled.contains("\x1b[1m[PROMPT]"), "{styled}");
         // An empty literal never emits an empty escape pair.
         assert!(!styled.contains("\x1b[1m\x1b[0m"), "{styled}");

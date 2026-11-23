@@ -14,6 +14,17 @@ release heading when a version is cut.
 
 ### Added
 
+- **A shell call that a purpose-built tool covers comes back with a hint.**
+  Measured over 7,468 recorded tool calls, 80% were `bash` — including greps
+  for a declaration a symbol tool answers directly. A `bash` result now carries
+  one line naming the tool that would have done it better
+  (`mcp__forge__find_definition` for a code search,
+  `mcp__ferrosa-memory__search` for what memory already knows), appended below
+  the real output so the transcript still shows what ran. Only for calls a
+  shell is *not* the right answer for — a build, a test run, a git command gets
+  no hint — and only when that tool is actually available, since naming a tool
+  the harness never offered is worse than saying nothing.
+
 - **The reasoning splitter understands channel-framed replies.** A model that
   frames its answer as a sequence of channel messages — Inkling 2
   (`inkling2_loop`), and others with the same tokenizer convention — now has

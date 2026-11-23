@@ -29,7 +29,7 @@
 //! | Module | Holds |
 //! |--------|-------|
 //! | `mod.rs` | The [`Session`] struct and [`StatusClocks`] — the shared state. |
-//! | [`event_loop`] | [`event_loop::run`]: the `select!` over the eleven sources, the loop-bottom work, the teardown. |
+//! | [`event_loop`] | [`event_loop::run`]: the `select!` over every source that wakes the loop, the loop-bottom work, the teardown. |
 //! | [`actions`] | The [`alter_zero::app::Action`] dispatch — one method per key-press outcome. |
 //! | [`turn`] | Starting and ending turns: user, queued, `!` shell, background follow-up, `/compact`. |
 //! | [`stream`] | Folding one streamed reply event into `App` + scrollback. |
@@ -42,6 +42,7 @@
 //! | [`config`] | Reading the environment: providers, keys, settings, permission rules. |
 //! | [`bootstrap`] | Assembling a [`Session`] before the first frame. |
 //! | [`startup`] | The `--continue`/`--resume` argument resolution (`docs/cli.md`). |
+//! | [`headless`] | `alter-zero -p`: the same session with no screen — its loop, its streams, its exit status (`docs/headless.md`). |
 //! | [`recorder`] | Mirroring history to a rollout file (`docs/resume.md`). |
 //! | [`resume`] | Finding recorded sessions on disk. |
 //! | [`settings`] | Applying a `/settings` knob the menu cycled (`docs/settings.md`). |
@@ -52,7 +53,9 @@
 //! | [`history_store`] | The cross-session input history (`docs/history-persistence.md`). |
 //! | [`shell`] | The `!` command runner (`docs/shell-command.md`). |
 //! | [`usage`] | The `/usage` page's reads, one worker per subscription, its clock and its minute refresh (`docs/usage.md`). |
-//! | [`workers`] | The off-thread file-search / clipboard / model-list / usage jobs. |
+//! | [`plugin_cli`] | The `alter-zero plugin` subcommands: resolving a plugin's name, the store operation, the printout (`docs/plugins.md`). |
+//! | [`plugins`] | The plugins on in this directory, the `/plugins` page's worker, and the reload after a change (`docs/plugins.md`). |
+//! | [`workers`] | The off-thread file-search / clipboard / model-list / usage / transcript-render jobs. |
 //! | [`host`] | Clocks, dates, the OS string, ids — the raw impurities. |
 
 use std::collections::HashMap;
@@ -77,7 +80,7 @@ use self::history_store::InputHistoryStore;
 use self::models::ModelSession;
 use self::permission::PermissionStore;
 use self::recorder::SessionRecorder;
-use self::workers::{DeviceEvent, FileSearchResult, ModelFetch};
+use self::workers::{DeviceEvent, FileSearchResult, ModelFetch, ProbeFetch, TranscriptWorker};
 
 pub(crate) mod actions;
 pub(crate) mod agent;
@@ -88,6 +91,7 @@ pub(crate) mod commit;
 pub(crate) mod config;
 pub(crate) mod context_usage;
 pub(crate) mod diff;
+pub(crate) mod discord;
 pub(crate) mod donate;
 pub(crate) mod event_loop;
 pub(crate) mod export;
@@ -102,12 +106,15 @@ pub(crate) mod mcp;
 pub(crate) mod mcp_cli;
 pub(crate) mod models;
 pub(crate) mod permission;
+pub(crate) mod plugin_cli;
+pub(crate) mod plugins;
 pub(crate) mod recorder;
 pub(crate) mod resume;
 pub(crate) mod secrets;
 pub(crate) mod settings;
 pub(crate) mod shell;
 pub(crate) mod spinner;
+pub(crate) mod sponsor;
 pub(crate) mod startup;
 pub(crate) mod stream;
 pub(crate) mod telemetry;
@@ -148,6 +155,12 @@ pub(crate) struct Session<'t> {
     /// closes and warmed at the loop bottom so it never opens cold
     /// (`docs/tool-view-performance.md`).
     transcript: ui::TranscriptCache,
+    /// The worker that renders each committed item's rows for it, and the
+    /// channel they come back on — off the loop thread, where a keystroke
+    /// used to wait behind them (`docs/input-latency.md`). No worker in a
+    /// headless run, which has no pager.
+    transcript_worker: Option<TranscriptWorker>,
+    transcript_rx: tokio::sync::mpsc::UnboundedReceiver<ui::RenderedTranscriptItem>,
     /// The Ctrl+D overlay's built context window, rebuilt only when its
     /// signature changes — per frame the O(conversation) derivation starved
     /// the scroll keys on a big context (`docs/context.md`).
@@ -191,18 +204,36 @@ pub(crate) struct Session<'t> {
 
     // ----- the loop's own channels: what wakes it, and what it sends on -----
     //
-    // Both ends live here. `select!` creates all nine futures up front, each
+    // Both ends live here. `select!` creates all of its futures up front, each
     // borrowing a *distinct field* of this struct, and scopes them so the branch
     // body that wins can still take `&mut self` — which is what lets a handler
     // both read a receiver and mutate everything else. `recv`/`try_recv` hand
     // back owned values, so no borrow outlives the call itself.
     /// Terminal input — the **sole** stdin reader (invariant 1). Created after
     /// the viewport's synchronous cursor query, in [`Session::bootstrap`].
-    events: EventStream,
+    /// `None` in a headless run, which has no terminal to read — and must not
+    /// open one: crossterm opens the controlling terminal as the stream is
+    /// built (`docs/headless.md`).
+    events: Option<EventStream>,
+    /// Whether this session runs **headless** — `alter-zero -p`, the same
+    /// session over a viewport that paints nowhere (`docs/headless.md`):
+    /// nothing asked, nothing shown, toasts on stderr.
+    headless: bool,
+    /// A headless run's `--verbose`: its info toasts reach stderr too, beside
+    /// the errors every headless run reports (`docs/headless.md` *Output*).
+    headless_verbose: bool,
+    /// A headless run's reply budget (`--max-turns`), shared with every
+    /// backend build — what the run reports as its `num_turns`. `None` in
+    /// the TUI.
+    round_budget: Option<alter_zero::llm::agent::RoundBudget>,
     /// Asks the frame scheduler for a redraw, and its coalesced, rate-limited
     /// draw ticks coming back.
     frame: FrameRequester,
     draw_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    /// Which of those ticks only the banner's mascot asked for — the frames
+    /// that repaint its cells and nothing else
+    /// (`docs/mascot-animation.md` *A frame of its own*).
+    frames: alter_zero::frame::FrameLedger,
     /// The reply channel a turn streams on. Both ends are swapped wholesale by
     /// [`Session::abandon_inflight`] so a detached backend can't reach the next
     /// turn (`docs/interrupt.md`).
@@ -245,11 +276,18 @@ pub(crate) struct Session<'t> {
     usage_tx: tokio::sync::mpsc::UnboundedSender<usage::UsageResult>,
     usage_rx: tokio::sync::mpsc::UnboundedReceiver<usage::UsageResult>,
     usage_cancel: Option<CancelToken>,
+    /// The `/plugins` page's operations (`docs/plugins.md`): the one job
+    /// running reports here; the token Esc, a closed page or the quit stops
+    /// it with; and when it began — the page's job clock.
+    plugin_tx: tokio::sync::mpsc::UnboundedSender<plugins::PluginResult>,
+    plugin_rx: tokio::sync::mpsc::UnboundedReceiver<plugins::PluginResult>,
+    plugin_cancel: Option<CancelToken>,
+    plugin_job_started: Option<Instant>,
     /// The probe's sender is kept because a probe is spawned more than
     /// once: at bootstrap, and by a resume whose recorded model has facts
     /// this session never learned (`docs/session-model.md`).
-    probe_tx: tokio::sync::mpsc::UnboundedSender<ModelFetch>,
-    probe_rx: tokio::sync::mpsc::UnboundedReceiver<ModelFetch>,
+    probe_tx: tokio::sync::mpsc::UnboundedSender<ProbeFetch>,
+    probe_rx: tokio::sync::mpsc::UnboundedReceiver<ProbeFetch>,
     /// Background shells (`docs/background.md`) and subagents
     /// (`docs/agent-tool.md`) — never swapped, because both outlive turns.
     bg_rx: tokio::sync::mpsc::UnboundedReceiver<BgEvent>,
@@ -282,6 +320,11 @@ pub(crate) struct Session<'t> {
     /// not land in the middle of a reply, so it waits here for the loop
     /// bottom to find the session idle (`Session::flush_pending_update_notice`).
     update_notice_pending: Option<String>,
+    /// The release copies written beside edited built-ins this launch
+    /// (`docs/builtin-updates.md`), until their card is committed — after
+    /// the first frame, at a loop bottom with no overlay up and nothing
+    /// streaming (`Session::flush_builtin_offers`).
+    builtin_offers: Vec<std::path::PathBuf>,
     /// The line to the herdr pane this session runs in (`docs/herdr.md`):
     /// what it is telling herdr and the worker that writes to herdr's
     /// socket. `None` outside herdr — and until bootstrap starts it after
@@ -330,6 +373,14 @@ pub(crate) struct Session<'t> {
     /// type added mid-session — or written by the agent itself — is
     /// launchable on the next turn.
     subagents: alter_zero::subagents::SubagentRegistry,
+    /// Where plugins are kept (`docs/plugins.md` *On disk*) — `None` without
+    /// a config home, when there is nowhere to install one.
+    plugin_store: Option<alter_zero::plugins::PluginStore>,
+    /// What the plugins on in this directory add — read at bootstrap and
+    /// again after every change the `/plugins` page makes
+    /// ([`Session::reload_plugins`]); the skills and agent rescans append
+    /// theirs to what the roots hold.
+    plugins: alter_zero::plugins::LoadedPlugins,
     /// The user's secrets (`docs/secrets.md`) — the one store the `/secrets`
     /// page edits, the reminder lists and every tool call expands and
     /// redacts with. The same handle the shell registry carries to the
@@ -435,6 +486,16 @@ pub(crate) struct StatusClocks {
     /// round's tool cells and its agent tree stay in step, and a background
     /// agent's live cell keeps animating between turns.
     loop_start: Instant,
+    /// When a fresh banner last reached the screen — the epoch of the
+    /// mascot's animation clock (`App::set_mascot_clock`,
+    /// `docs/mascot-animation.md`). Its own reading rather than
+    /// `loop_start`, which is taken before the session-start checkpoint and
+    /// can be seconds older: the mascot's greeting is scripted from the
+    /// moment the user can see it. Taken by `Session::greet_from_banner` —
+    /// at the first frame, on `/clear` and on a `/mascot` choice, so each
+    /// fresh banner greets — and never by a resize or a rewind, which only
+    /// redraw the banner already there and pick the animation up where it is.
+    banner_start: Option<Instant>,
 }
 
 impl StatusClocks {
@@ -447,6 +508,7 @@ impl StatusClocks {
             thinking_start: None,
             command_start: None,
             loop_start: Instant::now(),
+            banner_start: None,
         }
     }
 

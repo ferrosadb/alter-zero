@@ -14,6 +14,11 @@
 //! - [`background`]  — background shell processes: the registry behind
 //!   `run_in_background`, Ctrl+B, and the ↓ manager (boundary; see
 //!   `docs/background.md`).
+//! - [`builtins`]    — the built-in skills and agent types on disk, kept
+//!   current: the shipped history, the `.alter-zero-builtins.json` record,
+//!   and the per-launch plan that replaces an unedited copy, keeps an edited
+//!   one and offers it this release's version beside it (pure plan +
+//!   boundary executor; see `docs/builtin-updates.md`).
 //! - [`checkpoint`]  — per-turn working-directory snapshots in an isolated git
 //!   store so `/resume` and the Esc-Esc backtrack can reset the code, not just
 //!   the transcript (pure mapping + boundary store; see `docs/checkpoint.md`).
@@ -48,6 +53,10 @@
 //! - [`llm`]         — the real OpenAI-compatible backend: provider config, the
 //!   streaming client, the `/v1/models` listing, and the `ReplySource` bridge
 //!   (the I/O boundary for a real model; pure cores unit-tested).
+//! - [`headless`]    — `alter-zero -p`'s pure core: the output formats, the
+//!   prompt a pipe and an argument make together, the run's answer, the
+//!   JSON events and result object, and the exit status (the process is
+//!   `tui::headless`'s; see `docs/headless.md`).
 //! - [`herdr`]       — herdr support: the state this session reports to the
 //!   herdr multiplexer pane it runs in — derived from the app, never tracked
 //!   — the failed-turn hold, the socket requests, their sequence and the
@@ -152,6 +161,7 @@ pub mod agents;
 pub mod app;
 pub mod ask;
 pub mod background;
+pub mod builtins;
 pub mod checkpoint;
 pub mod cli;
 pub mod clipboard;
@@ -161,8 +171,8 @@ pub mod file_search;
 pub mod frame;
 pub mod frontmatter;
 pub mod git_diff;
-pub mod herdr;
 pub mod headless;
+pub mod herdr;
 pub mod highlight;
 pub mod history;
 pub mod hooks;
@@ -174,6 +184,7 @@ pub mod mcp;
 pub mod output;
 pub mod paste;
 pub mod permission;
+pub mod plugins;
 pub mod project_doc;
 pub mod pty;
 pub mod read_only;

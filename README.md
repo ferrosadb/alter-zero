@@ -12,7 +12,7 @@ Use the same tools for cybersecurity research, technical investigation, and ever
 <p>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Built_with-Rust-F5A97F?style=for-the-badge&amp;logo=rust&amp;logoColor=white&amp;labelColor=181825" alt="Built with Rust" height="32"></a>
   <a href="#quick-start"><img src="https://img.shields.io/badge/Platforms-Linux_%7C_macOS-89B4FA?style=for-the-badge&amp;logo=linux&amp;logoColor=white&amp;labelColor=181825" alt="Platforms: Linux and macOS" height="32"></a>
-  <a href="https://github.com/linuztx/alter-zero/releases"><img src="https://img.shields.io/badge/Version-0.18.0-89DCEB?style=for-the-badge&amp;logo=github&amp;logoColor=white&amp;labelColor=181825" alt="Version: 0.18.0" height="32"></a>
+  <a href="https://github.com/linuztx/alter-zero/releases"><img src="https://img.shields.io/badge/Version-0.20.0-89DCEB?style=for-the-badge&amp;logo=github&amp;logoColor=white&amp;labelColor=181825" alt="Version: 0.20.0" height="32"></a>
   <br>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-A6E3A1?style=for-the-badge&amp;logo=apache&amp;logoColor=white&amp;labelColor=181825" alt="License: Apache 2.0" height="32"></a>
   <a href="#support-the-project"><img src="https://img.shields.io/badge/Support-Donate-CBA6F7?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white&amp;labelColor=181825" alt="Support Alter Zero" height="32"></a>
@@ -209,6 +209,7 @@ Save its key with `/login` (this one is read from `GROQ_API_KEY`), then choose a
 
 - **Review at the approval prompt.** Inspect proposed file content, diffs, and commands before approving them. Approve once, allow a session rule, or reject with instructions using **Tab**. **Ctrl+E** asks for a command explanation.
 - **Four permission modes.** `manual` asks before file changes and commands; `edit` allows file changes; `auto`, the default, adds a reviewer for routine commands; `master` runs unattended. Cycle modes with **Shift+Tab** and keep rules per project.
+- **Run it without a screen.** `alter-zero -p "…"` answers one prompt for a script, a cron job or a CI step: the answer on stdout, or JSON with `--output-format`, and an exit status to branch on. Nothing waits for a reply; `--permission-mode` decides what runs unasked. See [headless mode](docs/headless.md).
 - **Checkpoints and rewind.** Enable checkpoints per directory to snapshot your working files in a separate store. **Esc Esc** returns to an earlier message and, when a checkpoint is available, restores the files with it.
 - **Nothing runs on its own unseen.** When the app starts, it lists any new or changed hook, yours or a project's, and any new project MCP server, showing exactly what each runs. A hook runs only once you trust it, a server only once you enable it, and `/hooks` and `/mcp` change either later.
 - **Credentials by placeholder.** Store a credential with `/secrets` and the agent can use its placeholder without seeing the value. See [how secrets are stored and used](docs/secrets.md).
@@ -218,7 +219,9 @@ Save its key with `/login` (this one is read from `GROQ_API_KEY`), then choose a
 - **Subagents.** Delegate focused work to agents with their own context, model, and tool access. Built-in `general-purpose` and `explore` agents are editable, and you can open a running agent's session to chat, send follow-up work, or stop it — while the main agent does the same by each agent's id: checks its progress, sends a finished agent a follow-up with its context intact, or stops it.
 - **Skills.** Add reusable `SKILL.md` folders, mention one with `$`, or browse them with `/skills`. Built-in `skill-creator` helps you write your own; `web-search` searches the web through Exa, Parallel, Tavily and Jina Reader with no key; `jina-reader` reads public webpages and PDFs through Jina Reader; `yt-dlp` guides media downloads with the separately installed CLI.
 - **Public tunnels.** The built-in `flaredantic` skill guides you through exposing a local service via Cloudflare, Microsoft Dev Tunnels, or Serveo using the separately installed `flare` CLI. A tunnel makes the service publicly reachable; review what you expose.
+- **Image generation.** Signed in with ChatGPT, any model can make and edit images through the built-in `imagegen` tool and skill, ported from Codex, on your ChatGPT plan. See [image generation](docs/imagegen.md).
 - **MCP servers.** Connect tools over stdio, HTTP, or SSE, including remote servers with OAuth. Manage connections with `/mcp` or `alter-zero mcp`.
+- **Plugins.** Install Agent Plugins, Claude Code plugins and Codex plugins from any marketplace — a GitHub repository, a git URL or a directory — with `/plugins` or `alter-zero plugin`. A plugin's skills, agents, hooks and MCP servers join yours, and nothing of it runs until you have trusted it. See [plugins](docs/plugins.md).
 - **Hooks and project instructions.** Use `hooks.json` to approve, reject, or adjust tool calls and supply context. `AGENTS.md` files carry your project's conventions; `/init` helps create one.
 
 ### Pick up where you left off
@@ -232,7 +235,7 @@ Save its key with `/login` (this one is read from `GROQ_API_KEY`), then choose a
 - **Rich output.** Stream Markdown, tables, highlighted code, and collapsible reasoning blocks, with clickable URLs and file paths in supported terminals.
 - **Inline images.** Paste screenshots with **Ctrl+V**. Images render natively in kitty, iTerm2, and sixel terminals, with a character-based fallback elsewhere.
 - **Inspect the session.** **Ctrl+O** opens the expanded transcript; **Ctrl+D** shows the context sent to the model. Start a line with `!` for a shell command or use `@` to pick a file.
-- **Live customisation.** Preview eleven themes with `/theme`, six mascots with `/mascot`, and nine spinner styles with `/spinner`. `/settings` brings the remaining controls together in a searchable menu.
+- **Live customisation.** Preview eleven themes with `/theme`, six animated mascots with `/mascot`, and nine spinner styles with `/spinner`. `/settings` brings the remaining controls together in a searchable menu.
 - **Works with herdr.** In a [herdr](https://herdr.dev) pane, the sidebar shows when the agent is working, waiting on your approval, or done, and a restarted herdr resumes the conversation. There is nothing to set up.
 
 ## Commands & shortcuts
@@ -263,7 +266,10 @@ The essentials are always one keystroke away: `/` opens commands, and `?` in an 
 | `/hooks` | Browse hooks and trust or stop trusting each one |
 | `/skills` | Browse skills and enable or disable each one |
 | `/mcp` | Manage MCP servers |
+| `/plugins` | Browse, install and manage plugins and their marketplaces |
 | `/donate` | Support the project with a crypto donation |
+| `/sponsor` | Sponsor the developer or get in touch |
+| `/discord` | Join the community on Discord |
 | `/secrets` | Store credentials the agent uses by placeholder, `<secret:NAME>`, without ever seeing the value |
 | `/quit` | Exit the app |
 
@@ -303,17 +309,34 @@ The essentials are always one keystroke away: `/` opens commands, and `?` in an 
 
 ```text
 Usage: alter-zero [OPTIONS] [PROMPT]
+       alter-zero -p [OPTIONS] [PROMPT]
        alter-zero mcp <COMMAND>
+       alter-zero plugin <COMMAND>
        alter-zero update
 
 Arguments:
-  [PROMPT]        Send this message as the first turn
+  [PROMPT]                      Send this message as the first turn
 
 Options:
-  -c, --continue     Continue the most recent conversation in this directory
-  -r, --resume [ID]  Resume a conversation by id, or pick one from a list
-  -h, --help         Print help
-  -V, --version      Print version
+  -c, --continue                Continue the most recent conversation in this directory
+  -r, --resume [ID]             Resume a conversation by id, or pick one from a list
+  -C, --cwd <DIR>               Run in DIR instead of the current directory
+      --permission-mode <MODE>  manual, edit, auto or master, for this run only
+      --system-prompt <TEXT>    Replace the built-in system prompt for this run
+      --system-prompt-file <PATH>
+                                The same, read from a file
+      --append-system-prompt <TEXT>
+                                Add to the system prompt for this run
+      --append-system-prompt-file <PATH>
+                                The same, read from a file
+  -h, --help                    Print help
+  -V, --version                 Print version
+
+Print mode:
+  -p, --print                   Answer once with no screen: the answer on stdout, problems on stderr
+      --output-format <FORMAT>  text, json or stream-json
+      --max-turns <N>           Stop after N model replies
+      --verbose                 Log each step of the run to stderr
 ```
 
 Start a task directly, or continue the work from your last session:
@@ -322,6 +345,15 @@ Start a task directly, or continue the work from your last session:
 alter-zero "fix the failing test"
 alter-zero -c "now review the changes"
 ```
+
+Or run it from a script, a cron job or CI, with no terminal at all:
+
+```bash
+alter-zero -p "Run the test suite and summarize the failures" > report.md
+git diff origin/main | alter-zero -p --output-format json "Review this diff"
+```
+
+[Headless mode](docs/headless.md) covers the output formats, exit codes and permission modes.
 
 Run `alter-zero mcp --help` for MCP server management commands, and `alter-zero update` to install the newest release over the binary you are running (an npm install updates with `npm install -g @linuztx/alter-zero@latest`).
 
@@ -340,6 +372,8 @@ Your sign-ins, saved sessions, input history, and per-directory settings live un
 | `~/.alter-zero/agents/` and `~/.alter-zero/skills/` | Your shared agent definitions and skills |
 | `~/.alter-zero/hooks.json` and `~/.alter-zero/mcp.json` | Your shared hooks and MCP servers |
 | `.alter-zero/` in a project | Project-specific `agents/`, `skills/`, `hooks.json`, and `mcp.json` |
+| `.agents/skills/` in a project and `~/.agents/skills/` | Skills shared with Codex and other agents |
+| `.agents/plugins/marketplace.json` in a project or your home folder | A plugin marketplace that `/plugins` lists without being added |
 | `AGENTS.md` | Project instructions read by the agent |
 
 Claude Code-style `.claude/skills/` and `.mcp.json` files are also supported. Hooks, yours and a project's, and a project's MCP servers run only after you approve them when the app starts.
@@ -355,6 +389,8 @@ Alter Zero is free and open source. If it earns a place in your terminal, a dona
 | BTC (Bitcoin) | Bitcoin Native SegWit | `bc1qhwamfrwuhz64pk00l75ykfff2ang22ns64chf7` |
 | ETH (Ethereum) | Ethereum, Linea, Base, Arbitrum, BNB Chain, OP, Polygon | `0xEAf6fbabB9DBE7a23BfE22A7A6c4aCe02063524b` |
 | SOL (Solana) | Solana | `Gwhv5c6uAa6aAz1MjwzV9QJpbm7CJWy2kuCeZ75mFc94` |
+
+Prefer GitHub? Sponsor the developer at [github.com/sponsors/linuztx](https://github.com/sponsors/linuztx), or write to <linuztx@gmail.com>. `/sponsor` shows both inside the app.
 
 > **Important:** Send only on a network listed for that address. Confirm that the asset and selected network match before sending. An address may look valid on another network, but funds sent on an unlisted or mismatched network may be unrecoverable.
 

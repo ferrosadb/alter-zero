@@ -31,6 +31,16 @@
 //!   growth and the box repaint land as a single atomic frame (no flushed state
 //!   ever lacks the box — the streaming flicker; see `docs/flicker.md`).
 //!
+//! One block of committed rows is the exception to "written once": the
+//! startup banner, which the loop may [`anchor_above`] the live region and
+//! then repaint **in place** — its mascot blinks while the conversation under
+//! it is empty (`docs/mascot-animation.md`). A row above the region is an
+//! ordinary screen row until a scroll carries it off the top, so the repaint
+//! is a handful of cells inside the same synchronized frame; what the block
+//! may show, and when it must be put back, is the pure `anchor` module's.
+//!
+//! [`anchor_above`]: InlineViewport::anchor_above
+//!
 //! The hardware cursor is **hidden for the whole body of every frame** and shown
 //! again only at its final prompt seat (each of [`draw`]/[`reflow`] queues a
 //! `Hide` right after opening its synchronized update; `paint_frame` queues the
@@ -48,18 +58,19 @@
 //! [`reflow`]: InlineViewport::reflow
 
 use std::collections::VecDeque;
-use std::io::{self, Stdout, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ratatui::backend::{Backend, ClearType, CrosstermBackend};
 use ratatui::buffer::{Buffer, Cell, CellDiffOption, CellWidth};
-use ratatui::crossterm::cursor::{Hide, Show};
+use ratatui::crossterm::cursor::{Hide, MoveTo, Show};
 use ratatui::crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use ratatui::crossterm::style::Print;
 use ratatui::crossterm::terminal::{
     BeginSynchronizedUpdate, Clear as CrosstermClear, ClearType as CrosstermClearType,
     EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -77,12 +88,16 @@ use crate::images::{self, ImageStore};
 use crate::links;
 use crate::ui;
 
+mod anchor;
+mod output;
 pub mod query;
+
+use self::output::Output;
 
 /// A content-anchored inline viewport whose height can change between draws (its
 /// top stays put; it grows downward in place).
 pub struct InlineViewport {
-    backend: CrosstermBackend<Stdout>,
+    backend: CrosstermBackend<Output>,
     /// The full terminal area, `(0, 0, width, height)`.
     screen: Rect,
     /// The live region: full width, `height` rows, anchored by its top row.
@@ -191,6 +206,20 @@ pub struct InlineViewport {
     ///
     /// [`init`]: InlineViewport::init
     images: ImageStore,
+    /// The name the terminal gave for itself when [`init`]'s startup read
+    /// asked it (`XTVERSION`, `term::query`): `WezTerm 20240203-…`,
+    /// `kitty(0.36.4)`. The read asks for the pictures' sake where the
+    /// environment names no graphics protocol, and for the links' where it
+    /// leaves open whether a label can stand alone
+    /// ([`links::wants_terminal_name`]). `None` when it asked neither — a
+    /// multiplexer or a console is in between, or the environment settled
+    /// both — or the terminal gave no name. It is the one statement about
+    /// the terminal that is the terminal's own, which is what lets a link
+    /// hide its address over `ssh` ([`links::detect_target_display`],
+    /// `docs/links.md`).
+    ///
+    /// [`init`]: InlineViewport::init
+    terminal_name: Option<String>,
     /// What [`init`]'s startup read took in that was not the terminal's
     /// answer: keys typed while it waited (`term::query`). The loop takes
     /// them once, through [`take_typeahead`], and replays them before its
@@ -200,7 +229,25 @@ pub struct InlineViewport {
     /// [`init`]: InlineViewport::init
     /// [`take_typeahead`]: InlineViewport::take_typeahead
     typeahead: Vec<u8>,
+    /// A viewport with no terminal behind it — a headless run's
+    /// ([`headless`](InlineViewport::headless), `docs/headless.md`): every
+    /// method that would paint returns at once and every commit is dropped
+    /// as it is queued, so the session runs whole and shows nothing.
+    headless: bool,
+    /// The block of committed rows that may still be repainted in place —
+    /// the startup banner while the conversation under it is empty
+    /// ([`anchor_above`], `docs/mascot-animation.md`). `None` nearly always:
+    /// once a conversation starts, once any of the block has scrolled off
+    /// the top, and after every resize or purge rebuild until the loop
+    /// declares the rebuilt banner again.
+    ///
+    /// [`anchor_above`]: InlineViewport::anchor_above
+    anchor: Option<anchor::Anchor>,
 }
+
+/// The size a headless viewport pretends to have — what the session's
+/// renderers wrap to for rows nobody sees.
+const HEADLESS_SIZE: (u16, u16) = (100, 50);
 
 impl InlineViewport {
     /// Enter raw mode and reserve `min_height` rows at the bottom for the live
@@ -241,7 +288,7 @@ impl InlineViewport {
     ///
     /// [`init`]: InlineViewport::init
     fn init_in_raw_mode(min_height: u16, keyboard_enhanced: bool) -> io::Result<Self> {
-        let mut backend = CrosstermBackend::new(io::stdout());
+        let mut backend = CrosstermBackend::new(Output::terminal()?);
         let size = backend.size()?;
         let screen = Rect::new(0, 0, size.width, size.height);
 
@@ -257,10 +304,16 @@ impl InlineViewport {
         let detection =
             (!images::images_disabled(std::env::var(images::IMAGES_ENV).ok().as_deref()))
                 .then(images::Detection::from_env);
+        // The terminal's name is asked on the links' own account too, where
+        // the environment leaves open whether a link's label can stand
+        // alone (`links::wants_terminal_name`, `docs/links.md` *The
+        // terminal's own answer*) — over `ssh` from iTerm2, say, where the
+        // picture detection has named iTerm2's protocol and asks nothing.
         let replies = startup_read(
             detection
                 .as_ref()
                 .is_some_and(images::Detection::wants_query),
+            links::wants_terminal_name(|name| std::env::var(name).ok()),
         )?;
         let cursor = replies.cursor;
         // Turn on bracketed paste so a real paste arrives as one `Event::Paste`
@@ -311,8 +364,56 @@ impl InlineViewport {
                 std::env::var(links::HYPERLINKS_ENV).ok().as_deref(),
             ),
             images,
+            terminal_name: replies.graphics.version,
             typeahead: replies.typed,
+            headless: false,
+            anchor: None,
         })
+    }
+
+    /// A viewport with no terminal at all, for a headless run
+    /// (`docs/headless.md`): no raw mode, no cursor query, no reader — the
+    /// session it serves runs whole, and nothing it would paint is painted.
+    /// Every commit is dropped as it is queued ([`insert_before`]), and
+    /// every method that writes returns at once.
+    ///
+    /// [`insert_before`]: InlineViewport::insert_before
+    #[must_use]
+    pub fn headless() -> Self {
+        let (width, height) = HEADLESS_SIZE;
+        let screen = Rect::new(0, 0, width, height);
+        Self {
+            backend: CrosstermBackend::new(Output::Nowhere),
+            screen,
+            view: Rect::new(0, 0, width, 1),
+            prev: None,
+            overlay_prev: None,
+            pending: Vec::new(),
+            modal_scrolled: false,
+            painted_bottom: 1,
+            keyboard_enhanced: false,
+            hyperlinks: false,
+            images: ImageStore::disabled(),
+            terminal_name: None,
+            typeahead: Vec::new(),
+            headless: true,
+            anchor: None,
+        }
+    }
+
+    /// Whether this viewport has no terminal behind it
+    /// ([`headless`](Self::headless)).
+    #[must_use]
+    pub const fn is_headless(&self) -> bool {
+        self.headless
+    }
+
+    /// The name the terminal answered the startup read with, when the read
+    /// asked and it gave one — see the field. Always `None` on a headless
+    /// viewport, which has no terminal to ask.
+    #[must_use]
+    pub fn terminal_name(&self) -> Option<&str> {
+        self.terminal_name.as_deref()
     }
 
     /// The keys typed while [`init`]'s startup read waited on the terminal,
@@ -386,6 +487,72 @@ impl InlineViewport {
         self.pending.len()
     }
 
+    /// Declare the last `rest.len()` rows committed above the live region —
+    /// the banner and its spacer, queued a moment ago or just written by a
+    /// rebuild — as the block this viewport may repaint in place
+    /// (`docs/mascot-animation.md`). From here [`pose_anchor`] says what the
+    /// block should show and every [`draw`] writes the cells that differ,
+    /// until the loop [`release_anchor`]s it, any of it scrolls off the top,
+    /// or a resize or [`reflow`] moves the screen (each of which drops the
+    /// declaration: the rebuilt banner is declared anew).
+    ///
+    /// `rest` is what was committed, and what the block is put back to
+    /// before its rows may move — only the banner standing still ever
+    /// reaches scrollback.
+    ///
+    /// [`pose_anchor`]: InlineViewport::pose_anchor
+    /// [`release_anchor`]: InlineViewport::release_anchor
+    /// [`draw`]: InlineViewport::draw
+    /// [`reflow`]: InlineViewport::reflow
+    pub fn anchor_above(&mut self, rest: Vec<Line<'static>>) {
+        if self.headless || rest.is_empty() {
+            return;
+        }
+        self.anchor = Some(anchor::Anchor::new(rest, self.pending.len()));
+    }
+
+    /// Whether a block is anchored above the live region — after a draw,
+    /// whether the banner is still on screen where it can be repainted,
+    /// which is the loop's cue to keep scheduling its frames.
+    #[must_use]
+    pub const fn has_anchor(&self) -> bool {
+        self.anchor.is_some()
+    }
+
+    /// Say what the anchored block should show from the next [`draw`] on:
+    /// its rows in the mascot's current pose. A no-op with no block, and a
+    /// frame whose pose is what the screen already shows writes nothing.
+    ///
+    /// [`draw`]: InlineViewport::draw
+    pub fn pose_anchor(&mut self, lines: Vec<Line<'static>>) {
+        if let Some(anchor) = &mut self.anchor {
+            anchor.pose(lines);
+        }
+    }
+
+    /// Ask that the anchored block stand as it was committed from the next
+    /// [`draw`] on — what a frame says of a banner whose mascot is not to
+    /// move. It costs nothing while the block stands there already.
+    ///
+    /// [`draw`]: InlineViewport::draw
+    pub fn still_anchor(&mut self) {
+        if let Some(anchor) = &mut self.anchor {
+            anchor.stand_still();
+        }
+    }
+
+    /// Let the anchored block go: the next [`draw`] puts it back to the rows
+    /// it was committed as and forgets it. The loop calls this the moment
+    /// the conversation stops being empty — from there the banner is
+    /// history, and history does not move.
+    ///
+    /// [`draw`]: InlineViewport::draw
+    pub const fn release_anchor(&mut self) {
+        if let Some(anchor) = &mut self.anchor {
+            anchor.release();
+        }
+    }
+
     /// Whether the screen moved one-way while an inline modal was open (see
     /// `modal_scrolled`) — the prompt's plain collapse cannot restore what
     /// moved, so its close must purge-rebuild. The loop's draw tick reads
@@ -433,6 +600,9 @@ impl InlineViewport {
         render: impl FnOnce(Rect, &mut Buffer),
         app: &App,
     ) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         let height = height.clamp(1, self.screen.height.max(1));
         // Emit the whole frame inside a synchronized update (BSU/ESU, DEC mode 2026):
         // the terminal buffers everything between the markers and swaps it in one
@@ -492,6 +662,14 @@ impl InlineViewport {
         }
         self.flush_pending()?;
         let repin = ui::repin(self.view.y, self.view.height, height, self.screen.height);
+        // The region is about to push the screen up: the anchored block goes
+        // back to its rest rows first, at the row it still sits on — only
+        // the banner standing still may scroll away
+        // (`docs/mascot-animation.md`). The frame's closing paint re-poses
+        // it where it lands, if it is still on screen.
+        if repin.scroll_up > 0 {
+            self.settle_anchor()?;
+        }
         // A tool-permission prompt grows by this same rule — the chat above
         // it scrolls into the terminal's **real** scrollback, so the user can
         // scroll up and read while it asks (`docs/permissions.md`; the
@@ -572,13 +750,24 @@ impl InlineViewport {
         // `set_view_height` re-syncs it between paints for the flush plan)
         // and the next frame's stale-row clear above.
         self.painted_bottom = bottom;
+        // The anchored block's pose, in place above the region — after every
+        // scroll of the frame and before the cursor is seated, so it lands
+        // in the same synchronized update and the cursor never rests there.
+        self.paint_anchor()?;
+        self.seat_cursor(app)
+    }
+
+    /// Close a frame's painting: put the hardware cursor on its seat in the
+    /// live region and show it again.
+    fn seat_cursor(&mut self, app: &App) -> io::Result<()> {
         let (x, y) = ui::cursor_position(self.view, app);
-        self.backend.set_cursor_position(Position::new(x, y))?;
+        self.queue_cursor(x, y)?;
         // Re-show the cursor at its final prompt seat, undoing the frame-start
         // Hide ([`draw`]/[`reflow`]) now that every scroll and blit that would
         // have dragged it around is done — so it appears only here, never
-        // mid-flight. Queue the Show (ratatui's `show_cursor` would `execute!` —
-        // an extra flush mid-synchronized-update); the frame goes out in one write.
+        // mid-flight. Queue the Show, as the move above is queued (ratatui's
+        // `show_cursor` and `set_cursor_position` would `execute!` — an extra
+        // flush mid-synchronized-update); the frame goes out in one write.
         //
         // Unless the frame shows none at all ([`ui::cursor_visible`] — a
         // permission prompt's option list is a menu, not a text field): then
@@ -589,6 +778,44 @@ impl InlineViewport {
             queue!(self.backend, Show)?;
         }
         Ok(())
+    }
+
+    /// A frame of the anchored block **alone**: repaint it in the pose the
+    /// loop asked for and touch nothing else (`docs/mascot-animation.md`
+    /// *A frame of its own*). For the frames only the banner's mascot asked
+    /// for, where nothing else on screen can have changed: a [`draw`] would
+    /// render the whole live region into a buffer of its own to find that
+    /// out, and that buffer is the largest thing an idle screen allocates
+    /// (`docs/memory.md`).
+    ///
+    /// The cells go out as they do inside a [`draw`] — one synchronized
+    /// update, the cursor hidden while they are written and back on its
+    /// seat after — and a frame with no cell to write is **silence on the
+    /// wire**, not even a cursor move. Rows still queued for a flush wait
+    /// for the [`draw`] that writes them, and nothing is written while the
+    /// alternate screen is up.
+    ///
+    /// [`draw`]: InlineViewport::draw
+    pub fn draw_anchor(&mut self, app: &App) -> io::Result<()> {
+        if self.headless || !self.pending.is_empty() || OVERLAY_ACTIVE.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let paints = self
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.paints(self.view.y));
+        if !paints {
+            // Nothing to write — but a block let go, or carried off the top,
+            // is still forgotten here.
+            return self.paint_anchor();
+        }
+        queue!(self.backend, BeginSynchronizedUpdate)?;
+        queue!(self.backend, Hide)?;
+        let painted = self.paint_anchor().and_then(|()| self.seat_cursor(app));
+        let ended = queue!(self.backend, EndSynchronizedUpdate);
+        painted?;
+        ended?;
+        Backend::flush(&mut self.backend)
     }
 
     /// Queue `lines` for scrollback directly above the viewport. No terminal
@@ -602,6 +829,9 @@ impl InlineViewport {
     /// [`reflow`]: InlineViewport::reflow
     /// [`restore`]: InlineViewport::restore
     pub fn insert_before(&mut self, lines: Vec<Line<'static>>) {
+        if self.headless {
+            return;
+        }
         self.pending.extend(lines);
     }
 
@@ -616,8 +846,75 @@ impl InlineViewport {
         if self.pending.is_empty() {
             return Ok(());
         }
+        // The flush scrolls whatever does not fit: the anchored block goes
+        // back to its rest rows before any of it can leave the screen
+        // (`docs/mascot-animation.md`).
+        self.settle_anchor()?;
         let lines = std::mem::take(&mut self.pending);
-        self.write_above(lines)
+        let rows = lines.len();
+        self.write_above(lines)?;
+        if let Some(anchor) = &mut self.anchor {
+            anchor.flushed(rows);
+        }
+        Ok(())
+    }
+
+    /// Repaint the anchored block's rows on screen with `lines` — the cells
+    /// that differ from what they show, through the same emitter every other
+    /// paint uses — and record it. Nothing is written for a block that is
+    /// not (or no longer) wholly on screen, or that already shows `lines`.
+    fn repaint_anchor(&mut self, lines: Vec<Line<'static>>) -> io::Result<()> {
+        let Some(anchor) = &self.anchor else {
+            return Ok(());
+        };
+        let Some(top) = anchor.top(self.view.y) else {
+            return Ok(());
+        };
+        if self.screen.width == 0 || anchor.shown() == lines.as_slice() {
+            return Ok(());
+        }
+        let cells = anchor::changed_cells(anchor.shown(), &lines, self.screen.width, top);
+        self.draw_cells(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))?;
+        if let Some(anchor) = &mut self.anchor {
+            anchor.painted(lines);
+        }
+        Ok(())
+    }
+
+    /// Put the anchored block back to the rows it was committed as, where it
+    /// sits now — called before anything moves the screen (a flush, a
+    /// growing region's scroll, the quit), so what scrolls into the
+    /// terminal's scrollback is always the banner standing still.
+    fn settle_anchor(&mut self) -> io::Result<()> {
+        let rest = self
+            .anchor
+            .as_ref()
+            .and_then(|anchor| anchor.unsettled().map(<[Line<'static>]>::to_vec));
+        match rest {
+            Some(rest) => self.repaint_anchor(rest),
+            None => Ok(()),
+        }
+    }
+
+    /// A frame's share of the anchored block: repaint it in the pose the
+    /// loop asked for, if the screen does not already show it — or, for a
+    /// block the loop released or one a scroll has carried (even partly)
+    /// off the top, forget it. Both leave it at its rest rows: a released
+    /// block is repainted to them here, and one that scrolled was settled
+    /// before the scroll.
+    fn paint_anchor(&mut self) -> io::Result<()> {
+        let Some(anchor) = &mut self.anchor else {
+            return Ok(());
+        };
+        let gone = anchor.written() && anchor.top(self.view.y).is_none();
+        let last = anchor.released() || gone;
+        if let Some(lines) = anchor.take_due() {
+            self.repaint_anchor(lines)?;
+        }
+        if last {
+            self.anchor = None;
+        }
+        Ok(())
     }
 
     /// Commit `lines` into scrollback directly above the viewport, pushing the
@@ -772,6 +1069,11 @@ impl InlineViewport {
         // re-records the real one).
         self.painted_bottom = self.painted_bottom.min(height);
         self.prev = None; // geometry moved under us; repaint in full next draw
+        // The emulator moved the rows above the region too — the anchored
+        // block is no longer where the note says, so the note goes; the
+        // purge rebuild every resize gets writes the banner again and the
+        // loop declares it again (`docs/mascot-animation.md`).
+        self.anchor = None;
         // …and the alt screen the emulator just reflowed under us. The area
         // check in `overlay_paint` is NOT enough on its own: a resize burst can
         // coalesce into one frame (`on_resize` asks for a frame, but the
@@ -811,12 +1113,19 @@ impl InlineViewport {
         render: impl FnOnce(Rect, &mut Buffer),
         app: &App,
     ) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         let height = height.clamp(1, self.screen.height.max(1));
         // Take, don't clear: `clear` keeps the Vec's high-water capacity for
         // the rest of the session (a turn that streamed under an overlay can
         // queue thousands of rows), while the flush path's `mem::take` already
         // releases it — the rebuild drops the stale queue the same way.
         drop(std::mem::take(&mut self.pending));
+        // The purge takes the anchored block's rows with everything else;
+        // the caller declares the banner this rebuild writes, when it still
+        // stands over an empty conversation (`docs/mascot-animation.md`).
+        self.anchor = None;
         // A modal open right now takes its seat by this rebuild's real write —
         // note it (`modal_scrolled`): the close must purge-rebuild or its
         // collapse strands the box above the rows it vacates. Recording this
@@ -858,7 +1167,7 @@ impl InlineViewport {
         // overflow into the now-empty scrollback — no duplicated or stale row
         // can survive.
         self.clear_scrollback_and_screen()?;
-        self.backend.set_cursor_position(Position::new(0, 0))?;
+        self.queue_cursor(0, 0)?;
         self.prev = None; // the screen is being rebuilt out from under `prev`
         self.view = Rect::new(0, 0, self.screen.width, height);
         self.write_above(tail)?;
@@ -885,6 +1194,9 @@ impl InlineViewport {
     /// [`exit_overlay`]: InlineViewport::exit_overlay
     /// [`draw_overlay`]: InlineViewport::draw_overlay
     pub fn enter_overlay(&mut self) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         // Record the switch BEFORE emitting it: if the write fails part-way,
         // the exit paths still emit a LeaveAlternateScreen (harmless when the
         // terminal never actually switched) rather than risk stranding it.
@@ -934,6 +1246,9 @@ impl InlineViewport {
     ///
     /// [`reflow`]: InlineViewport::reflow
     pub fn exit_overlay(&mut self) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         execute!(self.backend, LeaveAlternateScreen)?;
         // Cleared only once the leave was actually written — on failure the
         // flag stays set and restore()/the panic hook retry the leave.
@@ -968,6 +1283,9 @@ impl InlineViewport {
     ///
     /// [`enter_overlay`]: InlineViewport::enter_overlay
     pub fn draw_overlay(&mut self, render: impl FnOnce(Rect, &mut Buffer)) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         if self.screen.width == 0 || self.screen.height == 0 {
             return Ok(());
         }
@@ -1014,9 +1332,7 @@ impl InlineViewport {
         // opening Ctrl+O / Ctrl+D used to streak the animation to nowhere;
         // now it lands on the hint. The inline `paint_frame` seats its
         // cursor the same way, via [`ui::cursor_position`].
-        let seated = self
-            .backend
-            .set_cursor_position(Position::new(seat_x, seat_y));
+        let seated = self.queue_cursor(seat_x, seat_y);
         let ended = queue!(self.backend, EndSynchronizedUpdate);
         let painted = drawn
             .and(seated)
@@ -1039,6 +1355,9 @@ impl InlineViewport {
     ///
     /// [`exit_overlay`]: InlineViewport::exit_overlay
     pub fn restore(&mut self) -> io::Result<()> {
+        if self.headless {
+            return Ok(());
+        }
         // Safety net for exits that break out of the event loop with the
         // Ctrl+O overlay still up (stdin closing, an EventStream error — paths
         // that never reach main's exit_overlay calls): leave the alternate
@@ -1059,8 +1378,13 @@ impl InlineViewport {
         // the old box's rows shifted and torn where the region now sits —
         // blank them, which is what `write_above`'s own clear did for this
         // one path before commits repainted in place (`docs/slow-stream.md`).
+        // A quit mid-blink must not leave the banner's eyes shut on the dead
+        // screen: back to its rest rows, then let it go
+        // (`docs/mascot-animation.md`).
+        self.settle_anchor()?;
         let flushed = !self.pending.is_empty();
         self.flush_pending()?;
+        self.anchor = None;
         if flushed {
             self.backend
                 .set_cursor_position(Position::new(0, self.view.y))?;
@@ -1190,12 +1514,24 @@ impl InlineViewport {
     /// here, at the one place the screen scrolls.
     fn scroll_up(&mut self, n: u16) -> io::Result<()> {
         if n > 0 {
-            self.backend
-                .set_cursor_position(Position::new(0, self.screen.height.saturating_sub(1)))?;
-            self.backend.append_lines(n)?;
+            self.queue_cursor(0, self.screen.height.saturating_sub(1))?;
+            // Queued, where the backend's `append_lines` would flush: the
+            // scroll and the repaint it makes room for are one write.
+            for _ in 0..n {
+                queue!(self.backend, Print("\n"))?;
+            }
             self.painted_bottom = self.painted_bottom.saturating_sub(n);
         }
         Ok(())
+    }
+
+    /// Move the cursor — queued, where the backend's `set_cursor_position`
+    /// would flush on the spot. A frame is written once, at its end: a flush
+    /// part-way sent the terminal a scroll, or every painted cell, ahead of
+    /// the escape that closes the synchronized update (`term::output`,
+    /// `docs/input-latency.md`).
+    fn queue_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
+        queue!(self.backend, MoveTo(x, y))
     }
 
     /// Blank `n` rows starting at terminal row `y` — the rows a shrinking box
@@ -1203,8 +1539,11 @@ impl InlineViewport {
     /// rows beneath it are free).
     fn clear_rows(&mut self, y: u16, n: u16) -> io::Result<()> {
         for row in y..y.saturating_add(n) {
-            self.backend.set_cursor_position(Position::new(0, row))?;
-            self.backend.clear_region(ClearType::CurrentLine)?;
+            self.queue_cursor(0, row)?;
+            queue!(
+                self.backend,
+                CrosstermClear(CrosstermClearType::CurrentLine)
+            )?;
         }
         Ok(())
     }
@@ -1471,13 +1810,13 @@ impl AsFd for TtyInput {
 /// Write the startup query and read the terminal's answer — the one stdin
 /// read before the loop's `EventStream` exists (invariant 1), in raw mode.
 /// `graphics` adds the kitty graphics query and `XTVERSION` ahead of the
-/// cursor query (`term::query`).
+/// cursor query, and `name` `XTVERSION` alone (`term::query`).
 ///
 /// It reads **one byte at a time** so it stops on the cursor report's last
 /// byte: whatever the user types after that is still unread, and the
 /// `EventStream` gets it with crossterm's whole parser. What was typed
 /// *before* it is in the answer's `typed`, for the loop to replay.
-fn startup_read(graphics: bool) -> io::Result<query::StartupReplies> {
+fn startup_read(graphics: bool, name: bool) -> io::Result<query::StartupReplies> {
     let tty = TtyInput::open()?;
     // Raw mode's reads block until a byte arrives (VMIN 1, VTIME 0). Give
     // each read a tenth of a second instead, so the deadline is checked while
@@ -1489,7 +1828,7 @@ fn startup_read(graphics: bool) -> io::Result<query::StartupReplies> {
     timed.special_codes[SpecialCodeIndex::VMIN] = 0;
     timed.special_codes[SpecialCodeIndex::VTIME] = 1;
     rustix::termios::tcsetattr(&tty, OptionalActions::Now, &timed)?;
-    let replies = read_replies(&tty, graphics);
+    let replies = read_replies(&tty, graphics, name);
     // Back to raw mode's own reads however the read went.
     let restored = rustix::termios::tcsetattr(&tty, OptionalActions::Now, &raw);
     let replies = replies?;
@@ -1498,9 +1837,9 @@ fn startup_read(graphics: bool) -> io::Result<query::StartupReplies> {
 }
 
 /// [`startup_read`]'s write and read loop.
-fn read_replies(tty: &TtyInput, graphics: bool) -> io::Result<query::StartupReplies> {
+fn read_replies(tty: &TtyInput, graphics: bool, name: bool) -> io::Result<query::StartupReplies> {
     let mut stdout = io::stdout();
-    stdout.write_all(query::startup_query(graphics).as_bytes())?;
+    stdout.write_all(query::startup_query(graphics, name).as_bytes())?;
     stdout.flush()?;
     let deadline = Instant::now() + STARTUP_REPLY_TIMEOUT;
     let mut scanner = query::ReplyScanner::new();
@@ -1539,7 +1878,34 @@ mod tests {
     use ratatui::layout::{Position, Rect};
     use ratatui::style::Style;
 
-    use super::{OverlayPaint, keyboard_enhancement_disabled, overlay_paint, visible_cells};
+    use super::{
+        HEADLESS_SIZE, InlineViewport, OverlayPaint, keyboard_enhancement_disabled, overlay_paint,
+        visible_cells,
+    };
+
+    #[test]
+    fn a_headless_viewport_paints_nothing_and_keeps_nothing() {
+        // docs/headless.md: the session runs whole over it — every paint is
+        // a no-op that succeeds, and a commit is dropped as it is queued, so
+        // a long run never accumulates rows nobody will see.
+        let mut term = InlineViewport::headless();
+        assert!(term.is_headless());
+        let (width, height) = HEADLESS_SIZE;
+        assert_eq!(term.screen(), Rect::new(0, 0, width, height));
+        term.insert_before(vec!["a committed row".into()]);
+        assert!(
+            term.pending.is_empty(),
+            "nothing queued for a paint that never comes"
+        );
+        let app = crate::app::App::new();
+        assert!(term.draw(5, |_, _| {}, &app).is_ok());
+        assert!(term.reflow(vec!["row".into()], 5, |_, _| {}, &app).is_ok());
+        assert!(term.enter_overlay().is_ok());
+        assert!(term.draw_overlay(|_, _| {}).is_ok());
+        assert!(term.exit_overlay().is_ok());
+        assert!(term.restore().is_ok());
+        assert!(term.take_typeahead().is_empty());
+    }
 
     /// Render `line` into a `width`-wide one-row buffer the way every full-cell
     /// paint does, then list what [`visible_cells`] would actually send to the

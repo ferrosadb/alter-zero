@@ -14,9 +14,9 @@
 use crate::permission::{PermissionDecision, PermissionKind, PermissionRequest};
 
 use super::super::{StreamEvent, ToolCallSummary};
+use super::CHUNK_DELAY;
 use super::scenario::{AskStage, Stage};
 use super::script::{chunks, handoff};
-use super::{CHUNK_DELAY, nap};
 use crate::llm::tools::write_report as created;
 
 /// How a gated call resolved: `Ok(output)` ran, `Err((display, result))` was
@@ -26,6 +26,39 @@ use crate::llm::tools::write_report as created;
 /// offline demo exercises Tab's amend feedback all the way into the derived
 /// context (`docs/permissions.md`).
 type Resolution = Result<String, (String, String)>;
+
+/// The gate's record of a demo call it refused unattended: the call as the
+/// scripted model made it — its wire name and arguments — under the
+/// request's own id.
+pub(in crate::stream) fn unattended_refusal(
+    request: &PermissionRequest,
+) -> crate::permission::UnattendedRefusal {
+    let (tool_name, input) = match request.kind {
+        PermissionKind::Write => ("write", serde_json::json!({ "path": request.target })),
+        PermissionKind::Edit => ("edit", serde_json::json!({ "path": request.target })),
+        PermissionKind::Bash => ("bash", serde_json::json!({ "command": request.target })),
+        PermissionKind::Mcp => (request.target.as_str(), serde_json::json!({})),
+        PermissionKind::Session => (
+            "bashsend",
+            serde_json::json!({ "session_id": request.target }),
+        ),
+    };
+    crate::permission::UnattendedRefusal {
+        request: request.clone(),
+        tool_name: tool_name.to_string(),
+        tool_use_id: request.id.clone(),
+        tool_input: input.to_string(),
+    }
+}
+
+/// What an unattended refusal resolves with: the cell's line and the
+/// model's reason, the real approve seam's own.
+pub(in crate::stream) fn unattended() -> (String, String) {
+    (
+        crate::permission::UNATTENDED_DISPLAY.to_string(),
+        crate::permission::UNATTENDED_RESULT.to_string(),
+    )
+}
 
 /// One scripted call's identity, as a live backend would announce it: the
 /// display `kind`, the header `args` summary, the **verbatim** `arguments`
@@ -92,6 +125,11 @@ impl Stage<'_> {
         if self.gate.allows(request) {
             return Some(Ok(output()));
         }
+        // Nobody to ask — a headless run (docs/headless.md): refused the way
+        // the real approve seam refuses it, before a request exists.
+        if self.gate.refuses_unattended(|| unattended_refusal(request)) {
+            return Some(Err(unattended()));
+        }
         let _ = self.tx.send(StreamEvent::Permission(request.clone()));
         let decision = self.gate.wait(&request.id, &|| self.cancel.is_cancelled());
         self.judge(request, decision, output)
@@ -150,11 +188,13 @@ impl Stage<'_> {
                         display: output,
                         result: result.clone(),
                         truncated: false,
+                        run: crate::stream::ToolRun::default(),
                     }),
                     _ => self.tx.send(StreamEvent::ToolEnd {
                         output,
                         ok,
                         truncated: false,
+                        run: crate::stream::ToolRun::default(),
                     }),
                 };
             }
@@ -163,6 +203,7 @@ impl Stage<'_> {
                     display,
                     result,
                     truncated: false,
+                    run: crate::stream::ToolRun::default(),
                 });
             }
         }
@@ -178,7 +219,7 @@ impl Stage<'_> {
             if self.tx.send(StreamEvent::Chunk(chunk)).is_err() {
                 return;
             }
-            nap(CHUNK_DELAY, self.cancel);
+            self.pace.nap(CHUNK_DELAY, self.cancel);
         }
         let _ = self.tx.send(StreamEvent::StreamDone);
     }
@@ -199,6 +240,7 @@ impl Stage<'_> {
             detail: detail.map(str::to_string),
             agent: None,
             agent_id: None,
+            check_failure: None,
         }
     }
 }
@@ -260,7 +302,7 @@ pub(in crate::stream) fn ask_questions_turn(stage: &AskStage<'_>) {
         if stage.tx.send(StreamEvent::Chunk(chunk)).is_err() {
             return;
         }
-        nap(CHUNK_DELAY, stage.cancel);
+        stage.pace.nap(CHUNK_DELAY, stage.cancel);
     }
     let call = crate::llm::tools::ToolCallRequest {
         id: "ask_demo".to_string(),
@@ -297,6 +339,7 @@ pub(in crate::stream) fn ask_questions_turn(stage: &AskStage<'_>) {
                 truncated: false,
                 display: outcome.output,
                 result,
+                run: crate::stream::ToolRun::default(),
             });
         }
         Some(result) => {
@@ -304,6 +347,7 @@ pub(in crate::stream) fn ask_questions_turn(stage: &AskStage<'_>) {
                 truncated: false,
                 display: outcome.output,
                 result,
+                run: crate::stream::ToolRun::default(),
             });
         }
         // An argument failure can't happen (the script is valid); resolve
@@ -313,6 +357,7 @@ pub(in crate::stream) fn ask_questions_turn(stage: &AskStage<'_>) {
                 output: outcome.output,
                 ok: outcome.ok,
                 truncated: false,
+                run: crate::stream::ToolRun::default(),
             });
         }
     }
@@ -351,7 +396,7 @@ pub(in crate::stream) fn ask_questions_turn(stage: &AskStage<'_>) {
         if stage.tx.send(StreamEvent::Chunk(chunk)).is_err() {
             return;
         }
-        nap(CHUNK_DELAY, stage.cancel);
+        stage.pace.nap(CHUNK_DELAY, stage.cancel);
     }
     let _ = stage.tx.send(StreamEvent::StreamDone);
 }

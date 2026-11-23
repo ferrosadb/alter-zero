@@ -48,14 +48,19 @@ HEADER_MARK="Alter Zero"
 # names that turn's verb instead (SUMMARY_TURN1…3, below). The same line lives
 # in `scripts/live_smoke.sh`, `cursor_hide_check.sh` and `paste_mem.sh`;
 # `app::tests::turn` pins all four copies to the table.
-SUMMARY_RE='(Worked|Generated|Pondered|Cooked|Brewed|Crunched|Conjured|Churned|Computed|Synthesized) for [0-9]'
+SUMMARY_RE='(Hatched|Percolated|Tinkered|Spelunked|Pondered|Conjured|Grepped|Juggled|Simmered|Untangled|Sprouted|Whittled|Foraged|Mulled|Transmuted|Riffed|Brewed|Deciphered|Wrangled|Soldered|Skittered|Sleuthed|Cogitated|Defragged|Marinated|Enchanted|Bloomed|Polished|Excavated|Noodled|Herded|Kneaded|Concocted|Glimmered|Unscrambled|Tempered|Charted|Ruminated|Overclocked|Fermented|Burrowed|Alchemized|Harmonized|Knitted|Crunched|Unearthed|Mused|Galloped|Steeped|Divined|Ripened|Sculpted|Prospected|Fathomed|Churned|Shimmered|Distilled|Incubated|Kindled|Cooked) for [0-9]'
 # The summary each of a launch's first three turns ends on, for the phases
 # that must tell turns apart on one screen: a launch walks the table one verb
 # per turn while each turn stays under 30s. Pinned to the table by the same
 # `app::tests::turn` test.
-SUMMARY_TURN1="Worked for"
-SUMMARY_TURN2="Generated for"
-SUMMARY_TURN3="Pondered for"
+SUMMARY_TURN1="Hatched for"
+SUMMARY_TURN2="Percolated for"
+SUMMARY_TURN3="Tinkered for"
+# The live verb a launch's first turn opens on — an agent's first turn and
+# the `/spinner` preview open on it too — for the phases that find the status
+# line by its word: write "${VERB_TURN1}…" for the line as drawn. Pinned to
+# the table's first entry by the same `app::tests::turn` test.
+VERB_TURN1="Hatching"
 # The opening of a slash-palette row (an ERE, anchored): the selection's `→ `
 # marker or the two-space inset every other row wears (`MENU_MARKER` /
 # `MENU_INDENT`, docs/design.md), then the command's slash — so
@@ -104,6 +109,10 @@ smoke_sanitize_env() {
 	# bills — would mark that subscription configured and send /model and
 	# /usage to Google; Phase 148 signs in against its own stub instead.
 	unset ANTIGRAVITY_REFRESH_TOKEN ANTIGRAVITY_PROJECT_ID
+	# …and a developer's ChatGPT Codex sign-in (docs/chatgpt.md), whose
+	# refresh token turns on the `imagegen` tool and its built-in skill for
+	# every phase (docs/imagegen.md); Phase 168 signs in against its own stub.
+	unset CHATGPT_CODEX_REFRESH_TOKEN OPENAI_CHATGPT_REFRESH_TOKEN
 	# Run from inside a herdr pane (docs/herdr.md), every phase's app would
 	# report its turns to the developer's real herdr — the pane the suite was
 	# started from flickering through a hundred agents' states. The herdr
@@ -145,6 +154,19 @@ smoke_sanitize_env() {
 	# `● Bash(ls …)` tail). On for the suite, exported and spelled out in
 	# every launch string; Phase 146 turns it off for its own launches.
 	export ALTER_ZERO_VERBOSE=1
+	# A session opens on a random status verb (docs/status-indicator.md *The
+	# verb catalog*), and the phases tell a launch's turns apart by theirs
+	# (SUMMARY_TURN1…3, VERB_TURN1). Pinned to the table's first verb for the
+	# suite, exported (a phase's own launch string inherits it) and spelled
+	# out in every launch string.
+	export ALTER_ZERO_FIRST_VERB="$VERB_TURN1"
+	# The banner mascot blinks and moves while the conversation is empty
+	# (docs/mascot-animation.md), on a rhythm drawn by lot — so a capture of
+	# a fresh screen would hold whatever pose the lot fell on, and a byte
+	# count of an idle one whatever frame it wrote. Still for the suite,
+	# exported and spelled out in every launch string; the animation phase
+	# (159) turns it back on for its own launches.
+	export ALTER_ZERO_MASCOT_ANIMATION=0
 }
 
 # ---------------------------------------------------------------------------
@@ -232,7 +254,7 @@ smoke_begin() {
 	# And HOME itself moves into the tree, so there is NO path by which the
 	# binary under test — or tmux, or git, whatever a phase's own env string
 	# says — can read or write the developer's home: `~/.alter-zero`,
-	# `~/.claude/skills`, `~/.tmux.conf`, `~/.gitconfig` all resolve to an
+	# `~/.agents`, `~/.claude/skills`, `~/.tmux.conf`, `~/.gitconfig` all resolve to an
 	# empty directory that dies with the phase. (The checkpoint store supplies
 	# its own git identity, so it needs nothing from there.) A phase that
 	# tests HOME-relative behaviour sets its own.
@@ -248,10 +270,10 @@ smoke_begin() {
 	# Filesystem checkpoints are OFF for every launch in the repo's cwd: a
 	# checkpoint restore does `git reset --hard` + `git clean` on the working
 	# directory. Only phases that run in a throwaway cwd re-enable them.
-	# Lifecycle hooks, the project config layer and the spinner tips are off
-	# for hermeticity too, and the permission mode is manual (the sanitizer's
-	# note on it).
-	CFG_ENV="ALTER_ZERO_CONFIG_DIR=$SMOKE_CFG ALTER_ZERO_SESSIONS_DIR=$SMOKE_SESSIONS ALTER_ZERO_CHECKPOINTS=0 ALTER_ZERO_SKILLS_DIR=$SMOKE_SKILLS ALTER_ZERO_AGENTS_DIR=$SMOKE_AGENTS ALTER_ZERO_PROJECT_CONFIG=0 ALTER_ZERO_TELEMETRY=0 ALTER_ZERO_UPDATE_CHECK=0 ALTER_ZERO_TIPS=0 ALTER_ZERO_PERMISSION_MODE=manual ALTER_ZERO_VERBOSE=1"
+	# Lifecycle hooks, the project config layer, the spinner tips and the
+	# banner mascot's animation are off for hermeticity too, and the
+	# permission mode is manual (the sanitizer's notes on them).
+	CFG_ENV="ALTER_ZERO_CONFIG_DIR=$SMOKE_CFG ALTER_ZERO_SESSIONS_DIR=$SMOKE_SESSIONS ALTER_ZERO_CHECKPOINTS=0 ALTER_ZERO_SKILLS_DIR=$SMOKE_SKILLS ALTER_ZERO_AGENTS_DIR=$SMOKE_AGENTS ALTER_ZERO_PROJECT_CONFIG=0 ALTER_ZERO_TELEMETRY=0 ALTER_ZERO_UPDATE_CHECK=0 ALTER_ZERO_TIPS=0 ALTER_ZERO_PERMISSION_MODE=manual ALTER_ZERO_VERBOSE=1 ALTER_ZERO_FIRST_VERB=$VERB_TURN1 ALTER_ZERO_MASCOT_ANIMATION=0"
 	# Persistence seeds the input history from a file on startup; /dev/null
 	# gives every launch an EMPTY history so the ↑/↓ and Ctrl+R assertions are
 	# unaffected by earlier submissions.
@@ -509,6 +531,26 @@ wait_pane() {
 	for ((i = 0; i < n; i++)); do
 		last="$(tmux capture-pane -t "$sess" -p ${SMOKE_CAP[@]+"${SMOKE_CAP[@]}"})"
 		if printf '%s\n' "$last" | grep -q "${SMOKE_GREP[@]}"; then
+			printf '%s\n' "$last"
+			return 0
+		fi
+		sleep "$SMOKE_POLL_INTERVAL"
+	done
+	printf '%s\n' "$last"
+	return 1
+}
+# wait_row SECONDS SESSION ROW TEXT — wait until the pane's row ROW (1-based)
+# reads exactly TEXT, trailing blanks trimmed, printing the last capture
+# taken. The wait for a key that moves the screen: a pattern found anywhere
+# can be on screen before the key lands — the move before it left it there
+# — and the read after it then races the key (docs/smoke.md). Returns 1 on
+# timeout.
+wait_row() {
+	local secs="$1" sess="$2" row="$3" want="$4" last="" n i
+	n="$(smoke_ticks "$secs")"
+	for ((i = 0; i < n; i++)); do
+		last="$(tmux capture-pane -t "$sess" -p)"
+		if [ "$(sed -n "${row}p" <<<"$last" | sed 's/[[:space:]]*$//')" = "$want" ]; then
 			printf '%s\n' "$last"
 			return 0
 		fi

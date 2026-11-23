@@ -47,7 +47,7 @@ use super::recorder::SessionRecorder;
 use super::shell::{SHELL_POLL_INTERVAL, SHELL_QUIT_KILL_WINDOW};
 use super::startup::{LoadedSession, Startup, StartupSession};
 use super::view::RESIZE_REFLOW_MAX_ROWS;
-use super::workers::{ModelFetch, spawn_file_search_worker};
+use super::workers::{ModelFetch, ProbeFetch, spawn_file_search_worker, spawn_transcript_worker};
 use super::{Session, StatusClocks, config, host};
 
 impl<'t> Session<'t> {
@@ -63,10 +63,17 @@ impl<'t> Session<'t> {
         let Startup {
             session: startup,
             prompt,
-            // The interactive path: `main` routes a headless run to
-            // `tui::headless` before this ever runs.
-            output: _,
+            permission_mode,
+            print,
+            system_prompt,
         } = startup;
+        // A headless run (docs/headless.md): the same session, with nothing
+        // shown and nobody to ask. Its prompt is the headless loop's to
+        // submit; what it changes here is what a screen alone needs.
+        let headless = print.is_some();
+        let headless_verbose = print.is_some_and(|options| options.verbose);
+        let round_budget =
+            print.map(|options| alter_zero::llm::agent::RoundBudget::new(options.max_turns));
         // Backend → loop (the streamed reply). A tokio channel so the loop can
         // `select!` on it; the backend thread sends without touching the runtime.
         let (tx, reply_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
@@ -89,7 +96,11 @@ impl<'t> Session<'t> {
         // recall and Ctrl+R search span past sessions. New submissions are
         // appended per loop iteration (`take_unpersisted_inputs`).
         let hist_store = InputHistoryStore::new();
-        app.seed_input_history(hist_store.load());
+        // A headless prompt is no recall entry (docs/headless.md), so its
+        // session has none to seed either.
+        if !headless {
+            app.seed_input_history(hist_store.load());
+        }
         // The working directory keys every per-directory file below
         // (docs/per-directory-state.md) — the two looks here, the `/model`
         // selection and `/settings` knobs further down, the permission rules.
@@ -100,16 +111,20 @@ impl<'t> Session<'t> {
         // anywhere, pinned as this directory's own right here — seeded before
         // the first frame commits the header so the banner draws it from
         // launch. An absent or corrupt file keeps the default.
-        if let Some(mascot) =
-            config::adopt_look::<Mascot>(config::mascot_json_path().as_deref(), &project)
+        // A headless run draws no banner and no spinner, so it pins neither
+        // look for the directory.
+        if !headless
+            && let Some(mascot) =
+                config::adopt_look::<Mascot>(config::mascot_json_path().as_deref(), &project)
         {
             app.set_mascot(mascot);
         }
         // The status spinner style (docs/spinner.md): the directory's saved
         // `/spinner` choice, seeded the same way so the first turn's status
         // line wears it.
-        if let Some(spinner) =
-            config::adopt_look::<Spinner>(config::spinner_json_path().as_deref(), &project)
+        if !headless
+            && let Some(spinner) =
+                config::adopt_look::<Spinner>(config::spinner_json_path().as_deref(), &project)
         {
             app.set_spinner(spinner);
         }
@@ -121,6 +136,19 @@ impl<'t> Session<'t> {
             app.set_theme(theme);
         }
         alter_zero::ui::activate_theme(app.theme());
+        // How a reply's `[label](url)` links read (docs/links.md *Labelled
+        // links*): the label alone where this terminal is known to open
+        // hyperlinks, `label (url)` anywhere else — decided once, from the
+        // environment and the name the terminal gave the startup read,
+        // before anything is rendered, so a resumed transcript and the first
+        // reply agree. A headless run draws nothing that carries a hyperlink
+        // and keeps the renderer's default, the address spelled out.
+        if !headless {
+            alter_zero::links::set_target_display(alter_zero::links::detect_target_display(
+                |name| std::env::var(name).ok(),
+                term.terminal_name(),
+            ));
+        }
 
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
 
@@ -215,12 +243,17 @@ impl<'t> Session<'t> {
         // project's saved rules BEFORE the backend is built below — every
         // `write`/`edit`/`bash` call, the main turn's and its subagents', raises
         // the inline prompt and blocks its own thread on the answer.
-        let permissions = PermissionStore::open(&cwd);
+        let permissions = PermissionStore::open(&cwd, permission_mode);
         // …and pointed at the scratchpad, so a `write`/`edit` inside the
         // session's own temp directory resolves without a prompt
         // (`docs/scratchpad.md`). Nothing to point at = no exemption.
         if let Some(gate) = permissions.gate() {
             gate.set_scratchpad(scratchpad_dir.clone());
+            // Nobody can answer a prompt in a headless run: what would ask
+            // is refused instead, and the model is told (docs/headless.md).
+            if headless {
+                gate.set_unattended();
+            }
         }
 
         // The ask gate (docs/ask.md): the `AskUserQuestion` modal's answers
@@ -238,20 +271,58 @@ impl<'t> Session<'t> {
         // A `SKILL.md` that will not parse is collected, not thrown — one bad
         // skill must not cost a session the rest — and becomes the startup
         // toast below.
-        // The built-in `skill-creator` is seeded into the personal root first,
-        // so this very walk finds it — a skill that appeared only on the
-        // *second* launch would be missing from exactly the session that just
-        // installed the app. Never clobbers an edited copy, and skipped
-        // entirely when ALTER_ZERO_SKILLS_DIR replaced the roots.
-        let mut skill_errors = match alter_zero::llm::skill::resolved_builtin_skills_dir(
-            config::config_home().as_deref(),
-        ) {
-            Some(root) => alter_zero::llm::skill::seed_builtin_skills(&root),
-            None => Vec::new(),
+        // The built-in skills are synced into the personal root first, so this
+        // very walk finds them — a skill that appeared only on the *second*
+        // launch would be missing from exactly the session that just
+        // installed the app — and an unedited copy an older release wrote is
+        // brought up to date before it is read (docs/builtin-updates.md).
+        // Never clobbers an edited copy, and skipped entirely when
+        // ALTER_ZERO_SKILLS_DIR replaced the roots. A headless run makes no
+        // offer beside an edit: the offer is made once, and it has no screen
+        // to make it on, so the next interactive launch makes it.
+        let skill_sync =
+            alter_zero::llm::skill::resolved_builtin_skills_dir(config::config_home().as_deref())
+                .map(|root| alter_zero::llm::skill::sync_builtin_skills(&root, !headless));
+        let mut skill_errors = skill_sync
+            .as_ref()
+            .map(|report| report.errors.clone())
+            .unwrap_or_default();
+        // The `imagegen` tool's setup (docs/imagegen.md): the ChatGPT Codex
+        // sign-in it makes images with — filled in by `ModelSession::resolve`
+        // — where those images are saved, and the seeded skill that drives
+        // it. Whether the tool is offered is the **Image generation** row's
+        // to say, so the setup is there either way.
+        let imagegen_setup = Some(alter_zero::llm::imagegen::ImagegenSetup {
+            signin: alter_zero::llm::imagegen::ChatGptSignin::default(),
+            dir: config::generated_images_dir(&session_id),
+            skill: alter_zero::llm::skill::resolved_builtin_skills_dir(
+                config::config_home().as_deref(),
+            )
+            .map(|root| root.join(alter_zero::llm::skill::IMAGEGEN_SKILL)),
+        });
+        // The walk runs before the settings and the backend are known, so it
+        // judges the seeded `imagegen` skill by the sign-in alone — read the
+        // way `ModelSession::resolve` reads it — and is walked again below
+        // where the session's own verdict differs (the Image generation or
+        // Tools row off, the offline dummy).
+        let imagegen_provisional = imagegen_setup.is_some() && {
+            let (providers, _) = config::startup_providers(home.as_deref());
+            let env_file = config::load_env_file(&config::env_file_path());
+            config::chatgpt_signin_id(&providers, &env_file).is_some()
         };
-        let (found_skills, walk_errors) =
-            alter_zero::llm::skill::load_skills(&cwd, config::config_home().as_deref());
+        let (mut found_skills, walk_errors) = alter_zero::llm::skill::load_skills(
+            &cwd,
+            config::config_home().as_deref(),
+            imagegen_provisional,
+        );
         skill_errors.extend(walk_errors);
+        // The plugins this directory has on (docs/plugins.md): read once
+        // here, before every registry they add to — their skills (each
+        // `{plugin}:{name}`, so never one a root already has) join the walk's,
+        // and their agents, hooks and MCP servers follow below.
+        let plugin_store = config::plugin_store();
+        let plugins = super::plugins::load_plugins(plugin_store.as_ref(), &cwd);
+        found_skills.extend(plugins.skills());
         let skill_registry = alter_zero::skills::SkillRegistry::new(found_skills);
         // …and this project's saved on/off choices from `skills.json`, applied
         // BEFORE the backend is built so a session that starts with its last
@@ -262,20 +333,34 @@ impl<'t> Session<'t> {
         );
 
         // The subagent definitions on disk (docs/subagents.md): the built-in
-        // `general-purpose`/`explore` seeded into the user root the first
-        // time — so the defaults are editable files rather than a `match` in
-        // the binary — then the walk over the project's and the user's roots.
-        // Done here, before the backend, so a launch and the `<system-
-        // reminder>` listing agree from the first turn. A file that will not
-        // parse is collected, not thrown, and becomes the startup toast.
-        let mut agent_errors =
-            match alter_zero::llm::subagent::user_agents_dir(config::config_home().as_deref()) {
-                Some(dir) => alter_zero::llm::subagent::seed_default_agents(&dir),
-                None => Vec::new(),
-            };
-        let (found_agents, walk_errors) =
+        // `general-purpose`/`explore` synced into the user root — written the
+        // first time, so the defaults are editable files rather than a
+        // `match` in the binary, and kept current while unedited
+        // (docs/builtin-updates.md) — then the walk over the project's and
+        // the user's roots. Done here, before the backend, so a launch and
+        // the `<system-reminder>` listing agree from the first turn. A file
+        // that will not parse is collected, not thrown, and becomes the
+        // startup toast.
+        let agent_sync = alter_zero::llm::subagent::user_agents_dir(
+            config::config_home().as_deref(),
+        )
+        .map(|dir| {
+            alter_zero::llm::subagent::sync_builtin_agents(
+                &dir,
+                alter_zero::llm::subagent::agents_reach(!headless),
+            )
+        });
+        let mut agent_errors = agent_sync
+            .as_ref()
+            .map(|report| report.errors.clone())
+            .unwrap_or_default();
+        // What the two syncs changed, for the toast and the card below.
+        let builtin_syncs: Vec<alter_zero::builtins::SyncReport> =
+            skill_sync.into_iter().chain(agent_sync).collect();
+        let (mut found_agents, walk_errors) =
             alter_zero::llm::subagent::load_agents(&cwd, config::config_home().as_deref());
         agent_errors.extend(walk_errors);
+        found_agents.extend(plugins.agents());
         let subagents = alter_zero::subagents::SubagentRegistry::new(found_agents);
 
         // What the startup review decides over (docs/config-review.md): the
@@ -288,10 +373,13 @@ impl<'t> Session<'t> {
         // how a user comes to trust a guard that isn't there.
         let hooks_path = config::user_hooks_path();
         let (user_hooks_file, hooks_error) = config::load_hooks(hooks_path.as_deref());
-        let (trust, trust_error) = super::trust::TrustState::load(
+        let (mut trust, trust_error) = super::trust::TrustState::load(
             hooks_path.map(|path| (path, user_hooks_file)),
             super::trust::load_project_layer(&cwd),
         );
+        // The plugins' hooks and servers are reviewed like the project's: a
+        // third layer, each file under its own path (docs/plugins.md *Trust*).
+        trust.set_plugins(&plugins);
 
         // The telemetry ping's report channel (docs/telemetry.md) — its own
         // `select!` source, because the worker outlives nothing but must
@@ -324,6 +412,21 @@ impl<'t> Session<'t> {
         let tips_file = config::load_tips_file(config::tips_json_path().as_deref());
         settings.tips = tips_file.enabled;
         app.seed_tips(tips_file.next);
+        // The status line's first verb is random per session
+        // (docs/status-indicator.md *The verb catalog*) — every agent's first
+        // turn and the /spinner preview open on it too — unless
+        // `ALTER_ZERO_FIRST_VERB` names one, which the smoke suite does so
+        // its phases know each turn's word.
+        let first_verb_pin = std::env::var("ALTER_ZERO_FIRST_VERB").ok();
+        let entropy = u64::from_le_bytes(super::host::random_bytes::<8>());
+        app.seed_status_verbs(alter_zero::app::StatusVerb::opening_index(
+            first_verb_pin.as_deref(),
+            entropy,
+        ));
+        // The banner mascot's idle animation keeps its own rhythm per session
+        // (docs/mascot-animation.md): seeded here whether or not the row is
+        // on, so `/settings` can turn it on mid-session.
+        app.seed_mascot_motion(u64::from_le_bytes(super::host::random_bytes::<8>()));
         let settings = config::apply_setting_overrides(settings);
 
         // The MCP servers (docs/mcp.md): the config files parsed and merged
@@ -337,7 +440,7 @@ impl<'t> Session<'t> {
         let (mcp_tx, mcp_rx) = tokio::sync::mpsc::unbounded_channel();
         let mcp_manager = alter_zero::llm::mcp::McpManager::new(
             mcp_tx,
-            super::mcp::load_mcp_sources(&cwd, &trust),
+            super::mcp::load_mcp_sources(&cwd, &trust, &plugins),
         );
         if settings.mcp {
             mcp_manager.start_connections();
@@ -402,7 +505,7 @@ impl<'t> Session<'t> {
         let steer = alter_zero::steer::SteerQueue::new();
 
         // The reply backend and everything that selects it (docs/llm.md).
-        let models = ModelSession::resolve(
+        let mut models = ModelSession::resolve(
             &cwd,
             home.as_deref(),
             scratchpad_dir.as_deref(),
@@ -410,14 +513,32 @@ impl<'t> Session<'t> {
             &agent_registry,
             &steer,
             permissions.gate(),
-            &ask,
+            // AskUserQuestion only where somebody can answer it
+            // (docs/headless.md).
+            (!headless).then_some(&ask),
             &task_registry,
             &skill_registry,
             &subagents,
             Some(&mcp_manager),
             &settings,
             hook_setup,
+            round_budget.as_ref(),
+            &system_prompt,
+            imagegen_setup,
         );
+        // The walk above judged the `imagegen` built-in by the sign-in alone;
+        // where the session does not offer the tool after all, the skill goes
+        // too (docs/imagegen.md).
+        if models.imagegen_offered() != imagegen_provisional {
+            let (mut again, _) = alter_zero::llm::skill::load_skills(
+                &cwd,
+                config::config_home().as_deref(),
+                models.imagegen_offered(),
+            );
+            again.extend(plugins.skills());
+            skill_registry.replace(again);
+            models.refresh_skills();
+        }
 
         // The `@` file-search pipeline (docs/file-search.md): a background worker
         // walks the cwd and ranks it per query off the UI thread. The loop sends
@@ -427,6 +548,12 @@ impl<'t> Session<'t> {
         let (file_req_tx, file_req_rx) = std::sync::mpsc::channel::<String>();
         let (file_res_tx, file_rx) = tokio::sync::mpsc::unbounded_channel();
         let file_worker = spawn_file_search_worker(cwd.clone(), file_req_rx, file_res_tx);
+        // The Ctrl+O transcript's render worker (docs/input-latency.md): each
+        // committed item's rows are rendered there and spliced in here. It
+        // holds the channel's only sender, so the channel closing says the
+        // worker is gone. A headless run has no pager to render for.
+        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transcript_worker = (!headless).then(|| spawn_transcript_worker(transcript_tx));
         // The Ctrl+V image-paste pipeline (docs/image-paste.md) and the `/model`
         // picker's list fetch (docs/llm.md): each runs on its own short-lived
         // worker thread and reports here.
@@ -437,12 +564,13 @@ impl<'t> Session<'t> {
         // The `/usage` page's reads, one worker per subscription
         // (docs/usage.md).
         let (usage_tx, usage_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (plugin_tx, plugin_rx) = tokio::sync::mpsc::unbounded_channel();
         // The capability probe's own channel, so a concurrently-open `/model`
         // picker can't confuse the results (docs/reasoning.md).
         // Spawned once the startup directive is applied (`spawn_pending_probe`
         // below): a `--resume` may replace the queued probe with its own
         // model's (docs/session-model.md).
-        let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel::<ModelFetch>();
+        let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel::<ProbeFetch>();
 
         // The /resume session recorder (docs/resume.md): mirrors App::history to a
         // rollout file, lazily created on the first recorded item so empty
@@ -503,6 +631,8 @@ impl<'t> Session<'t> {
             render: ui::StreamRender::new(),
             agent_render: ui::StreamRender::new(),
             transcript: ui::TranscriptCache::new(),
+            transcript_worker,
+            transcript_rx,
             context: ui::ContextCache::new(),
             burst: PasteBurst::new(),
             clocks: StatusClocks::started_now(),
@@ -516,9 +646,15 @@ impl<'t> Session<'t> {
             // Invariant 1: the `EventStream` is created HERE — after
             // `InlineViewport::init` (in `main`) queried the cursor position over
             // stdin, synchronously — so it is the sole stdin reader from now on.
-            events: EventStream::new(),
+            // A headless run creates none: building one opens the controlling
+            // terminal, which a cron job or a CI step does not have.
+            events: (!headless).then(EventStream::new),
+            headless,
+            headless_verbose,
+            round_budget,
             frame,
             draw_rx,
+            frames: alter_zero::frame::FrameLedger::default(),
             tx,
             reply_rx,
             file_req_tx,
@@ -539,6 +675,12 @@ impl<'t> Session<'t> {
             usage_tx,
             usage_rx,
             usage_cancel: None,
+            plugin_tx,
+            plugin_rx,
+            plugin_cancel: None,
+            plugin_job_started: None,
+            plugin_store,
+            plugins,
             probe_tx,
             probe_rx,
             bg_rx,
@@ -551,6 +693,10 @@ impl<'t> Session<'t> {
             update_rx,
             update_attempted: None,
             update_notice_pending: None,
+            builtin_offers: builtin_syncs
+                .iter()
+                .flat_map(|sync| sync.offered.iter().cloned())
+                .collect(),
             herdr: None,
             _file_worker: file_worker,
             registry,
@@ -589,12 +735,16 @@ impl<'t> Session<'t> {
             cwd_display,
         };
         session.seed_app(settings);
+        // First of the startup's toasts: an update is news, not a problem, so
+        // any of the reports below covers it.
+        session.report_builtin_updates(&builtin_syncs);
         session.seed_checkpoints(refusal, checkpoints_wanted)?;
         // After the checkpoint toast, so a session with both problems ends up
         // showing the hooks one — the actionable typo beats the size refusal.
         session.report_hooks_error(hooks_error);
         session.report_skill_errors(&skill_errors);
         session.report_agent_errors(&agent_errors);
+        session.report_plugin_errors();
         session.report_mcp_errors();
         session.report_trust_state(trust_error);
         session.report_secrets_error(secrets_error);
@@ -609,12 +759,26 @@ impl<'t> Session<'t> {
         // The capability probe for whatever model the session ended up on —
         // the directory's entry, or a resumed conversation's own.
         session.spawn_pending_probe();
+        // A headless run stops here (docs/headless.md): no startup review
+        // (nobody to ask — what waits for trust stays off, and the headless
+        // loop says so), no first frame, no telemetry ping, no update check,
+        // no herdr pane. SessionStart fires as the session opens, as in the
+        // TUI, and the headless loop submits the prompt.
+        if headless {
+            session.models.fire_session_start();
+            return Ok(session);
+        }
         // The startup review (docs/config-review.md), open on the very first
         // frame when a hook or a project server is new or changed: nothing
         // it asks about runs until it is answered, and the SessionStart
         // fire below stays queued until then.
         let reviewing = session.open_startup_review();
         session.paint_first_frame(picker)?;
+        // An edited built-in whose release changed it (docs/builtin-updates.md):
+        // the card goes under the banner — or, behind a bare --resume's
+        // picker, at the loop bottom that finds the conversation back on
+        // screen. Made once: the sync has already moved its record on.
+        session.flush_builtin_offers();
         // SessionStart (docs/hooks.md), in the background as the session
         // opens — Claude Code's timing: the user can type at once, and the
         // first turn (a [PROMPT]'s below included) waits for the hooks so
@@ -820,6 +984,57 @@ impl<'t> Session<'t> {
         );
     }
 
+    /// Say which built-in skills and agent types this launch brought up to
+    /// date or removed (`docs/builtin-updates.md`) — one dim toast, raised
+    /// before the startup's other reports so any of them covers it. Silent on
+    /// a first launch, a restored file, and a release that changed nothing.
+    fn report_builtin_updates(&mut self, syncs: &[alter_zero::builtins::SyncReport]) {
+        let syncs: Vec<&alter_zero::builtins::SyncReport> = syncs.iter().collect();
+        if let Some(notice) = alter_zero::builtins::updated_notice(&syncs) {
+            self.toast(notice, ToastKind::Info);
+        }
+    }
+
+    /// Commit the `Edited built-ins` card under the banner when the sync
+    /// wrote a release's version beside a file the user edited
+    /// (`docs/builtin-updates.md`): framed and wrapped like the telemetry and
+    /// update cards, each `.new` named `~`-relative, over a blank spacer.
+    /// Chrome, never `history`.
+    ///
+    /// The offer is made once, so the card must not be lost: it waits while
+    /// an overlay is up — a bare `--resume` boots into its picker, and a
+    /// session picked there purge-rebuilds whatever was queued beneath it —
+    /// and while anything streams, and the loop bottom commits it the first
+    /// time the conversation is back on screen. Free when nothing was
+    /// offered; a headless run never offers.
+    pub(crate) fn flush_builtin_offers(&mut self) {
+        if self.builtin_offers.is_empty()
+            || self.headless
+            || self.inflight.is_some()
+            || self.app.is_streaming()
+            || self.app.view.is_overlay()
+            || !self.commits_allowed()
+        {
+            return;
+        }
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let offered: Vec<String> = std::mem::take(&mut self.builtin_offers)
+            .iter()
+            .map(|path| ui::display_cwd(path, home.as_deref()))
+            .collect();
+        let Some(body) = alter_zero::builtins::offered_notice(&offered) else {
+            return;
+        };
+        let width = self.term.screen().width;
+        self.term.insert_before(ui::notice_card_lines(
+            alter_zero::builtins::OFFERED_NOTICE_TITLE,
+            &body,
+            width,
+        ));
+        self.term.insert_before(vec![Line::default()]);
+        self.frame.schedule_frame();
+    }
+
     /// Raise the first agent-definition failure as a red toast — the
     /// `report_skill_errors` rule one feature over (`docs/subagents.md`): an
     /// `agents/*.md` that silently never becomes a type makes "the model says
@@ -866,7 +1081,12 @@ impl<'t> Session<'t> {
                 } = *loaded;
                 let session_checkpoints = session::parse_checkpoints(&text);
                 let recorded_model = session::parse_model(&text);
-                let restored = self.restore_final_checkpoint(&session_checkpoints);
+                // A headless resume leaves the working tree as it is: in a
+                // pipeline the tree is whatever the pipeline made it, and
+                // reverting it to the conversation's last checkpoint would
+                // undo that silently (docs/headless.md *Resume*).
+                let restored =
+                    !self.headless && self.restore_final_checkpoint(&session_checkpoints);
                 let count = items.len();
                 self.app.load_session(items);
                 // `paint_first_frame` commits the loaded transcript with no
@@ -891,6 +1111,9 @@ impl<'t> Session<'t> {
                     count,
                     torn,
                     session_checkpoints,
+                    // Each request's usage line stays where it sat
+                    // (docs/rollout-records.md).
+                    session::parse_usage(&text),
                     self.app.history_generation(),
                     recorded_model,
                     model.honoured,
@@ -925,8 +1148,16 @@ impl<'t> Session<'t> {
         // `/resume` rollout. It flows in through the normal flicker-free pipeline
         // (the next draw writes it above the box in one synchronized frame).
         let width = self.term.screen().width;
-        self.term.insert_before(ui::header_lines(&self.app, width));
-        self.term.insert_before(vec![Line::default()]);
+        let banner = ui::banner_block_lines(&self.app, width);
+        self.term.insert_before(banner.clone());
+        // Over an empty conversation the banner stays repaintable where it
+        // lands, so its mascot can move until the first cell is committed
+        // under it (docs/mascot-animation.md) — and its animation's clock
+        // starts with the frame that shows it.
+        if self.app.banner_is_live() {
+            self.term.anchor_above(banner);
+        }
+        self.greet_from_banner();
         // A --continue/--resume load commits the loaded conversation under the
         // banner through the same pipeline (docs/cli.md) — insert_before, never a
         // Purge: a fresh launch must not wipe the user's terminal scrollback (the
@@ -990,10 +1221,14 @@ impl<'t> Session<'t> {
                 }
             }
         }
-        // Cancel a dangling /model fetch (its detached worker exits on the
-        // cancel), and the /usage page's reads likewise.
-        self.models.cancel_model_fetch();
+        // Cancel every /model fetch still out (each detached worker exits on
+        // its cancel, and nothing it read is kept), and the /usage page's
+        // reads likewise.
+        self.models.cancel_model_fetches();
         self.cancel_usage_fetch();
+        // …and a `/plugins` clone or fetch, whose git child is killed
+        // (docs/plugins.md).
+        self.cancel_plugin_job();
         // Kill every background shell on the way out — the sweep is synchronous
         // (direct process-group kills), so quitting can't orphan a `ping`
         // (docs/background.md) — and cancel every subagent (their threads observe
@@ -1005,8 +1240,12 @@ impl<'t> Session<'t> {
         // cancelled above, so none of their hooks can land after the
         // session's end — and under the sink's own 2 s budget, so a quit
         // never hangs on a hook. Claude Code's reason for an interactive
-        // quit is `prompt_input_exit`.
-        self.models.end_conversation("prompt_input_exit");
+        // quit is `prompt_input_exit`; a headless run's end is `other`.
+        self.models.end_conversation(if self.headless {
+            "other"
+        } else {
+            "prompt_input_exit"
+        });
         // Tear down the MCP connections (docs/mcp.md): drops every transport
         // — killing the stdio children synchronously — and cancels a running
         // auth flow, so quitting can't orphan a server process.
@@ -1031,8 +1270,8 @@ impl<'t> Session<'t> {
     /// The loop-bottom bookkeeping, run after every event: the context gauge's
     /// re-read, the auto-compact check, the abandoned-permission release, the
     /// three on-disk mirrors (the rollout, the input history, the tip walk's
-    /// position), the herdr pane's state, the transcript pre-render, and the
-    /// detached-thread sweep.
+    /// position), the herdr pane's state, the transcript worker's next jobs,
+    /// and the detached-thread sweep.
     pub(crate) fn after_iteration(&mut self) {
         // The context gauge (docs/token-estimate.md): whatever this iteration
         // added to the history — a message sent, a tool's output — shows on
@@ -1063,6 +1302,9 @@ impl<'t> Session<'t> {
         // A newer release the check found mid-turn is announced here, at the
         // first idle loop bottom, never inside a streaming reply (docs/update.md).
         self.flush_pending_update_notice();
+        // …and the built-in card a bare `--resume` held behind its picker
+        // (docs/builtin-updates.md).
+        self.flush_builtin_offers();
         // Release any permission request dropped without an answer (Esc,
         // `/clear`): the tool thread parked on it would otherwise wait for a
         // decision that is never coming — a cancelled turn's reaps itself, but a
@@ -1102,19 +1344,45 @@ impl<'t> Session<'t> {
         // under it — a tool round landing, a server connecting
         // (docs/context-usage.md). Nothing at all while the page is closed.
         self.sync_context_usage();
-        // Pre-render whatever this iteration committed into the Ctrl+O transcript
-        // cache (docs/tool-view-performance.md) — a few integer compares when
-        // nothing did, one grammar-highlight per new item when something did, the
-        // whole loaded history on the iteration a `/resume` swapped it in. Paying
-        // it here, at the boundary, is what makes the Ctrl+O keypress itself
-        // O(live tail): the overlay never opens cold.
-        let width = self.term.screen().width;
-        self.transcript.warm(&self.app, width);
+        // Have whatever this iteration committed rendered for the Ctrl+O
+        // transcript (docs/tool-view-performance.md): a few integer compares
+        // when nothing did, a job for the worker per new item when something
+        // did, the whole loaded history a window at a time after a `/resume`
+        // swapped it in. The overlay still never opens cold — and the
+        // grammar-highlight that pays for that no longer runs here, between
+        // two keystrokes (docs/input-latency.md).
+        self.warm_transcript();
         // Reap detached backend threads (interrupt / `/clear` abandonments) that
         // have finished. `is_finished()` never blocks, so this can't stall the
         // loop; a thread still parked in its final network read is left until it
         // exits on its own. See `Session::abandon_inflight` / docs/interrupt.md.
         self.reaping.retain(|handle| !handle.is_finished());
+    }
+
+    /// Hand the transcript worker the history items the Ctrl+O cache does
+    /// not hold yet ([`ui::TranscriptCache::warm_jobs`]) — a window of them:
+    /// each result's arrival runs this again, which hands out the next.
+    ///
+    /// Not while the pager is open: its own draws render what it is missing,
+    /// there and then, so a job for the same item would only be refused.
+    fn warm_transcript(&mut self) {
+        let Some(worker) = &self.transcript_worker else {
+            return;
+        };
+        if self.app.view == alter_zero::app::View::ToolOutput {
+            return;
+        }
+        let width = self.term.screen().width;
+        let jobs = self.transcript.warm_jobs(&self.app, width);
+        worker.send(self.transcript.epoch(), jobs);
+    }
+
+    /// A history item's rows, back from the transcript worker: spliced onto
+    /// the Ctrl+O cache when they are still the next ones it wants
+    /// ([`ui::TranscriptCache::accept`]) — the loop bottom then hands the
+    /// worker the item after the window.
+    pub(crate) fn on_transcript_item(&mut self, done: ui::RenderedTranscriptItem) {
+        self.transcript.accept(done);
     }
 
     /// Write the spinner tip walk's position back to the per-user

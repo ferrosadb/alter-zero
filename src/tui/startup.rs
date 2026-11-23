@@ -7,19 +7,22 @@
 //! `--help` prints to normal stdout/stderr and exits, with no terminal to
 //! restore and no TUI flash. The `[PROMPT]` positional rides the directive
 //! untouched; the session it goes into is decided here, the turn it starts
-//! belongs to `bootstrap` (`Session::submit_startup_prompt`).
+//! belongs to `bootstrap` (`Session::submit_startup_prompt`). The system
+//! prompt flags' files are read here too, after `-C`, so a bad path is one
+//! line and exit 1 before anything starts (`docs/system-prompt.md`).
 //!
 //! The argument grammar, the help pages and the colour rule are the pure
 //! `cli` module's; this is the resolution (which file, does it parse), the
 //! one impure half of the colour decision (is the stream a terminal), and
 //! the printing.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use alter_zero::app::HistoryItem;
-use alter_zero::cli::{self, Cli, HelpPage, HelpStyle, SessionArgs, SessionStart};
-use alter_zero::output::OutputFormat;
+use alter_zero::cli::{self, Cli, HelpPage, HelpStyle, SessionArgs, SessionStart, SystemText};
+use alter_zero::headless;
 use alter_zero::session::{self, SessionMeta};
 
 use super::resume::{find_session_by_id, list_sessions, sessions_root};
@@ -30,9 +33,23 @@ use super::resume::{find_session_by_id, list_sessions, sessions_root};
 pub(crate) struct Startup {
     pub(crate) session: Option<StartupSession>,
     pub(crate) prompt: Option<String>,
-    /// `-p/--print` / `--output-format {FMT}`: run headless and write that
-    /// format to stdout instead of opening the interface (`docs/cli.md`).
-    pub(crate) output: Option<OutputFormat>,
+    /// `--permission-mode`: the run's permission seed, in either kind of run.
+    pub(crate) permission_mode: Option<alter_zero::permission::PermissionMode>,
+    /// `-p`: run headless, reporting this way (`docs/headless.md`) — the
+    /// prompt above then already holds what stdin added. `None` is the TUI.
+    pub(crate) print: Option<alter_zero::cli::PrintOptions>,
+    /// The system prompt flags' texts, files already read
+    /// (`docs/system-prompt.md`).
+    pub(crate) system_prompt: SystemPromptFlags,
+}
+
+/// What the run says about its system prompt (`docs/system-prompt.md`):
+/// the persona to use in place of the built-in one, and the text to add
+/// after it — each the flag's text, or its file's, read by [`prepare`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SystemPromptFlags {
+    pub(crate) replace: Option<String>,
+    pub(crate) append: Option<String>,
 }
 
 /// The `--continue`/`--resume` directive — the session to install before the
@@ -66,10 +83,11 @@ pub(crate) fn resolve_cli() -> Result<Startup, i32> {
     let parsed = cli::parse(std::env::args().skip(1)).map_err(|message| {
         // An `mcp` grammar error gets the subcommand's own usage block
         // (`mcp` only ever routes as the first argument).
-        let page = if std::env::args().nth(1).is_some_and(|first| first == "mcp") {
-            HelpPage::Mcp
-        } else {
-            HelpPage::Main
+        let page = match std::env::args().nth(1).as_deref() {
+            Some("mcp") => HelpPage::Mcp,
+            // …and a `plugin` one the plugin page's (docs/plugins.md).
+            Some("plugin") => HelpPage::Plugin,
+            _ => HelpPage::Main,
         };
         let style = help_style(std::io::stderr().is_terminal());
         eprintln!("{}", cli::usage_error(page, &message, style));
@@ -83,6 +101,9 @@ pub(crate) fn resolve_cli() -> Result<Startup, i32> {
         // The mcp subcommand family (docs/mcp-cli.md): does its file work
         // and exits — success rides the same Err(0) channel --help uses.
         Cli::Mcp(cmd) => Err(super::mcp_cli::run(&cmd)),
+        // The plugin subcommand family (docs/plugins.md *From a shell*),
+        // the same print-and-exit path.
+        Cli::Plugin(cmd) => Err(super::plugin_cli::run(&cmd)),
         // `alter-zero update` (docs/update.md): the same print-and-exit path.
         Cli::Update => Err(super::update_cli::run()),
         Cli::Version => {
@@ -92,16 +113,129 @@ pub(crate) fn resolve_cli() -> Result<Startup, i32> {
         Cli::Session(SessionArgs {
             start,
             prompt,
-            output,
+            cwd,
+            permission_mode,
+            print,
+            system_prompt,
+            append_system_prompt,
         }) => {
-            let session = resolve_session(start)?;
-            Ok(Startup {
-                session,
+            let began = Instant::now();
+            let flags = (system_prompt, append_system_prompt);
+            let prepared = prepare(
+                start,
                 prompt,
-                output,
+                cwd,
+                flags,
+                print.map(|options| options.output_format),
+            )
+            .map_err(|halt| match halt {
+                Halt::Usage(message) => {
+                    let style = help_style(std::io::stderr().is_terminal());
+                    eprintln!("{}", cli::usage_error(HelpPage::Main, message, style));
+                    2
+                }
+                Halt::Failed(message) => {
+                    match print {
+                        // A headless run's failure is its result too: a
+                        // script reading JSON meets an error object.
+                        Some(options) => super::headless::write(&headless::not_started(
+                            options.output_format,
+                            &message,
+                            began.elapsed(),
+                        )),
+                        None => eprintln!("{message}"),
+                    }
+                    1
+                }
+            })?;
+            Ok(Startup {
+                session: prepared.session,
+                prompt: prepared.prompt,
+                permission_mode,
+                print,
+                system_prompt: prepared.system_prompt,
             })
         }
     }
+}
+
+/// Why a launch stops before it starts — said once, by [`resolve_cli`].
+pub(crate) enum Halt {
+    /// Nothing sound to run: the usage block, exit 2.
+    Usage(&'static str),
+    /// Something to say about it, exit 1 — for a headless run in the form
+    /// its output format promises.
+    Failed(String),
+}
+
+/// What [`prepare`] resolved.
+struct Prepared {
+    session: Option<StartupSession>,
+    prompt: Option<String>,
+    system_prompt: SystemPromptFlags,
+}
+
+/// The working directory, the system prompt flags' texts, the conversation
+/// and — for a headless run — the prompt, resolved in that order, in cooked
+/// mode, before anything starts.
+fn prepare(
+    start: SessionStart,
+    prompt: Option<String>,
+    cwd: Option<PathBuf>,
+    (replace, append): (Option<SystemText>, Option<SystemText>),
+    headless: Option<headless::OutputFormat>,
+) -> Result<Prepared, Halt> {
+    // `-C` first: everything after reads the working directory —
+    // `--continue` looks for the newest conversation *there*.
+    if let Some(dir) = cwd
+        && let Err(err) = std::env::set_current_dir(&dir)
+    {
+        return Err(Halt::Failed(format!(
+            "Cannot run in {}: {err}",
+            dir.display()
+        )));
+    }
+    // After `-C`, so a relative path is read where the run happens.
+    let system_prompt = SystemPromptFlags {
+        replace: system_text(replace, "--system-prompt-file").map_err(Halt::Failed)?,
+        append: system_text(append, "--append-system-prompt-file").map_err(Halt::Failed)?,
+    };
+    let session = resolve_session(start).map_err(Halt::Failed)?;
+    // A headless run reads its prompt now, before anything else starts: an
+    // argument, stdin, or both (docs/headless.md).
+    // A conversational one reads stdin as its turns instead, once it runs
+    // (docs/headless.md *A conversation on stdin*).
+    let prompt = match headless {
+        Some(format) if format.is_conversational() => super::headless::conversation_prompt(prompt)?,
+        Some(_) => Some(super::headless::read_prompt(prompt.as_deref())?),
+        None => prompt,
+    };
+    Ok(Prepared {
+        session,
+        prompt,
+        system_prompt,
+    })
+}
+
+/// One system prompt flag's text: given inline, or its file read — at most
+/// one byte past the cap, which is enough to know it is over and is what
+/// keeps `/dev/zero` from filling memory (`docs/system-prompt.md`). `flag`
+/// names the file flag of this slot in the failure.
+fn system_text(text: Option<SystemText>, flag: &str) -> Result<Option<String>, String> {
+    let path = match text {
+        None => return Ok(None),
+        Some(SystemText::Inline(text)) => return Ok(Some(text)),
+        Some(SystemText::File(path)) => path,
+    };
+    let unreadable =
+        |err: std::io::Error| cli::system_prompt_file_unreadable(flag, &path, &err.to_string());
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)
+        .map_err(unreadable)?
+        .take(cli::SYSTEM_PROMPT_FILE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    cli::system_prompt_file_text(flag, &path, bytes).map(Some)
 }
 
 /// The style for a page written to a stream: the app's colour when the
@@ -125,7 +259,7 @@ pub(crate) fn stdout_style() -> HelpStyle {
 /// Resolve a session flag to the directive: `None` for a fresh session, the
 /// picker for a bare `--resume`, else the rollout file — found and parsed
 /// here, failing fast on stderr with exit 1.
-fn resolve_session(start: SessionStart) -> Result<Option<StartupSession>, i32> {
+fn resolve_session(start: SessionStart) -> Result<Option<StartupSession>, String> {
     match start {
         SessionStart::Fresh => Ok(None),
         SessionStart::Resume(None) => Ok(Some(StartupSession::Picker)),
@@ -145,26 +279,23 @@ fn resolve_session(start: SessionStart) -> Result<Option<StartupSession>, i32> {
                 Some(path) => Ok(Some(StartupSession::Load(Box::new(load_rollout(
                     path.to_path_buf(),
                 )?)))),
-                None => {
-                    eprintln!("No conversation found to continue in {}", cwd.display());
-                    Err(1)
-                }
+                None => Err(format!(
+                    "No conversation found to continue in {}",
+                    cwd.display()
+                )),
             }
         }
     }
 }
 
 /// Read + parse one rollout file for [`StartupSession::Load`], failing fast
-/// on stderr (exit 1) — the CLI twin of the picker arm's read, run before the
-/// terminal boots so an error never flashes a TUI.
-fn load_rollout(path: PathBuf) -> Result<LoadedSession, i32> {
-    let text = std::fs::read_to_string(&path).map_err(|err| {
-        eprintln!("Failed to read session file {}: {err}", path.display());
-        1
-    })?;
+/// with what went wrong — the CLI twin of the picker arm's read, run before
+/// the terminal boots so an error never flashes a TUI.
+fn load_rollout(path: PathBuf) -> Result<LoadedSession, String> {
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read session file {}: {err}", path.display()))?;
     let Some((meta, items)) = session::parse_session(&text) else {
-        eprintln!("Not a session file: {}", path.display());
-        return Err(1);
+        return Err(format!("Not a session file: {}", path.display()));
     };
     Ok(LoadedSession {
         path,

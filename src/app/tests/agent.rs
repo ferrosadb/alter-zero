@@ -117,6 +117,7 @@ fn finish_agent_group_snapshots_the_roster_around_the_outputs() {
             output: "+19°C".into(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         },
         StreamEvent::Chunk("Warsaw is 19°C.".into()),
         StreamEvent::StreamDone,
@@ -1354,6 +1355,7 @@ fn a_stopped_agents_prompts_leave_the_screen_and_the_rest_stay() {
         detail: None,
         agent: Some("general-purpose".into()),
         agent_id: Some(agent.into()),
+        check_failure: None,
     };
     let mut app = launched_background_agents();
     app.open_permission(asked_by("p1", "a1"));

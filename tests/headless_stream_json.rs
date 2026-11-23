@@ -1,57 +1,95 @@
-//! The headless machine-readable stream (`--output-format stream-json`),
+//! The headless machine-readable stream (`--output-format claude-stream-json`),
 //! driven end to end through the **real** agent loop and the crate's own
-//! offline backend ([`DummyAi`]) — no fake, no shortcut around `App` or the
+//! offline backend (`ALTER_ZERO_DUMMY=1`) — no fake, no shortcut around `App` or the
 //! backend seam. The caller is a phone voice agent, so these tests hold the
 //! contract it parses: assistant text arrives as an assistant message and as
 //! streamed text deltas, a tool call never does, and stdout is pure NDJSON.
 
-use std::io::Cursor;
-use std::path::Path;
-use std::time::Duration;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use alter_zero::headless::{self, Options};
-use alter_zero::stream::{DummyAi, MARKDOWN_TOUR};
+use alter_zero::stream::MARKDOWN_TOUR;
 
-/// The id a headless run reports and resumes under.
-const SESSION: &str = "headless-test-session";
+/// A scratch directory per run, removed when the run is read.
+struct Scratch(PathBuf);
 
-/// The offline backend with its pacing at zero, so a whole turn runs as fast
-/// as the scheduler lets it — the events themselves are the shipped script.
-fn dummy() -> DummyAi {
-    DummyAi::with_startup_delay(Duration::ZERO).with_chunk_delay(Duration::ZERO)
+impl Scratch {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "alter-zero-claude-stream-{}-{nanos}",
+            std::process::id()
+        ));
+        for dir in ["cfg", "sessions", "home", "skills", "agents", "work"] {
+            std::fs::create_dir_all(path.join(dir)).expect("a scratch dir");
+        }
+        Self(path)
+    }
 }
 
-/// Run one headless session and return everything it wrote to stdout.
-async fn run_async(prompt: Option<&str>, stdin: Option<&str>) -> String {
-    let mut out = Vec::new();
-    let turns = stdin.map(|text| Cursor::new(text.as_bytes().to_vec()));
-    let options = Options {
-        model: "dummy",
-        session_id: SESSION,
-        cwd: Path::new("/tmp"),
-        ask: None,
-    };
-    headless::run(&dummy(), options, prompt.map(str::to_string), turns, &mut out)
-        .await
-        .expect("a writable stdout");
-    String::from_utf8(out).expect("stdout is UTF-8")
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
-/// The blocking spelling the tests below read as — a fresh current-thread
-/// runtime, the same one `main` builds for the headless path.
+/// Run the real binary as `-p --output-format claude-stream-json` against the
+/// offline demo backend, its pacing at zero, `stdin` piped as further turns,
+/// and return everything it wrote to stdout.
 fn run(prompt: Option<&str>, stdin: Option<&str>) -> String {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a runtime")
-        .block_on(run_async(prompt, stdin))
+    let scratch = Scratch::new();
+    let dir = |name: &str| scratch.0.join(name);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_alter-zero"));
+    command
+        .args(["-p", "--output-format", "claude-stream-json"])
+        .args(prompt)
+        .current_dir(dir("work"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", dir("home"))
+        .env("ALTER_ZERO_CONFIG_DIR", dir("cfg"))
+        .env("ALTER_ZERO_SESSIONS_DIR", dir("sessions"))
+        .env("ALTER_ZERO_SKILLS_DIR", dir("skills"))
+        .env("ALTER_ZERO_AGENTS_DIR", dir("agents"))
+        .env("ALTER_ZERO_HISTORY_FILE", "/dev/null")
+        .env("ALTER_ZERO_PROJECT_CONFIG", "0")
+        .env("ALTER_ZERO_CHECKPOINTS", "0")
+        .env("ALTER_ZERO_TELEMETRY", "0")
+        .env("ALTER_ZERO_UPDATE_CHECK", "0")
+        .env("ALTER_ZERO_STARTUP_DELAY_MS", "0")
+        .env("ALTER_ZERO_CHUNK_DELAY_MS", "0")
+        .env("ALTER_ZERO_DUMMY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("the binary runs");
+    {
+        let mut pipe = child.stdin.take().expect("a stdin pipe");
+        pipe.write_all(stdin.unwrap_or_default().as_bytes())
+            .expect("stdin takes the turns");
+    }
+    let out = child.wait_with_output().expect("the run ends");
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("stdout is UTF-8")
 }
 
 /// Every record of a run, one per line — panicking on a line that does not
 /// decode, which is itself the contract (`b`).
 fn records(raw: &str) -> Vec<Value> {
-    assert!(raw.ends_with('\n'), "every record ends with a newline: {raw:?}");
+    assert!(
+        raw.ends_with('\n'),
+        "every record ends with a newline: {raw:?}"
+    );
     raw.lines()
         .map(|line| {
             assert!(!line.is_empty(), "no blank lines: {raw:?}");
@@ -151,12 +189,25 @@ fn stdout_carries_no_escapes_or_tui_chrome() {
         );
     }
     for line in raw.lines() {
-        for chrome in ["\u{25cf} ", "\u{23bf}", "\u{256d}", "\u{2570}", "\u{2500}\u{2500}"] {
+        for chrome in [
+            "\u{25cf} ",
+            "\u{23bf}",
+            "\u{256d}",
+            "\u{2570}",
+            "\u{2500}\u{2500}",
+        ] {
             assert!(!line.starts_with(chrome), "painted row {line:?}");
         }
     }
     const TYPES: [&str; 8] = [
-        "system", "user", "assistant", "stream_event", "tool_result", "usage", "error", "result",
+        "system",
+        "user",
+        "assistant",
+        "stream_event",
+        "tool_result",
+        "usage",
+        "error",
+        "result",
     ];
     for record in records(&raw) {
         let kind = record["type"].as_str().expect("every record is typed");
@@ -183,7 +234,13 @@ fn a_tool_call_is_never_spoken_as_assistant_text() {
     );
     // The call's args and output never reach the text the caller speaks.
     let spoken = assistant_texts(&records).concat();
-    for leak in ["ping -c 20", "142.250.72.14", "icmp_seq", "Exit code:", "\"command\""] {
+    for leak in [
+        "ping -c 20",
+        "142.250.72.14",
+        "icmp_seq",
+        "Exit code:",
+        "\"command\"",
+    ] {
         assert!(!spoken.contains(leak), "{leak} leaked into {spoken:?}");
     }
     // …and every tool_result is text-free too.
@@ -246,9 +303,13 @@ fn the_run_starts_with_an_init_record() {
     let init = &records[0];
     assert_eq!(init["type"], "system");
     assert_eq!(init["subtype"], "init");
-    assert_eq!(init["session_id"], SESSION);
-    assert_eq!(init["model"], "dummy");
-    assert_eq!(init["cwd"], "/tmp");
+    assert!(init["session_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(init["model"], "dummy_model_name");
+    assert!(
+        init["cwd"]
+            .as_str()
+            .is_some_and(|cwd| cwd.ends_with("work"))
+    );
 }
 
 /// A turn that ends cleanly reports success and carries the answer text.
@@ -259,5 +320,5 @@ fn a_clean_turn_ends_with_a_success_result() {
     assert_eq!(result["type"], "result");
     assert_eq!(result["subtype"], "success");
     assert_eq!(result["is_error"], false);
-    assert_eq!(result["session_id"], SESSION);
+    assert_eq!(result["session_id"], records[0]["session_id"]);
 }

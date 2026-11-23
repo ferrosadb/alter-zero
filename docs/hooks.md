@@ -131,6 +131,14 @@ matcher in real Claude Code configs, silently skipping it would be a footgun
 with no offsetting saving, and we compile it instead. A matcher that fails to
 compile is warned about and skipped.
 
+Once `regex` was this crate's alone, its `perf` features were dropped
+(`default-features = false`, `std` + `unicode`): the lazy and one-pass DFAs,
+the backtracker and the `aho-corasick` prefilters speed up searches through
+long texts, and a matcher is only ever tried against a tool name. The crate
+promises the same matches with or without them, `unicode` keeps `\w`, `\d`
+and `(?i)` as they were, and the binary is 0.57 MB smaller
+(`docs/binary-size.md`).
+
 **Tool names answer to both spellings.** The match query for the tool events
 is this app's own tool name — `bash`, `read`, `write`, `edit`, `agent` —
 lowercase, as the model sees it, and each also answers to its Claude Code
@@ -287,8 +295,9 @@ never existed:
   summarization; its notes stay out of the conversation record (they are
   ephemeral, like the compact chunks themselves).
 - **`SessionEnd`** fires as a conversation closes — `/clear` (`clear`),
-  a `/resume` switching away (`resume`), and a quit (`prompt_input_exit`),
-  Claude Code's reasons — **before** the recorder moves on, so it names the
+  a `/resume` switching away (`resume`), a quit (`prompt_input_exit`) and a
+  headless run's end (`other`, `docs/headless.md`), Claude Code's reasons —
+  **before** the recorder moves on, so it names the
   conversation that ended, and under a **2 s whole-event budget**: Claude
   Code caps this event at 1.5 s and codex clamps it to 3 s, because
   quitting must never hang on a hook. A quit fires it **after** the turn
@@ -366,7 +375,7 @@ The single most useful finding of the audit was that this codebase already had
 somewhere for every hook verdict to land, under another name. **No new
 `StreamEvent` variant was added**, and none was needed:
 
-- **A block** is `Approval::Reject { display, result }` — the permission
+- **A block** is `Approval::Reject { display, result, kind }` — the permission
   gate's own two-text rejection. It already renders as a red cell, already
   keeps the longer model-facing text on `ToolCall::context_output`, already
   round-trips through the rollout, and already shows correctly in Ctrl+D. A
@@ -531,7 +540,7 @@ and in Ctrl+O, every hook that ran with what it said under it:
 
 | event                          | the cell sits                                            |
 | ------------------------------ | -------------------------------------------------------- |
-| `Stop`                         | under the reply, above the continuation it bought or the turn's `Worked for` line |
+| `Stop`                         | under the reply, above the continuation it bought or the turn's `Hatched for` line |
 | `SubagentStop`                 | the same, on the agent's own transcript (its session view and its Ctrl+O) |
 | `SubagentStart`                | under the task that opens the agent's own transcript, where its first round reads them |
 | `SessionStart`, `UserPromptSubmit` | under the prompt that read them                      |
@@ -805,6 +814,17 @@ asks nothing about hooks (none would run), and turning it back on over hooks
 waiting for trust opens the review's hooks page.
 `ALTER_ZERO_HOOKS` seeds the row for a run (`=1` on, a falsy value off — the
 `ALTER_ZERO_TOOLS` pattern) and is never saved.
+
+### Plugins' hooks
+
+An enabled plugin's hooks files (`docs/plugins.md`) are a third layer after
+the user's and the project's — read, merged and trusted per file like them
+(`TrustState::set_plugins`, `docs/config-review.md`). Each handler from one
+runs with its plugin's directories in its environment —
+`CLAUDE_PLUGIN_ROOT`/`PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`/`PLUGIN_DATA` —
+stamped on the file at load (`HooksFile::with_env`) and exported by
+`run_handler`, so a command written `${CLAUDE_PLUGIN_ROOT}/check.sh` is
+expanded by the shell, as Claude Code's are.
 
 ## Module layout
 

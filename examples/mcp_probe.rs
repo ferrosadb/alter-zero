@@ -10,10 +10,17 @@
 //! ```
 //! This is the answer to "the `/mcp` page says a revision I don't expect":
 //! whatever it prints is what the server replied to this client, now.
+//!
+//! A server that wants a sign-in gets the sign-in's own discovery run too —
+//! the metadata documents only, read-only: nothing is registered and no
+//! browser opens — so "why can't I authenticate?" is answered the same way:
+//! the authorization server found, where it signs in and trades the code,
+//! whether it registers clients itself, and the scopes that would be asked
+//! for.
 
 use std::time::Duration;
 
-use alter_zero::llm::mcp::{ConnectError, connect};
+use alter_zero::llm::mcp::{ConnectError, connect, discover};
 use alter_zero::mcp::McpServerConfig;
 use alter_zero::stream::CancelToken;
 
@@ -37,6 +44,7 @@ fn main() {
             command: first.clone(),
             args: args[1..].to_vec(),
             env: Default::default(),
+            cwd: None,
         }
     };
     let started = std::time::Instant::now();
@@ -58,9 +66,41 @@ fn main() {
             }
         }
         Err(ConnectError::NeedsAuth(challenge)) => {
-            println!("needs authentication: {}", challenge.unwrap_or_default());
+            println!(
+                "needs authentication: {}",
+                challenge.as_deref().unwrap_or("(no challenge sent)")
+            );
+            sign_in_discovery(first, challenge.as_deref());
         }
         Err(ConnectError::Failed(detail)) => println!("failed: {detail}"),
     }
     println!("connected in : {:?}", started.elapsed());
+}
+
+/// What a sign-in to `url` would find — the discovery `/mcp`'s Authenticate
+/// runs, and nothing after it.
+fn sign_in_discovery(url: &str, challenge: Option<&str>) {
+    match discover(url, challenge) {
+        Ok(meta) => {
+            println!(
+                "  issuer       : {}",
+                meta.issuer.as_deref().unwrap_or("(none named)")
+            );
+            println!("  authorize    : {}", meta.authorization_endpoint);
+            println!("  token        : {}", meta.token_endpoint);
+            println!(
+                "  registration : {}",
+                meta.registration_endpoint.as_deref().unwrap_or(
+                    "none — signing in needs an OAuth client of your own: /mcp asks for \
+                         it, or the entry names it (oauth.clientId)"
+                )
+            );
+            println!(
+                "  scopes       : {}",
+                meta.scopes.as_deref().unwrap_or("(none asked for)")
+            );
+            println!("  resource     : {}", meta.resource);
+        }
+        Err(detail) => println!("  sign-in discovery failed: {detail}"),
+    }
 }

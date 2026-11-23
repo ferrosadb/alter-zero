@@ -37,7 +37,8 @@ Measured on an 8-core Apple-silicon Mac, warm `target/` (not a cold checkout):
 | `cargo test` (everything, every integration binary) | **~2 m 20 s** | once, before you call the work done (it is the gate's test step) |
 | `scripts/smoke.sh <id>` (one phase) | ~2–20 s | you touched the terminal boundary |
 | `scripts/smoke.sh` (every phase) | minutes, parallel | **only** for `src/tui/`, `term.rs`, rendering/geometry |
-| `cargo build --release` / `--example …` | 40–60 s+, plus a second profile in `target/`, which grows to ~10 GB | only when the task explicitly needs a release artifact |
+| `cargo build --release` / `--example …` | 40–60 s+, plus a second profile in `target/`, which grows to ~10 GB; the binary's link carries the idle text layout there, under a second more (`docs/text-layout.md`) | only when the task explicitly needs a release artifact |
+| `scripts/release.sh build` / `cargo build --profile dist` | ~4½ min cold on 4 cores, ~2 GB peak, a third profile in `target/`; never incremental (fat LTO relinks the whole program every time) | only when the task is the shipped binary itself — its size, its speed, or the release tooling (`docs/binary-size.md`) |
 
 `target/` grows to ~10 GB and is incremental. Deleting it to "clean up" costs a
 multi-minute full rebuild — don't, unless the user asks.
@@ -54,9 +55,13 @@ multi-minute full rebuild — don't, unless the user asks.
 | anything on screen (spacing, glyphs, colours, cursor) | one or two smoke phases; the whole suite only at the end |
 | a public item moved/renamed, or a `mod.rs` re-export | `cargo test --test api_surface` + `cargo doc --no-deps --lib` |
 | `src/cli.rs`, `--help`, arg parsing | `cargo test --lib cli::` + `cargo test --test cli_help` |
-| `src/pty/`, `src/subprocess.rs` | `cargo test --lib pty::` or `subprocess::` — plus `cargo test --test detached_exec` when the detach or the helper re-exec changed |
+| `src/headless.rs`, `src/tui/headless.rs`, anything `-p` reaches | `cargo test --lib headless::` + `cargo test --test headless` (the real binary over pipes, a stand-in provider on the loopback) + `scripts/smoke.sh 153` for the tty case |
+| `src/pty/`, `src/subprocess.rs` | `cargo test --lib pty::` or `subprocess::` — plus `cargo test --test detached_exec` when the detach or the helper re-exec changed (on a Mac, `cargo build` first: the terminal tests run through the built binary) |
 | `src/mcp/`, `src/llm/mcp/`, the `mcp` CLI | `cargo test --lib mcp::` (the filter matches both modules) + `cargo test --test mcp_cli` for the CLI |
+| `build.rs`, `layout/`, `scripts/text_layout.sh` | `cargo test --test text_layout` — the list's form and the linker-script generator; `ALTER_ZERO_TEXT_LAYOUT=1 cargo test --test text_layout` relinks the dev binary with the layout and checks the section is really there (a `dev` build is not laid out otherwise). Never edit `layout/idle-functions.txt` by hand: `scripts/text_layout.sh profile` writes it (`docs/text-layout.md`) |
 | a memory-sensitive path (per-turn/per-request/per-picture allocation) | the matching `tests/*_memory.rs` gate (`ls tests/*_memory.rs`) |
+| what an idle session costs at rest (anything that runs at startup, or a new always-on thread or channel) | `cargo build --release && scripts/text_layout.sh measure target/release/alter-zero` against the numbers in [`docs/text-layout.md`](docs/text-layout.md) — a measurement, not a gate; code that newly runs at startup belongs in `layout/idle-functions.txt` (take it again with `scripts/text_layout.sh profile`) |
+| something a keystroke waits behind — `src/frame.rs`, the loop's order in `src/tui/event_loop.rs`, anything a draw or the loop bottom does per frame or per event | its unit tests count work (builds, scans, renders), not time; for the time itself, `cargo build --release && cargo run --release --example latency_probe -- --scenario <shape>` against the numbers in [`docs/input-latency.md`](docs/input-latency.md) — a measurement, not a gate |
 | `providers.toml`, `src/llm/config.rs` | `cargo test --lib llm::config` — it pins the shipped provider set and the `snake_case` spellings |
 | `scripts/smoke/lib.sh`, `scripts/smoke.sh` (the phase readers or the selector) | `bash scripts/smoke/selftest.sh` — under a second, no app, no tmux |
 | `scripts/smoke/phases/`, screen behaviour | `cargo build && scripts/smoke.sh <ids>` — by **id**, and widen only if you must |
@@ -99,27 +104,34 @@ modules breaks the links that pointed at it.
 
 ## Linux vs macOS — what actually differs
 
-CI runs the gate and the smoke suite on `ubuntu-latest`, so **Linux is the
-reference**: `cargo test --lib` there is expected to be green, and any red is
-yours. On macOS a red run usually is not. Know which platform you are on before
-you diagnose anything. (CI's two macOS jobs run only the clipboard tests and the
-smoke readers' selftest.)
+CI runs the gate and the smoke suite on `ubuntu-latest`, and the gate but
+`fmt` on `macos-latest` too (the `clippy · test · doc (macOS)` job, beside the
+clipboard tests and the smoke readers' selftest). Both are
+expected to be green, so a red `cargo test --lib` is yours on either — once a
+Mac has the `alter-zero` binary built (below). Know which platform you are on
+before you diagnose anything: the two compile different code
+(`cfg(target_os = "linux")`) and run different tools (GNU and procps, or
+BSD).
 
-| | Linux (CI) | macOS |
+| | Linux (CI) | macOS (CI) |
 | --- | --- | --- |
-| `cargo test --lib` | green | **6 baseline failures** with `setsid` on `PATH`, **46** without it |
-| `setsid` | ships with util-linux | **absent**; `brew install util-linux`, then put it on `PATH` |
-| `ps … sid` | supported | **no `sid` keyword** — one test can never pass here |
-| `--lib` tests compiled | about 5,460 | about 5,430 — **35** are `cfg(target_os = "linux")` and never compile here, **6** (`clipboard/macos.rs`) compile only here; the 10 in `src/tui/` are bin-only on both |
+| `cargo test --lib` | green | green once the binary is built (`cargo build`, or any `cargo test`); **about 46 failures** before |
+| `setsid` | ships with util-linux | **absent**, and not needed: the terminal tests start their sessions through the built binary's helper, as the app does on a Mac |
+| `pkill`, `ps`, `od` | procps and GNU | BSD's: **`pkill` has no `-s` and its `-t` matches nothing (`ps -t` works), `ps` has no `sid`, `od` pads its columns** — code and tests must not lean on the GNU forms |
+| `--lib` tests compiled | about 6,540 | about 6,510 — **38** are `cfg(target_os = "linux")` and never compile here, **6** (`clipboard/macos.rs`) compile only here; the 10 in `src/tui/` are bin-only on both |
 | `scripts/smoke.sh` | bash 5 from the distro | needs **bash 4+**; macOS `/bin/bash` is 3.2 and dies |
 | `--list`, phase titles/tags | works | works — the readers were BSD-`sed`-broken once; `selftest.sh` pins them, and CI runs it on macOS |
 | `timeout`, `nproc`, `grep -P` | present | **absent** (`smoke.sh` already falls back to `sysctl -n hw.ncpu`) |
 | a stale incremental link | rare | **`Undefined symbols: … (.llvm.…)`** after a branch switch |
 
-**35 tests never run on macOS.** They are not skipped-and-reported; the Linux
+**38 tests never run on macOS.** They are not skipped-and-reported; the Linux
 `cfg` compiles them out, so nothing in the output mentions them. By file:
-`llm/exec.rs` 17, `pty/probe.rs` 8, `clipboard.rs` 4, `subprocess.rs` 4,
-`background.rs` 1, `pty/spawn.rs` 1. The modules themselves (`pty/probe`,
+`llm/exec.rs` 18, `pty/probe.rs` 8, `clipboard.rs` 4, `subprocess.rs` 4,
+`background.rs` 2, `pty/spawn.rs` 1, `llm/mcp/transport.rs` 1. Each asserts
+something only Linux has — the `/proc` probe, the foreground program's name,
+`setsid` detaching — and `docs/interactive-shell.md` *Limits* says what macOS
+does instead. A test of something every platform has stays `cfg(unix)`, with
+its Linux-only lines gated inside it. The modules themselves (`pty/probe`,
 `clipboard/linux`) have Linux-only bodies, and `tests/clipboard_linux.rs` is
 `#![cfg(target_os = "linux")]` — it compiles to **0 tests** on a Mac, silently.
 The reverse holds for `clipboard/macos.rs`'s 6 unit tests and
@@ -132,39 +144,35 @@ or the Linux half of the executor. Say in the commit which platform you
 actually ran. Those areas need the Linux CI run (or a container) to mean
 anything.
 
-### macOS: the six baseline failures
+### macOS: the terminal tests run through the built binary
 
-Do not chase them, do not "fix" them, and do not report them as regressions.
-They need a real Linux/tty environment or a `setsid` binary:
-
-- `pty::spawn::tests::the_session_leads_its_own_group_and_session` — macOS `ps`
-  has no `sid` keyword.
-- `llm::exec::tests::kill_asks_the_command_to_stop_before_it_insists`,
-  `…::indented_lines_reach_a_program_that_takes_pastes_as_one_paste`,
-  `…::a_key_name_sent_without_brackets_is_the_key_in_a_full_screen_program` —
-  SIGTERM/paste timing through the pty.
-- `background::tests::a_background_display_that_reads_whole_lines_is_never_told_of`,
-  `…::a_picker_reading_its_terminal_waits_however_its_line_animated`.
-
-Without `setsid` on `PATH`, the count is **46**: every tty-spawning test fails
-with `no way to give the command a terminal of its own here`. macOS ships no
-`setsid`; util-linux does. Put it on `PATH` before running the lib suite:
+A test that starts a terminal session gets it from the detach chain's TTY
+tiers (`subprocess::tty_tiers`): util-linux's `setsid -c`, then the app's own
+helper re-exec. macOS ships no `setsid`, so there the helper is the tier, for
+the app and its tests alike. A test binary's `main` is libtest's, so it cannot
+be the helper itself; the tests start their sessions through the `alter-zero`
+binary cargo builds beside them (`subprocess::test_detach_helper`).
+`cargo test` builds it before it runs anything. `cargo test --lib` does not,
+so on a fresh checkout build it once:
 
 ```bash
-PATH="/opt/homebrew/opt/util-linux/bin:$PATH" cargo test --lib
+cargo build
+cargo test --lib
 ```
 
-A green lib run with the six skipped:
+Without it about 46 tests fail with `no way to give the command a terminal of
+its own here (neither `setsid` nor the alter-zero helper is available)` — the
+environment, not your change. Rebuild it after changing the helper itself
+(`subprocess::run_detached_exec_if_requested`), since a test runs whatever
+binary is there.
 
-```bash
-PATH="/opt/homebrew/opt/util-linux/bin:$PATH" cargo test --lib -- \
-  --skip background::tests::a_background_display_that_reads_whole_lines \
-  --skip background::tests::a_picker_reading_its_terminal_waits \
-  --skip llm::exec::tests::a_key_name_sent_without_brackets \
-  --skip llm::exec::tests::indented_lines_reach_a_program \
-  --skip llm::exec::tests::kill_asks_the_command_to_stop \
-  --skip pty::spawn::tests::the_session_leads_its_own_group
-```
+CI's macOS job runs with no `setsid` on `PATH`, and fails if an image ever
+puts one there, so the tier a Mac runs on is the tier the suite tests.
+
+A test that fails on a Mac with the binary built is a real failure: diagnose
+it. Six such failures used to be listed here as a baseline. One was `bashkill`
+never sending `SIGTERM` on macOS (its `pkill` has no `-s`); the rest were
+tests that read GNU output or asserted Linux-only behaviour.
 
 Other platform notes:
 
@@ -197,14 +205,21 @@ Other platform notes:
 
 ### What a platform-blind diagnosis gets wrong
 
-Two failure modes to name, because both look like your bug and are not:
+Three failure modes to name, because each looks like something it is not:
 
-- **"My change broke 46 tests"** on a fresh Mac — it did not; `setsid` is
-  missing. Confirm with `command -v setsid` before reading a single stack trace.
+- **"My change broke 46 tests"** on a fresh Mac — it did not; the
+  `alter-zero` binary is not built, and with no `setsid` there the terminal
+  tests have no way to start a session. Confirm with
+  `ls target/debug/alter-zero` before reading a single stack trace;
+  `cargo build` fixes it.
 - **"It passes on macOS, ship it"** for anything in `pty/probe`, `exec`,
   `subprocess`, `background` or `clipboard` — half of that code is behind
   `cfg(target_os = "linux")` and macOS never compiled it. Those need the Linux
   CI run (or a container) to mean anything.
+- **"It passes on Linux, ship it"** for code or a test that runs a system
+  tool — `pkill`, `ps`, `od`, `sed`. Linux's are procps and GNU, a Mac's are
+  BSD's, and they take different flags and print different spacing. Read the
+  BSD man page, or let CI's macOS job tell you.
 
 ## Working style (standing instructions, not suggestions)
 

@@ -18,12 +18,13 @@ per change.
   Show images             true
   Image width             120
   Auto-resize images      true
+  Animate mascot          true
   Error retry             3
   Tools                   true
   Permission mode         auto
   ...
   Max tool calls          0
-  (1/20)
+  (1/21)
 
   Hide the model's chain-of-thought…
 
@@ -33,7 +34,7 @@ per change.
 
 ## The settings
 
-Twenty rows, each one a knob the running session actually reads. Every value
+Twenty-one rows, each one a knob the running session actually reads. Every value
 **cycles** — there is no free-text field anywhere, so Enter and Space mean the
 same thing on every row and the menu never needs an edit mode.
 
@@ -44,7 +45,8 @@ same thing on every row and the menu never needs an edit mode.
 | **Show images** | `true` / `false` | Whether a pasted screenshot and the `read` tool's image reads are drawn as pictures in the conversation (`docs/images.md`). `false (unavailable)` when the terminal can't draw one. Cycling it purge-rebuilds, so committed pictures appear or vanish at once. |
 | **Image width** | `60` / `80` / `120` | An inline picture's width **cap**, in columns — clamped to the terminal, and never used to blow a small picture up. Cycling it purge-rebuilds like **Show images**. |
 | **Auto-resize images** | `true` / `false` | Whether a large picture is downscaled to 2000×2000 before it is **sent to the model** (`docs/images.md`). Nothing to do with the display, so the row stays available even on a terminal that can't draw. |
-| **Error retry** | `0` / `1` / `2` / `3` / `5` / `10` | How many times a request the provider **answers badly** (a `5xx`, a reset, a stall) is retried before the error surfaces (`llm::retry`, the `retrying n/N` status). A connection that cannot be made at all is not counted: it is **waited for**, every few seconds for as long as it takes, under the `Waiting for internet…` status (`docs/offline.md`). `0` means never retry, the wait included. Was the fixed `MAX_RETRIES = 3`. |
+| **Animate mascot** | **`true`** / `false` | Whether the banner mascot blinks, glances and plays its own move while the conversation under it is empty — watching what is typed, napping when it is left alone, starting awake at a key — and in the `/mascot` picker's preview (`docs/mascot-animation.md`). Read by the frame that poses the banner, so `false` puts it back to rest on the very next draw and schedules nothing: an idle session writes nothing to the terminal. Seeded from `ALTER_ZERO_MASCOT_ANIMATION`. Needs nothing from the host, so it is never unavailable. |
+| **Error retry** | `0` / `1` / `2` / `3` / `5` / `10` | How many times a request the provider **answers badly** (a `5xx`, a reset, a stall) is retried before the error surfaces (`llm::retry`, the `retrying n/N` status). A connection that cannot be made at all is not counted: it is **waited for**, every few seconds for as long as it takes, under the `Waiting for internet…` status (`docs/offline.md`). `0` means never retry, the wait included. Was the fixed `MAX_RETRIES = 3`. Auto mode's safety check retries on the same budget (`docs/permissions.md` *Reaching a verdict*) — silently, and without the wait: a verdict whose host cannot be reached asks the user instead. |
 | **Tools** | `true` / `false` | Whether `bash`/`read`/`write`/`edit`/`agent` are offered to the model at all (`docs/tools.md`). Seeded from `ALTER_ZERO_TOOLS`. Off also withdraws both halves of the `<system-reminder>` — the skills listing and the agent-type listing (`docs/subagents.md`): a roster for a tool the request never carries is a dead end. |
 | **Permission mode** | `manual` / `edit` / **`auto`** / `master` | The same posture Shift+Tab cycles (`docs/permissions.md`) — the row is a second door onto one state, not a copy of it. **`auto` until a project saves another mode**, which it keeps per project in `permissions.json` rather than `settings.json`; seeded for a run, and never saved, from `ALTER_ZERO_PERMISSION_MODE`. |
 | **Checkpoints** | **`false`** / `true` | Per-turn working-directory snapshots (`docs/checkpoint.md`). **Off until a directory turns it on** (`docs/per-directory-state.md`); seeded from `ALTER_ZERO_CHECKPOINTS`; forced to `false`, unchangeably, when the store can't run at all (no git, no config home, or a cwd the feature refuses — see *Unavailable settings*). |
@@ -53,6 +55,7 @@ same thing on every row and the menu never needs an edit mode.
 | **Hooks** | **`true`** / `false` | Whether the lifecycle hooks the user trusted run — the user's `~/.alter-zero/hooks.json` and a project's — around tool calls, turns, and the session boundaries (`docs/hooks.md`). **On until a directory turns it off** (`docs/per-directory-state.md`); each hook runs once it is trusted in the startup review (`docs/config-review.md`); seeded from `ALTER_ZERO_HOOKS`; **unavailable** when no hooks file resolved or it had nothing runnable in it. |
 | **Skills** | `true` / `false` | Whether the `skill` tool is offered and the `<system-reminder>` listing rides the context (`docs/skills.md`). Seeded from `ALTER_ZERO_SKILLS`; **unavailable** when no `SKILL.md` loaded — there is nothing to turn on. |
 | **MCP** | **`true`** / `false` | Whether the MCP servers connect and the model is offered their tools and instructions (`docs/mcp.md` *MCP off for the session*). **On until a directory turns it off**, the Hooks posture. Off stops every server, and each keeps its own `/mcp` enabled or disabled state, so turning the row back on brings back exactly the servers that were enabled; `/mcp` still opens and says MCP is off. Seeded from `ALTER_ZERO_MCP`; **unavailable** when no server is declared in the user's `mcp.json` or a project's. |
+| **Image generation** | **`true`** / `false` | Whether the `imagegen` tool — images made with the ChatGPT Codex sign-in, whatever provider the chat runs on — and the built-in `imagegen` skill that teaches it are offered (`docs/imagegen.md`). **On until a directory turns it off**, the MCP posture; it rides **Tools** like **Skills** does. Seeded from `ALTER_ZERO_IMAGEGEN`; **unavailable** without a ChatGPT Codex sign-in, and the only unavailable row whose toast says how to make it available (`SettingKey::unavailable_reason`: sign in with `/login`). |
 | **Temperature** | `default` / `0.0` / `0.3` / `0.5` / `0.7` / `1.0` | The sampling temperature every request carries; `default` sends none and leaves it to the provider. Seeded from `ALTER_ZERO_TEMPERATURE`. |
 | **Max tool calls** | **`0`** / `5` / `10` / `20` / `50` / `100` | How many tool **calls** one turn may run before it gives up (`llm::agent::run_agent`'s cap). **`0` is no limit, and the default** — see below. |
 | **Ask timeout** | `5m` / **`10m`** / `20m` / `30m` / `1h` / `never` | How long an `AskUserQuestion` question waits on an **idle** user before it resolves unanswered and the agent keeps working on its own judgment (`docs/ask.md`) — any key press or paste starts the wait over, and the modal's closing rule counts it down. `never` stops the clock. Seeded from `ALTER_ZERO_ASK_TIMEOUT_SECS` (seconds, `0` = never), whose odd values still read whole (`1m 30s`). Read where it is used: the draw tick reads it on every reading of the idle clock, so a new value applies to a wait already running and `never` stops it at once. |
@@ -164,7 +167,7 @@ page (`docs/view-flow.md` *A picker's page*):
     Show images          true
     Image width          120
     Auto-resize images   true
-    (1/20)
+    (1/21)
 
     Hide the model's chain-of-thought instead of streaming it above the composer
 
@@ -301,6 +304,10 @@ docs`.
     gaining each one's tools as its connect lands, opens the review's servers
     page over project servers waiting for it, and names a config problem the
     startup kept quiet about (`docs/mcp.md`).
+  - **Image generation** rebuilds the backend when the tool set flips
+    (`ModelSession::set_imagegen`) and rescans the skills, since the built-in
+    `imagegen` skill is read only while its tool is offered
+    (`docs/imagegen.md`). **Tools** rescans for the same reason.
   - **Verbose output** purge-rebuilds the conversation, the **Show images**
     rule: every committed read and search changes shape — a cell per call, or
     one collapsed line — and the rebuild repaints them from history. Turning
@@ -309,6 +316,10 @@ docs`.
   - **Hide thinking** and **Auto compact** need nothing beyond the pure flag:
     `tui::stream` consults `App::settings().show_thinking()` per phase and
     `App::should_auto_compact` gates on the flag.
+  - **Animate mascot** needs nothing either: the frame that poses the banner
+    reads the row (`App::banner_pose`), so off repaints it at rest on the
+    next draw and no further frame is scheduled, and on picks the animation
+    up where its clock is (`docs/mascot-animation.md`).
   - **Show tips** writes its own file — `tips.json`, beside the walk's
     position (`docs/tips.md`) — and needs nothing else: `App::tip` reads the
     row every frame, so the row under the status line goes (or comes) at the
@@ -383,7 +394,8 @@ Precedence at startup is the same rule the rest of the app follows — **the
 environment wins**: an explicitly set `ALTER_ZERO_*` variable overrides the saved
 value for that one setting (`tui::config::apply_setting_overrides` — including
 `ALTER_ZERO_HOOKS`, which seeds the **Hooks** row the way `ALTER_ZERO_TOOLS`
-seeds **Tools**, and `ALTER_ZERO_MCP`, which seeds **MCP** the same way).
+seeds **Tools**, `ALTER_ZERO_MCP`, which seeds **MCP** the same way, and
+`ALTER_ZERO_IMAGEGEN`, which seeds **Image generation**).
 Anything neither set nor saved takes its default.
 
 And, as with `ALTER_ZERO_MODEL`, the environment **never sticks**. A save is a

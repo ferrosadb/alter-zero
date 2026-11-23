@@ -9,7 +9,7 @@
 use super::*;
 
 use crate::app::{
-    FileSearch, LocalChoice, Message, ModelFetchError, ProviderChoice, RetryInfo, SigninKind,
+    FileSearch, LocalChoice, Message, ProviderChoice, ProviderList, RetryInfo, SigninKind,
     SubscriptionChoice,
 };
 
@@ -21,6 +21,7 @@ mod classifier_view;
 mod config_review_view;
 mod context_usage_view;
 mod context_view;
+mod discord_view;
 mod donate_view;
 mod export_view;
 mod file_cell;
@@ -42,12 +43,14 @@ mod model_view;
 mod offline;
 mod palette;
 mod permission_view;
+mod plugins_view;
 mod reasoning;
 mod resume_view;
 mod secrets_view;
 mod settings_view;
 mod skills_view;
 mod spinner_view;
+mod sponsor_view;
 mod status;
 mod stream_render;
 mod stream_stress;
@@ -58,6 +61,7 @@ mod tips;
 mod tool;
 mod tool_group;
 mod transcript;
+mod transcript_navigation;
 mod usage_view;
 mod view_flow;
 mod wrap;
@@ -213,6 +217,7 @@ pub(super) fn stamped_history() -> Vec<HistoryItem> {
             batch: None,
             call_id: None,
             position: None,
+            run: crate::stream::ToolRun::default(),
         }),
         HistoryItem::Message(Message {
             role: Role::Assistant,
@@ -279,6 +284,7 @@ pub(super) fn tool(name: &str, args: &str, status: ToolStatus, output: &str) -> 
         batch: None,
         call_id: None,
         position: None,
+        run: crate::stream::ToolRun::default(),
     }
 }
 
@@ -341,6 +347,7 @@ pub(super) fn file_picker(query: &str, matches: Vec<FileMatch>, selected: usize)
         query: query.to_string(),
         matches,
         waiting: false,
+        truncated: false,
     });
     app
 }

@@ -155,14 +155,15 @@ Read them before touching the loop, `term.rs`, or the wrap/markdown renderers.
 
 ## Testing
 
-`cargo test` runs the unit tests (around 5,500, in `#[cfg(test)]` modules beside
+`cargo test` runs the unit tests (around 6,500, in `#[cfg(test)]` modules beside
 the code they cover) plus the integration tests in `tests/` that are not
 `#[ignore]`d. It is offline and deterministic — keep it that way.
 
 [`AGENTS.md`](AGENTS.md) maps a change to the smallest check that can fail, with
 measured times — run that per edit and the full suite once at the end. It also
-lists the baseline failures this platform starts with, so a red run is not
-mistaken for a regression.
+says what a Mac needs for the suite (the binary built, which the terminal tests
+start their sessions through) and what differs between Linux and macOS, so a
+red run is read for what it is.
 
 | Suite | How | Run it when |
 | --- | --- | --- |
@@ -301,9 +302,10 @@ than in a diff.
 
 Cutting a release is a maintainer task and is fully scripted: `scripts/release.sh
 prepare X.Y.Z`, a commit, an annotated `vX.Y.Z` tag, a push. The tag push runs
-`.github/workflows/release.yml` — the gate, one build per platform, checksums,
-verification, and a GitHub release whose notes are the changelog's section for
-that version. `workflow_dispatch` rehearses the whole pipeline without publishing
+`.github/workflows/release.yml` — the gate, one build per platform (in the
+`dist` profile, whole-program LTO: [`docs/binary-size.md`](docs/binary-size.md)),
+checksums, verification, and a GitHub release whose notes are the changelog's
+section for that version. `workflow_dispatch` rehearses the whole pipeline without publishing
 anything, and every step runs locally the same way
 ([`docs/release.md`](docs/release.md)).
 

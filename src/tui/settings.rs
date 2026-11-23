@@ -97,9 +97,10 @@ impl Session<'_> {
     ///
     /// The startup walk alone left a session frozen at the skills it booted
     /// with: adding one meant restarting, and a skill the *agent* had just
-    /// written for you was invisible to the very next turn. The walk is four
-    /// to six `read_dir`s and one small read per skill, against a turn that is
-    /// about to make a network request.
+    /// written for you was invisible to the very next turn. The walk is three
+    /// `read_dir`s per directory from the cwd up to the project root plus three
+    /// personal ones (six at a repo root, nearly all `NotFound`) and one small
+    /// read per skill, against a turn that is about to make a network request.
     ///
     /// Four things follow from the new set, and they are spelled out here for
     /// the reason `apply_skill_toggle` spells out its four: the shared
@@ -115,8 +116,18 @@ impl Session<'_> {
     /// skill appeared still carried no `<system-reminder>` — the listing
     /// arrived a turn late, which reads exactly like the rescan not working.
     pub(crate) fn rescan_skills(&mut self) {
-        let (skills, errors) =
-            alter_zero::llm::skill::load_skills(&self.cwd, config::config_home().as_deref());
+        // The `imagegen` tool first (docs/imagegen.md): a ChatGPT sign-in
+        // since the last turn turns it on, and with it the seeded skill that
+        // drives it, which the walk withholds while the tool is not offered.
+        self.models.refresh_imagegen();
+        let (mut skills, errors) = alter_zero::llm::skill::load_skills(
+            &self.cwd,
+            config::config_home().as_deref(),
+            self.models.imagegen_offered(),
+        );
+        // …and the enabled plugins' skills and commands after them, each
+        // `{plugin}:{name}` (docs/plugins.md).
+        skills.extend(self.plugins.skills());
         self.skill_registry.replace(skills);
         self.sync_setting_availability();
         self.sync_listings();
@@ -133,8 +144,9 @@ impl Session<'_> {
     /// `SKILL.md` rescan and for the same reason: a startup-only discovery
     /// froze the session at what it booted with, so a type you added — or one
     /// the agent had just written *for* you — was unlaunchable until a
-    /// restart. The cost is three `read_dir`s against a turn about to hit the
-    /// network.
+    /// restart. The cost is one `read_dir` per directory from the cwd up to
+    /// the project root plus the user root (two at a repo root) against a turn
+    /// about to hit the network.
     ///
     /// The registry is the shared handle every backend holds, so replacing
     /// its contents is all a launch needs; only the listing has to be
@@ -142,8 +154,9 @@ impl Session<'_> {
     /// depend on which types exist (the tool set does not name them — the
     /// reminder does).
     pub(crate) fn rescan_agents(&mut self) {
-        let (agents, errors) =
+        let (mut agents, errors) =
             alter_zero::llm::subagent::load_agents(&self.cwd, config::config_home().as_deref());
+        agents.extend(self.plugins.agents());
         self.subagents.replace(agents);
         self.sync_listings();
         let fresh = alter_zero::subagents::unreported_errors(&self.reported_agent_errors, &errors);
@@ -197,6 +210,9 @@ impl Session<'_> {
             skills: !self.skill_registry.is_empty(),
             // …nor when no MCP server is declared anywhere (`docs/mcp.md`).
             mcp: self.mcp.has_servers(),
+            // …nor image generation without a ChatGPT Codex sign-in to make
+            // images with (`docs/imagegen.md`).
+            imagegen: self.models.chatgpt_signed_in(),
             // Whether this terminal can draw a picture (`docs/images.md`).
             images: self.term.image_capability().0,
             // Nowhere to keep an install id without a config home — and
@@ -256,7 +272,10 @@ impl Session<'_> {
             // a tool it was told it had (`docs/skills.md`).
             SettingKey::Tools => {
                 self.models.set_tools(settings.tools);
-                self.sync_listings();
+                // The rescan re-renders the listing — and re-decides whether
+                // the built-in `imagegen` skill is read, since its tool rides
+                // the tool set (docs/imagegen.md).
+                self.rescan_skills();
             }
             // The retry budget rides every round of every turn — the main
             // one's and a subagent's.
@@ -300,6 +319,13 @@ impl Session<'_> {
             // Off stops every server and withdraws their tools; on connects
             // the ones the user has enabled in `/mcp` (docs/mcp.md).
             SettingKey::Mcp => self.apply_mcp_setting(settings.mcp_active()),
+            // The tool rides the backend build, and the skill that teaches it
+            // is read only while it is offered — so the row does both
+            // (docs/imagegen.md).
+            SettingKey::ImageGen => {
+                self.models.set_imagegen(settings.imagegen);
+                self.rescan_skills();
+            }
             // The picture geometry: republish the policy, drop the encoded
             // pictures, and rebuild so the committed ones change with it.
             SettingKey::ShowImages | SettingKey::ImageWidth => {
@@ -322,8 +348,13 @@ impl Session<'_> {
             SettingKey::Verbose => rebuild = true,
             // Read where they are used — nothing to rebuild. The ask timeout
             // is read by the draw tick on every reading of the idle clock, so
-            // `never` stops a running wait at once (docs/ask.md).
-            SettingKey::HideThinking | SettingKey::AutoCompact | SettingKey::AskTimeout => {}
+            // `never` stops a running wait at once (docs/ask.md); the mascot
+            // row is read by the frame that poses the banner, so off puts it
+            // back to rest on the very next draw (docs/mascot-animation.md).
+            SettingKey::HideThinking
+            | SettingKey::AutoCompact
+            | SettingKey::AskTimeout
+            | SettingKey::AnimateMascot => {}
             // Shift+Tab's path owns this one; the menu never routes it here.
             SettingKey::PermissionMode => {}
             // The one per-user row: its file is telemetry.json, and turning

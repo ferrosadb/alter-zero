@@ -6,7 +6,10 @@
 //! specific one, bare `--resume` boots into the `/resume` picker, a quoted
 //! `[PROMPT]` is sent as the first turn of whichever session those open —
 //! and a quit that recorded anything prints [`resume_hint`]'s copy-paste
-//! command.
+//! command. The system prompt flags (`--system-prompt`,
+//! `--append-system-prompt` and their `-file` forms, `docs/system-prompt.md`)
+//! parse here to a [`SystemText`]; the files are read at the boundary, and
+//! what their bytes come to is [`system_prompt_file_text`]'s verdict.
 //!
 //! This module owns the parse (`argv` → [`Cli`], with usage errors as
 //! `Err(message)`), the two `--help` pages ([`help`], rendered plain or in
@@ -27,11 +30,14 @@
 //! boundary's (`tui::mcp_cli`).
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::headless::OutputFormat;
 use crate::mcp::{self, McpServerConfig};
-use crate::output::{OutputFormat, STREAM_JSON};
+use crate::permission::PermissionMode;
 
 /// One parsed invocation: a TUI run ([`Cli::Session`] — the flagless
 /// default included), one of the two print-and-exit flags, or the `mcp`
@@ -48,32 +54,114 @@ pub enum Cli {
     /// `mcp …` as the first argument: manage the user MCP config file
     /// (`docs/mcp-cli.md`).
     Mcp(McpCli),
+    /// `plugin …` as the first argument: install and manage plugins and the
+    /// marketplaces they come from (`docs/plugins.md` *From a shell*).
+    Plugin(PluginCli),
     /// `update` as the first argument: install the newest release over this
     /// binary when one is out (`docs/update.md`). Takes nothing.
     Update,
 }
 
-/// A TUI run's arguments (`docs/cli.md`): which conversation to open, and
-/// the message to send into it first — `None` opens on an empty composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A session run's arguments (`docs/cli.md`): which conversation to open,
+/// the message to send into it first — `None` opens on an empty composer —
+/// where to run, and whether to run with a screen at all (`-p`,
+/// `docs/headless.md`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionArgs {
     /// How the session starts.
     pub start: SessionStart,
-    /// `[PROMPT]` positional, verbatim: the first turn of a fresh
+    /// The `[PROMPT]` positional, verbatim: the first turn of a fresh
     /// session, or the next turn of the one `--continue`/`--resume {id}`
     /// reopens. Never blank (the parse refuses one), never combined with
-    /// the bare picker (likewise).
+    /// the bare picker (likewise). A headless run without one reads its
+    /// prompt from stdin.
     pub prompt: Option<String>,
-    /// `-p/--print` / `--output-format {FMT}`: run headless and write that
-    /// format to stdout, instead of opening the interface. `None` is the
-    /// interactive default (`docs/cli.md`).
-    pub output: Option<OutputFormat>,
+    /// `-C` / `--cwd`: the directory the run starts in — `chdir`ed to before
+    /// anything reads the working directory, `--continue`'s search included.
+    pub cwd: Option<PathBuf>,
+    /// `--permission-mode`: the run's permission posture — the flag form of
+    /// `ALTER_ZERO_PERMISSION_MODE`, outranking it and the project's saved
+    /// mode, and never saved (`docs/permissions.md`).
+    pub permission_mode: Option<PermissionMode>,
+    /// `-p` / `--print`: run headless with these options — no screen, the
+    /// answer on stdout (`docs/headless.md`). `None` is the TUI.
+    pub print: Option<PrintOptions>,
+    /// `--system-prompt` / `--system-prompt-file`: the persona for this run,
+    /// in place of the built-in one — the flag form of
+    /// `ALTER_ZERO_SYSTEM_PROMPT`, outranking it (`docs/system-prompt.md`).
+    pub system_prompt: Option<SystemText>,
+    /// `--append-system-prompt` / `--append-system-prompt-file`: text added
+    /// after whichever persona the run has, before its `## Environment`
+    /// block (`docs/system-prompt.md`).
+    pub append_system_prompt: Option<SystemText>,
 }
 
-/// How a TUI run begins — the session flags, one-to-one.
+/// Where one of the system prompt flags' text comes from
+/// (`docs/system-prompt.md`): given inline, or a file the boundary reads —
+/// after `-C`, bounded by [`SYSTEM_PROMPT_FILE_MAX_BYTES`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemText {
+    /// `--system-prompt` / `--append-system-prompt`: the text, verbatim.
+    Inline(String),
+    /// `--system-prompt-file` / `--append-system-prompt-file`: the path as
+    /// given.
+    File(PathBuf),
+}
+
+/// The most a system prompt file may hold. A prompt rides every request, so
+/// a megabyte of it is already past most context windows — and the bound is
+/// what keeps a path like `/dev/zero` from filling memory: the boundary
+/// reads one byte past it and no further (`docs/system-prompt.md`).
+pub const SYSTEM_PROMPT_FILE_MAX_BYTES: usize = 1024 * 1024;
+
+/// What a system prompt file's bytes come to (`docs/system-prompt.md`): the
+/// text, unchanged, or the run's failure in the words it is reported in —
+/// over the cap, not UTF-8, or blank. The size is judged first, since a read
+/// cut at the cap can end mid-character. A byte order mark at the start is
+/// dropped: it is the file's encoding, not its text, and no trim takes it.
+/// `flag` is the file flag as typed, `path` the path as given.
+pub fn system_prompt_file_text(flag: &str, path: &Path, bytes: Vec<u8>) -> Result<String, String> {
+    let path = path.display();
+    if bytes.len() > SYSTEM_PROMPT_FILE_MAX_BYTES {
+        return Err(format!("{flag} {path} is larger than 1 MiB"));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| format!("{flag} {path} is not UTF-8 text"))?;
+    let text = match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    };
+    if text.trim().is_empty() {
+        return Err(format!("{flag} {path} is empty"));
+    }
+    Ok(text)
+}
+
+/// The line a system prompt file that cannot be opened or read is reported
+/// with — the flag, the path as given, and the operating system's `cause`.
+#[must_use]
+pub fn system_prompt_file_unreadable(flag: &str, path: &Path, cause: &str) -> String {
+    format!("Cannot read {flag} {}: {cause}", path.display())
+}
+
+/// A headless run's own options (`docs/headless.md`) — the flags that mean
+/// nothing with a screen, so the parse refuses them without `-p`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrintOptions {
+    /// `--output-format`: how the run reports.
+    pub output_format: OutputFormat,
+    /// `--max-turns`: the most model replies the lead agent may make over
+    /// the whole run — Claude Code's agentic turns. `None` is no limit.
+    pub max_turns: Option<NonZeroUsize>,
+    /// `--verbose`: log each step of the run to stderr. Without it stderr
+    /// says only what went wrong or needs attention.
+    pub verbose: bool,
+}
+
+/// How a session run begins — the session flags, one-to-one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SessionStart {
     /// No session flag: a fresh conversation.
+    #[default]
     Fresh,
     /// `--continue` / `-c`: resume the newest session recorded in this cwd.
     Continue,
@@ -109,6 +197,38 @@ pub enum McpCli {
     Help,
 }
 
+/// One parsed `plugin` subcommand (`docs/plugins.md` *From a shell*). A
+/// `<plugin>` is kept as typed — `name` or `name@marketplace` — and resolved
+/// against what the marketplaces list at the boundary, which is the only
+/// place that knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginCli {
+    /// `plugin install <plugin>` (`add`).
+    Install { plugin: String },
+    /// `plugin uninstall <plugin>` (`remove`, `rm`).
+    Uninstall { plugin: String },
+    /// `plugin update [<plugin>]` (`upgrade`): one plugin, or every one its
+    /// marketplace has a newer copy of.
+    Update { plugin: Option<String> },
+    /// `plugin enable <plugin>`, in the directory the command runs in.
+    Enable { plugin: String },
+    /// `plugin disable <plugin>`, likewise.
+    Disable { plugin: String },
+    /// `plugin list [--available]`.
+    List { available: bool },
+    /// `plugin marketplace add <source>`.
+    MarketplaceAdd { source: String },
+    /// `plugin marketplace list`.
+    MarketplaceList,
+    /// `plugin marketplace update [<name>]`: one, or every git marketplace.
+    MarketplaceUpdate { name: Option<String> },
+    /// `plugin marketplace remove <name>` (`rm`).
+    MarketplaceRemove { name: String },
+    /// `-h`/`--help` anywhere in the `plugin` arguments: print the
+    /// [`HelpPage::Plugin`] page and exit 0.
+    Help,
+}
+
 // ===== the --help pages (docs/cli.md) =====
 
 /// The `--help` page's description: what running the command *does*, in
@@ -121,8 +241,7 @@ pub enum McpCli {
 /// every row on the page — nothing is wrapped at render time, so the page
 /// reads in the source exactly as it prints.
 pub const DESCRIPTION: &str = "\
-Starts an interactive session by default — a quoted PROMPT is its first turn.
-Use -p/--print for a headless, machine-readable stream on stdout.";
+Starts an interactive session by default; with -p, answers once and exits.";
 
 /// Which `--help` page: the binary's own, or the `mcp` subcommand's
 /// (`docs/mcp-cli.md`). Both render through the one [`help`] renderer, so
@@ -133,6 +252,8 @@ pub enum HelpPage {
     Main,
     /// `alter-zero mcp --help`.
     Mcp,
+    /// `alter-zero plugin --help`.
+    Plugin,
 }
 
 /// How a page is dressed. `Plain` emits no escape sequence at all — what a
@@ -180,6 +301,12 @@ impl HelpStyle {
 const HELP_INDENT: usize = 2;
 /// Columns between a section's widest literal cell and the descriptions.
 const HELP_GAP: usize = 3;
+/// The widest cell that sets the description column. A wider one — a long
+/// flag with its placeholder — is printed alone on its line and its
+/// description starts on the next, clap's rule: widening the column to fit
+/// it would squeeze every description on the page. 28 leaves the 47-column
+/// descriptions the pages are written to inside 80 (`docs/system-prompt.md`).
+const HELP_CELL_MAX: usize = 28;
 /// The continuation indent under `Usage: ` — the label's own width, so
 /// every further form aligns with the first.
 const USAGE_CONTINUATION: &str = "       ";
@@ -220,7 +347,9 @@ const MAIN_DOC: HelpDoc = HelpDoc {
     description: DESCRIPTION,
     usage: &[
         ("alter-zero", " [OPTIONS] [PROMPT]"),
+        ("alter-zero -p", " [OPTIONS] [PROMPT]"),
         ("alter-zero mcp", " <COMMAND>"),
+        ("alter-zero plugin", " <COMMAND>"),
         ("alter-zero update", ""),
     ],
     sections: &[
@@ -230,14 +359,20 @@ const MAIN_DOC: HelpDoc = HelpDoc {
                 Row {
                     literal: "mcp",
                     placeholder: "",
-                    description: "Manage MCP servers in the user config file — see\n\
-                                  alter-zero mcp --help",
+                    description: "Manage MCP servers in the user config file —\n\
+                                  see alter-zero mcp --help",
+                },
+                Row {
+                    literal: "plugin",
+                    placeholder: "",
+                    description: "Install and manage plugins and marketplaces —\n\
+                                  see alter-zero plugin --help",
                 },
                 Row {
                     literal: "update",
                     placeholder: "",
-                    description: "Install the newest release over this binary, if one is\n\
-                                  out — the one-line installer, checksum-verified",
+                    description: "Install the newest release over this binary,\n\
+                                  if one is out (the checksum-verified installer)",
                 },
             ],
         },
@@ -246,9 +381,8 @@ const MAIN_DOC: HelpDoc = HelpDoc {
             rows: &[Row {
                 literal: "",
                 placeholder: "[PROMPT]",
-                description: "Send this message as the first turn — of a new\n\
-                              conversation, or of the one --continue/\n\
-                              --resume reopens",
+                description: "First message of a new conversation, or the\n\
+                              next of the one --continue/--resume reopens",
             }],
         },
         Section {
@@ -257,26 +391,50 @@ const MAIN_DOC: HelpDoc = HelpDoc {
                 Row {
                     literal: "-c, --continue",
                     placeholder: "",
-                    description: "Continue the most recent conversation recorded in this\n\
-                                  directory",
+                    description: "Continue the most recent conversation recorded\n\
+                                  in this directory",
                 },
                 Row {
                     literal: "-r, --resume",
                     placeholder: " [ID]",
-                    description: "Resume a conversation — by the session id the exit\n\
-                                  hint prints, or picked from a list when no id is given",
+                    description: "Resume a conversation by the id the exit hint\n\
+                                  prints — or pick it from a list, given no ID",
                 },
                 Row {
-                    literal: "-p, --print",
-                    placeholder: "",
-                    description: "Run headless — no interface, one JSON record per\n\
-                                  line on stdout — and take further turns from stdin",
+                    literal: "-C, --cwd",
+                    placeholder: " <DIR>",
+                    description: "Run in DIR instead of the current directory",
+                },
+                // A long-only flag lines its `--` up under the others'
+                // (clap's four-column pad), so the pad rides the literal.
+                Row {
+                    literal: "    --permission-mode",
+                    placeholder: " <MODE>",
+                    description: "manual, edit, auto or master, for this run only",
+                },
+                // The system prompt flags (docs/system-prompt.md). Three of
+                // their cells are wider than HELP_CELL_MAX, so their
+                // descriptions start on the line under them.
+                Row {
+                    literal: "    --system-prompt",
+                    placeholder: " <TEXT>",
+                    description: "Use TEXT as the system prompt for this run, in\n\
+                                  place of the built-in one",
                 },
                 Row {
-                    literal: "--output-format",
-                    placeholder: " <FMT>",
-                    description: "Machine-readable output to stdout (stream-json);\n\
-                                  implies --print",
+                    literal: "    --system-prompt-file",
+                    placeholder: " <PATH>",
+                    description: "The same, with the prompt read from PATH",
+                },
+                Row {
+                    literal: "    --append-system-prompt",
+                    placeholder: " <TEXT>",
+                    description: "Add TEXT to the system prompt for this run",
+                },
+                Row {
+                    literal: "    --append-system-prompt-file",
+                    placeholder: " <PATH>",
+                    description: "The same, with the text read from PATH",
                 },
                 Row {
                     literal: "-h, --help",
@@ -287,6 +445,36 @@ const MAIN_DOC: HelpDoc = HelpDoc {
                     literal: "-V, --version",
                     placeholder: "",
                     description: "Print version",
+                },
+            ],
+        },
+        // The headless run's own flags (docs/headless.md) — a section of
+        // their own, since they mean nothing without -p.
+        Section {
+            heading: "Print mode:",
+            rows: &[
+                Row {
+                    literal: "-p, --print",
+                    placeholder: "",
+                    description: "Answer PROMPT (or stdin) with no screen: the\n\
+                                  answer on stdout, problems on stderr, then exit",
+                },
+                Row {
+                    literal: "    --output-format",
+                    placeholder: " <FORMAT>",
+                    description: "text (the answer), json (one result object),\n\
+                                  stream-json (one event per line) or\n\
+                                  claude-stream-json (a conversation on stdin)",
+                },
+                Row {
+                    literal: "    --max-turns",
+                    placeholder: " <N>",
+                    description: "Stop after N model replies",
+                },
+                Row {
+                    literal: "    --verbose",
+                    placeholder: "",
+                    description: "Log each step of the run to stderr",
                 },
             ],
         },
@@ -358,11 +546,67 @@ Manage MCP servers in the user config file (ALTER_ZERO_MCP_FILE, else
     }],
 };
 
+const PLUGIN_DOC: HelpDoc = HelpDoc {
+    title: "alter-zero plugin",
+    description: "\
+Install and manage plugins — Agent Plugins, Claude Code and Codex plugins —
+from the marketplaces you add; enable and disable act on the directory they
+run in. Inside the app, /plugins does the same.",
+    usage: &[
+        ("alter-zero plugin install", " <plugin>[@<marketplace>]"),
+        ("alter-zero plugin uninstall", " <plugin>[@<marketplace>]"),
+        ("alter-zero plugin update", " [<plugin>[@<marketplace>]]"),
+        ("alter-zero plugin enable", " <plugin>[@<marketplace>]"),
+        ("alter-zero plugin disable", " <plugin>[@<marketplace>]"),
+        ("alter-zero plugin list", " [--available]"),
+        ("alter-zero plugin marketplace add", " <source>"),
+        ("alter-zero plugin marketplace list", ""),
+        ("alter-zero plugin marketplace update", " [<name>]"),
+        ("alter-zero plugin marketplace remove", " <name>"),
+    ],
+    sections: &[
+        Section {
+            heading: "Arguments:",
+            rows: &[
+                Row {
+                    literal: "",
+                    placeholder: "<plugin>",
+                    description: "A plugin's name — with @<marketplace> when more\n\
+                                  than one marketplace lists it",
+                },
+                Row {
+                    literal: "",
+                    placeholder: "<source>",
+                    description: "owner/repo[@ref], a git URL[#ref], or a path to a\n\
+                                  directory holding a marketplace or one plugin",
+                },
+            ],
+        },
+        Section {
+            heading: "Options:",
+            rows: &[
+                Row {
+                    literal: "    --available",
+                    placeholder: "",
+                    description: "With list: every plugin the marketplaces offer,\n\
+                                  not only the installed ones",
+                },
+                Row {
+                    literal: "-h, --help",
+                    placeholder: "",
+                    description: "Print help",
+                },
+            ],
+        },
+    ],
+};
+
 impl HelpPage {
     const fn doc(self) -> &'static HelpDoc {
         match self {
             Self::Main => &MAIN_DOC,
             Self::Mcp => &MCP_DOC,
+            Self::Plugin => &PLUGIN_DOC,
         }
     }
 }
@@ -371,7 +615,9 @@ impl HelpPage {
 /// `Usage:` forms (each further one indented to the first), then each
 /// section's heading over its rows — two columns of indent, the literal
 /// cell padded to the page's widest, three more columns, the description,
-/// its further lines continuing at that column. Padding is
+/// its further lines continuing at that column. A cell wider than
+/// `HELP_CELL_MAX` sets no column: it stands alone on its line and its
+/// description starts on the next, at the column. Padding is
 /// measured on the plain text, so the columns line up under either style.
 /// No trailing newline: the caller's `println!` supplies it.
 #[must_use]
@@ -391,16 +637,26 @@ pub fn help(page: HelpPage, style: HelpStyle) -> String {
             .iter()
             .flat_map(|section| section.rows)
             .map(|row| row.literal.width() + row.placeholder.width())
+            .filter(|&cell| cell <= HELP_CELL_MAX)
             .max()
             .unwrap_or(0);
     for section in doc.sections {
         out.push_str("\n\n");
         out.push_str(&style.heading(section.heading));
         for row in section.rows {
-            let cell_width = HELP_INDENT + row.literal.width() + row.placeholder.width();
+            let cell = row.literal.width() + row.placeholder.width();
+            let cell_width = HELP_INDENT + cell;
+            // A cell too wide for the column stands alone on its line.
+            let alone = cell > HELP_CELL_MAX;
+            if alone {
+                out.push('\n');
+                out.push_str(&" ".repeat(HELP_INDENT));
+                out.push_str(&style.literal(row.literal));
+                out.push_str(row.placeholder);
+            }
             for (i, line) in row.description.lines().enumerate() {
                 out.push('\n');
-                if i == 0 {
+                if i == 0 && !alone {
                     out.push_str(&" ".repeat(HELP_INDENT));
                     out.push_str(&style.literal(row.literal));
                     out.push_str(row.placeholder);
@@ -458,21 +714,39 @@ pub fn colour_enabled(no_color: Option<&str>, term: Option<&str>) -> bool {
 
 /// Parse the process arguments (without `argv[0]`). Usage errors — unknown
 /// flags, a second positional, a blank prompt, a value on `--continue`,
-/// more than one session flag, a prompt with the bare picker — come back
-/// as `Err(message)`; the boundary prints [`usage_error`] to stderr and
-/// exits 2. `--help`/`--version` win wherever they appear before a `--`
-/// (so `--resume --help` prints help rather than eating `--help` as an
-/// id); `--resume`'s id may be the next argument or `=`-attached, and a
-/// following `-`-leading argument is never taken as an id. The one
-/// positional is the `[PROMPT]`, anywhere among the flags; `--` ends the
-/// flags so a dash-leading prompt is reachable.
+/// more than one session flag, a prompt with the bare picker, a flag given
+/// twice, a headless-only flag without `-p` — come back as `Err(message)`;
+/// the boundary prints [`usage_error`] to stderr and exits 2.
+/// `--help`/`--version` win wherever they appear before a `--` (so
+/// `--resume --help` prints help rather than eating `--help` as an id);
+/// `--resume`'s id may be the next argument or `=`-attached, and a
+/// following `-`-leading argument is never taken as an id. Every
+/// value-taking flag (`--output-format`, `--max-turns`,
+/// `--permission-mode`, `-C`/`--cwd`, and the four system prompt flags —
+/// `--system-prompt`, `--append-system-prompt` and their `-file` forms,
+/// `docs/system-prompt.md`) reads its value the same way. The
+/// one positional is the `[PROMPT]`, anywhere among the flags; `--` ends
+/// the flags so a dash-leading prompt is reachable.
 pub fn parse<I>(args: I) -> Result<Cli, String>
 where
     I: IntoIterator<Item = String>,
 {
     let mut start: Option<SessionStart> = None;
     let mut prompt: Option<String> = None;
-    let mut output: Option<OutputFormat> = None;
+    // The headless switch and its companions (docs/headless.md), each
+    // allowed once.
+    let mut print: Option<()> = None;
+    let mut output_format: Option<OutputFormat> = None;
+    let mut max_turns: Option<NonZeroUsize> = None;
+    let mut verbose: Option<()> = None;
+    let mut permission_mode: Option<PermissionMode> = None;
+    let mut cwd: Option<PathBuf> = None;
+    // The system prompt flags (docs/system-prompt.md): each slot per flag,
+    // so a pair given together is reported as such after the loop.
+    let mut system_prompt: Option<SystemText> = None;
+    let mut system_prompt_file: Option<SystemText> = None;
+    let mut append_system_prompt: Option<SystemText> = None;
+    let mut append_system_prompt_file: Option<SystemText> = None;
     let mut args = args.into_iter().peekable();
     // `mcp` routes as the FIRST argument only (docs/mcp-cli.md) — anywhere
     // else it is a prompt like any other word, so the session grammar is
@@ -480,6 +754,11 @@ where
     if args.peek().is_some_and(|first| first == "mcp") {
         args.next();
         return parse_mcp(args).map(Cli::Mcp);
+    }
+    // `plugin` routes the same way (docs/plugins.md *From a shell*).
+    if args.peek().is_some_and(|first| first == "plugin") {
+        args.next();
+        return parse_plugin(args).map(Cli::Plugin);
     }
     // `update` routes the same way (docs/update.md), and takes nothing: a
     // flag or a word after it is a mistake to report, not a prompt to run.
@@ -511,29 +790,6 @@ where
         let picked = match flag.as_str() {
             "--help" | "-h" => return Ok(Cli::Help),
             "--version" | "-V" => return Ok(Cli::Version),
-            // Headless output (`docs/cli.md`): `--print` is the bare spelling,
-            // `--output-format` the one that names what it writes. Neither is
-            // a session flag, so neither joins the `start` slot.
-            "--print" | "-p" => {
-                if value.is_some() {
-                    return Err(format!("{flag} takes no value"));
-                }
-                output = Some(OutputFormat::StreamJson);
-                continue;
-            }
-            "--output-format" => {
-                let value = match value {
-                    Some(value) => value,
-                    None => args
-                        .next_if(|next| !next.starts_with('-'))
-                        .unwrap_or_default(),
-                };
-                if value.is_empty() {
-                    return Err(format!("{flag} needs a value (use {STREAM_JSON})"));
-                }
-                output = Some(OutputFormat::parse(&value)?);
-                continue;
-            }
             "--continue" | "-c" => {
                 if value.is_some() {
                     return Err(format!("{flag} takes no value"));
@@ -554,6 +810,77 @@ where
                 };
                 SessionStart::Resume(id)
             }
+            "--print" | "-p" => {
+                if value.is_some() {
+                    return Err(format!("{flag} takes no value"));
+                }
+                set_once(&mut print, (), "--print")?;
+                continue;
+            }
+            "--verbose" => {
+                if value.is_some() {
+                    return Err(format!("{flag} takes no value"));
+                }
+                set_once(&mut verbose, (), "--verbose")?;
+                continue;
+            }
+            "--output-format" => {
+                let raw = flag_value(&flag, value, &mut args)?;
+                let format = OutputFormat::parse(&raw).ok_or_else(|| {
+                    format!("invalid --output-format \"{raw}\" (use text, json, stream-json or claude-stream-json)")
+                })?;
+                set_once(&mut output_format, format, "--output-format")?;
+                continue;
+            }
+            "--max-turns" => {
+                let raw = flag_value(&flag, value, &mut args)?;
+                let turns = raw
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(NonZeroUsize::new)
+                    .ok_or_else(|| {
+                        format!(
+                            "--max-turns needs a number of model replies above 0, not \"{raw}\""
+                        )
+                    })?;
+                set_once(&mut max_turns, turns, "--max-turns")?;
+                continue;
+            }
+            "--permission-mode" => {
+                let raw = flag_value(&flag, value, &mut args)?;
+                let mode = PermissionMode::parse(&raw).ok_or_else(|| {
+                    format!(
+                        "invalid --permission-mode \"{raw}\" (use manual, edit, auto or master)"
+                    )
+                })?;
+                set_once(&mut permission_mode, mode, "--permission-mode")?;
+                continue;
+            }
+            "--cwd" | "-C" => {
+                let dir = flag_value(&flag, value, &mut args)?;
+                set_once(&mut cwd, PathBuf::from(dir), "--cwd")?;
+                continue;
+            }
+            "--system-prompt" | "--append-system-prompt" => {
+                let text = SystemText::Inline(text_value(&flag, value, &mut args)?);
+                let slot = if flag == "--system-prompt" {
+                    &mut system_prompt
+                } else {
+                    &mut append_system_prompt
+                };
+                set_once(slot, text, &flag)?;
+                continue;
+            }
+            "--system-prompt-file" | "--append-system-prompt-file" => {
+                let path = SystemText::File(PathBuf::from(flag_value(&flag, value, &mut args)?));
+                let slot = if flag == "--system-prompt-file" {
+                    &mut system_prompt_file
+                } else {
+                    &mut append_system_prompt_file
+                };
+                set_once(slot, path, &flag)?;
+                continue;
+            }
             _ => return Err(format!("unrecognized argument: {arg}")),
         };
         if start.replace(picked).is_some() {
@@ -561,6 +888,46 @@ where
         }
     }
     let start = start.unwrap_or(SessionStart::Fresh);
+    let system_prompt = one_of(
+        system_prompt,
+        system_prompt_file,
+        "pass at most one of --system-prompt / --system-prompt-file",
+    )?;
+    let append_system_prompt = one_of(
+        append_system_prompt,
+        append_system_prompt_file,
+        "pass at most one of --append-system-prompt / --append-system-prompt-file",
+    )?;
+    // The headless run's own flags mean nothing with a screen
+    // (docs/headless.md): refused rather than silently ignored.
+    let print = match print {
+        Some(()) => Some(PrintOptions {
+            output_format: output_format.unwrap_or_default(),
+            max_turns,
+            verbose: verbose.is_some(),
+        }),
+        None => {
+            if output_format.is_some() {
+                return Err("--output-format needs --print (-p)".to_string());
+            }
+            if max_turns.is_some() {
+                return Err("--max-turns needs --print (-p)".to_string());
+            }
+            if verbose.is_some() {
+                return Err("--verbose needs --print (-p)".to_string());
+            }
+            None
+        }
+    };
+    // The picker is a screen: a headless run has to name the session it
+    // continues (docs/headless.md).
+    if print.is_some() && start == SessionStart::Resume(None) {
+        return Err(
+            "--print can't open the session picker: name the session with --resume <ID>, \
+             or use --continue"
+                .to_string(),
+        );
+    }
     // The picker is interactive and dismissable: a prompt parked behind it
     // would either start a fresh conversation on Esc or have to be dropped,
     // so the grammar says no up front (docs/cli.md).
@@ -569,18 +936,62 @@ where
             "--resume needs a session id to send a prompt into (or use --continue)".to_string(),
         );
     }
-    // …and a headless run cannot open it at all: the picker is a screen, and a
-    // stream has none. Resolving a session by id is still fine.
-    if output.is_some() && start == SessionStart::Resume(None) {
-        return Err(
-            "--resume needs a session id in --print mode (the picker is interactive)".to_string(),
-        );
-    }
     Ok(Cli::Session(SessionArgs {
         start,
         prompt,
-        output,
+        cwd,
+        permission_mode,
+        print,
+        system_prompt,
+        append_system_prompt,
     }))
+}
+
+/// The one of a pair of flags that was given, refusing both.
+fn one_of<T>(a: Option<T>, b: Option<T>, both: &str) -> Result<Option<T>, String> {
+    match (a, b) {
+        (Some(_), Some(_)) => Err(both.to_string()),
+        (a, b) => Ok(a.or(b)),
+    }
+}
+
+/// A system prompt text flag's value (`docs/system-prompt.md`): read like
+/// [`flag_value`]'s, but a blank one is missing too — an empty string is what
+/// a shell passes for an unset variable — and a dash-leading next argument
+/// is refused with the way to pass one, since a Markdown list starts with a
+/// dash. Never taking it was the point: `--system-prompt -p "fix it"` must
+/// not run on a system prompt of `-p`.
+fn text_value<I>(
+    flag: &str,
+    value: Option<String>,
+    args: &mut std::iter::Peekable<I>,
+) -> Result<String, String>
+where
+    I: Iterator<Item = String>,
+{
+    if value.is_none() && args.peek().is_some_and(|next| next.starts_with('-')) {
+        return Err(format!(
+            "{flag} needs a value (attach text that starts with a dash: {flag}=\"-…\")"
+        ));
+    }
+    let text = match value {
+        Some(text) => text,
+        None => args.next().unwrap_or_default(),
+    };
+    if text.trim().is_empty() {
+        return Err(format!("{flag} needs a value"));
+    }
+    Ok(text)
+}
+
+/// Fill a flag's slot, refusing a second time — clap's rule for a
+/// single-value argument. `name` is the flag's long form, whichever spelling
+/// was typed.
+fn set_once<T>(slot: &mut Option<T>, value: T, name: &str) -> Result<(), String> {
+    if slot.replace(value).is_some() {
+        return Err(format!("{name} was given more than once"));
+    }
+    Ok(())
 }
 
 /// A flag is a dash plus something; a lone `-` is a positional.
@@ -689,6 +1100,116 @@ where
     }
 }
 
+/// Parse the arguments after a leading `plugin` (`docs/plugins.md` *From a
+/// shell*): Claude Code's verbs, with codex's `rm` and an `upgrade` beside
+/// them. Usage errors come back as `Err(message)` like [`parse`]'s; the
+/// boundary prints them over the [`HelpPage::Plugin`] usage and exits 2.
+fn parse_plugin<I>(mut args: std::iter::Peekable<I>) -> Result<PluginCli, String>
+where
+    I: Iterator<Item = String>,
+{
+    const COMMANDS: &str = "install, uninstall, update, enable, disable, list or marketplace";
+    let Some(sub) = args.next() else {
+        return Err(format!("plugin needs a command: {COMMANDS}"));
+    };
+    let needs = |what: &str| format!("plugin {sub} needs {what}");
+    let plugin_arg = "a plugin: <plugin>[@<marketplace>]";
+    match sub.as_str() {
+        "--help" | "-h" => Ok(PluginCli::Help),
+        "install" | "add" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(None) => return Err(needs(plugin_arg)),
+            Some(Some(plugin)) => PluginCli::Install { plugin },
+        }),
+        "uninstall" | "remove" | "rm" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(None) => return Err(needs(plugin_arg)),
+            Some(Some(plugin)) => PluginCli::Uninstall { plugin },
+        }),
+        "update" | "upgrade" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(plugin) => PluginCli::Update { plugin },
+        }),
+        "enable" | "disable" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(None) => return Err(needs(plugin_arg)),
+            Some(Some(plugin)) if sub == "enable" => PluginCli::Enable { plugin },
+            Some(Some(plugin)) => PluginCli::Disable { plugin },
+        }),
+        "list" => {
+            let mut available = false;
+            for arg in args {
+                match arg.as_str() {
+                    "--help" | "-h" => return Ok(PluginCli::Help),
+                    "--available" => available = true,
+                    _ => return Err(format!("unrecognized argument: {arg}")),
+                }
+            }
+            Ok(PluginCli::List { available })
+        }
+        "marketplace" => parse_plugin_marketplace(args),
+        other => Err(format!(
+            "unrecognized plugin command: {other} (use {COMMANDS})"
+        )),
+    }
+}
+
+/// `plugin marketplace …`'s own verbs.
+fn parse_plugin_marketplace<I>(mut args: std::iter::Peekable<I>) -> Result<PluginCli, String>
+where
+    I: Iterator<Item = String>,
+{
+    const COMMANDS: &str = "add, list, update or remove";
+    let Some(sub) = args.next() else {
+        return Err(format!("plugin marketplace needs a command: {COMMANDS}"));
+    };
+    let needs = |what: &str| format!("plugin marketplace {sub} needs {what}");
+    match sub.as_str() {
+        "--help" | "-h" => Ok(PluginCli::Help),
+        "add" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(None) => {
+                return Err(needs(
+                    "a source: owner/repo, a git URL, or a path to a directory",
+                ));
+            }
+            Some(Some(source)) => PluginCli::MarketplaceAdd { source },
+        }),
+        "list" => match single_argument(args)? {
+            None => Ok(PluginCli::Help),
+            Some(None) => Ok(PluginCli::MarketplaceList),
+            Some(Some(extra)) => Err(format!("unrecognized argument: {extra}")),
+        },
+        "update" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(name) => PluginCli::MarketplaceUpdate { name },
+        }),
+        "remove" | "rm" => Ok(match single_argument(args)? {
+            None => PluginCli::Help,
+            Some(None) => return Err(needs("a marketplace name")),
+            Some(Some(name)) => PluginCli::MarketplaceRemove { name },
+        }),
+        other => Err(format!(
+            "unrecognized plugin marketplace command: {other} (use {COMMANDS})"
+        )),
+    }
+}
+
+/// The arguments of a command that takes at most one positional: `None`
+/// for `--help`, else the positional when there is one.
+fn single_argument<I>(args: I) -> Result<Option<Option<String>>, String>
+where
+    I: Iterator<Item = String>,
+{
+    let Some(positionals) = plain_arguments(args)? else {
+        return Ok(None);
+    };
+    if let Some(extra) = positionals.get(1) {
+        return Err(format!("unrecognized argument: {extra}"));
+    }
+    Ok(Some(positionals.into_iter().next()))
+}
+
 /// `mcp add`'s own grammar (`docs/mcp-cli.md`): flags parse until the first
 /// non-flag argument after the name — or a `--` — and from there everything
 /// belongs to the command **verbatim** (codex's trailing capture), so a
@@ -783,6 +1304,7 @@ where
             client_id,
             client_secret: None,
             callback_port,
+            callback_url: None,
             scopes: None,
         });
         match &mut config {
@@ -904,6 +1426,7 @@ fn build_add_config(
                         command,
                         args: parts.collect(),
                         env,
+                        cwd: None,
                     })
                 }
                 Some(other) => Err(format!("--transport {other} takes --url, not a command")),
@@ -943,6 +1466,26 @@ pub fn resume_hint(bin: &str, session_id: &str) -> String {
     format!("Resume this session with:\n{bin} --resume {session_id}")
 }
 
+/// What a launch of the interface prints when it cannot start: no terminal
+/// to open (cron, CI, a pipe), or one that never answered the cursor query
+/// (`docs/headless.md`). The cause verbatim, then print mode, which needs no
+/// terminal — named, never switched to: a run in which nobody can approve
+/// anything is the caller's choice to make.
+///
+/// ```text
+/// error: could not start the interface: No such device or address (os error 6)
+/// It needs a terminal; to run without one (cron, CI, a script), use print mode:
+/// alter-zero -p "your prompt"
+/// ```
+#[must_use]
+pub fn no_terminal_error(bin: &str, cause: &str) -> String {
+    format!(
+        "error: could not start the interface: {cause}\n\
+         It needs a terminal; to run without one (cron, CI, a script), use print mode:\n\
+         {bin} -p \"your prompt\""
+    )
+}
+
 /// The program name the hint prints — how the user actually invoked us
 /// (`argv[0]`'s basename, so a renamed or symlinked install echoes the name
 /// that was actually run), falling back to the canonical `alter-zero` when
@@ -972,74 +1515,8 @@ mod tests {
         Ok(Cli::Session(SessionArgs {
             start,
             prompt: prompt.map(str::to_string),
-            output: None,
+            ..SessionArgs::default()
         }))
-    }
-
-    /// A headless run (`-p/--print`, `--output-format stream-json`).
-    fn headless(start: SessionStart, prompt: Option<&str>) -> Result<Cli, String> {
-        Ok(Cli::Session(SessionArgs {
-            start,
-            prompt: prompt.map(str::to_string),
-            output: Some(OutputFormat::StreamJson),
-        }))
-    }
-
-    // ===== the headless output mode (docs/cli.md) =====
-
-    #[test]
-    fn print_selects_the_stream_json_headless_mode() {
-        assert_eq!(parsed(&["-p"]), headless(SessionStart::Fresh, None));
-        assert_eq!(parsed(&["--print"]), headless(SessionStart::Fresh, None));
-        assert_eq!(
-            parsed(&["--print", "say hello"]),
-            headless(SessionStart::Fresh, Some("say hello"))
-        );
-        // Every spelling of the format means the same run.
-        assert_eq!(
-            parsed(&["--output-format", "stream-json"]),
-            headless(SessionStart::Fresh, None)
-        );
-        assert_eq!(
-            parsed(&["--output-format=stream-json"]),
-            headless(SessionStart::Fresh, None)
-        );
-        assert_eq!(
-            parsed(&["-p", "--output-format", "stream-json"]),
-            headless(SessionStart::Fresh, None),
-            "the two spellings agree rather than conflict"
-        );
-    }
-
-    #[test]
-    fn headless_rides_continue_and_a_resumed_id_like_the_tui_does() {
-        assert_eq!(
-            parsed(&["-c", "-p", "and then?"]),
-            headless(SessionStart::Continue, Some("and then?"))
-        );
-        assert_eq!(
-            parsed(&["--resume", "18a9f2c3-1a2b", "-p"]),
-            headless(SessionStart::Resume(Some("18a9f2c3-1a2b".into())), None)
-        );
-    }
-
-    #[test]
-    fn headless_refuses_the_interactive_resume_picker() {
-        let err = parsed(&["-p", "--resume"]).expect_err("picker is a screen");
-        assert!(
-            err.contains("--resume") && err.contains("--print") && err.contains("id"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn an_unknown_or_missing_output_format_is_a_usage_error() {
-        let err = parsed(&["--output-format", "yaml"]).expect_err("unknown format");
-        assert!(err.contains("yaml") && err.contains("stream-json"), "{err}");
-        let err = parsed(&["--output-format"]).expect_err("no value");
-        assert!(err.contains("--output-format") && err.contains("value"), "{err}");
-        let err = parsed(&["--print=now"]).expect_err("a value on --print");
-        assert!(err.contains("--print"), "{err}");
     }
 
     #[test]
@@ -1215,6 +1692,568 @@ mod tests {
         );
     }
 
+    // ===== headless mode (docs/headless.md) =====
+
+    /// A run with these arguments.
+    fn run(args: SessionArgs) -> Result<Cli, String> {
+        Ok(Cli::Session(args))
+    }
+
+    /// A headless run of `prompt` with `options`.
+    fn printed(prompt: Option<&str>, options: PrintOptions) -> Result<Cli, String> {
+        run(SessionArgs {
+            prompt: prompt.map(str::to_string),
+            print: Some(options),
+            ..SessionArgs::default()
+        })
+    }
+
+    #[test]
+    fn print_runs_the_prompt_headless_in_text_by_default() {
+        let want = printed(Some("Reply with OK"), PrintOptions::default());
+        assert_eq!(parsed(&["-p", "Reply with OK"]), want);
+        assert_eq!(parsed(&["--print", "Reply with OK"]), want);
+        // A switch, not a value-taker: the prompt may come first too.
+        assert_eq!(parsed(&["Reply with OK", "-p"]), want);
+        assert_eq!(
+            PrintOptions::default().output_format,
+            OutputFormat::Text,
+            "text is the default format"
+        );
+    }
+
+    #[test]
+    fn print_without_a_prompt_leaves_it_to_stdin() {
+        assert_eq!(parsed(&["-p"]), printed(None, PrintOptions::default()));
+        // A lone `-` is a positional the boundary reads as "stdin".
+        assert_eq!(
+            parsed(&["-p", "-"]),
+            printed(Some("-"), PrintOptions::default())
+        );
+    }
+
+    #[test]
+    fn print_takes_no_value() {
+        let err = parsed(&["--print=yes", "x"]).expect_err("a value on --print");
+        assert!(err.contains("--print") && err.contains("no value"), "{err}");
+    }
+
+    #[test]
+    fn verbose_turns_on_the_step_log_of_a_print_run() {
+        let verbose = printed(
+            Some("x"),
+            PrintOptions {
+                verbose: true,
+                ..PrintOptions::default()
+            },
+        );
+        assert_eq!(parsed(&["-p", "--verbose", "x"]), verbose);
+        assert_eq!(parsed(&["x", "--verbose", "-p"]), verbose);
+        // Quiet unless asked.
+        assert_eq!(
+            parsed(&["-p", "x"]),
+            printed(Some("x"), PrintOptions::default())
+        );
+        let err = parsed(&["--verbose=yes", "-p", "x"]).expect_err("a value");
+        assert!(
+            err.contains("--verbose") && err.contains("no value"),
+            "{err}"
+        );
+        let err = parsed(&["-p", "--verbose", "--verbose", "x"]).expect_err("twice");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn output_format_takes_every_format_separate_or_attached() {
+        for format in OutputFormat::ALL {
+            let want = printed(
+                Some("x"),
+                PrintOptions {
+                    output_format: format,
+                    ..PrintOptions::default()
+                },
+            );
+            assert_eq!(
+                parsed(&["-p", "--output-format", format.label(), "x"]),
+                want
+            );
+            let attached = format!("--output-format={}", format.label());
+            assert_eq!(parsed(&["x", &attached, "-p"]), want);
+        }
+    }
+
+    #[test]
+    fn an_unknown_output_format_names_the_choices() {
+        let err = parsed(&["-p", "--output-format", "xml", "x"]).expect_err("xml");
+        assert!(
+            err.contains("\"xml\"")
+                && err.contains("text, json, stream-json or claude-stream-json"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_value_flag_with_no_value_is_a_usage_error() {
+        for args in [
+            &["-p", "--output-format"][..],
+            &["-p", "--output-format="],
+            &["-p", "--output-format", "--max-turns", "3"],
+            &["-p", "--max-turns"],
+            &["--permission-mode"],
+            &["-C"],
+            &["--cwd="],
+        ] {
+            let err = parsed(args).expect_err("a missing value");
+            assert!(err.contains("needs a value"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn max_turns_takes_a_positive_count() {
+        let want = |n: usize| {
+            printed(
+                Some("x"),
+                PrintOptions {
+                    max_turns: NonZeroUsize::new(n),
+                    ..PrintOptions::default()
+                },
+            )
+        };
+        assert_eq!(parsed(&["-p", "--max-turns", "5", "x"]), want(5));
+        assert_eq!(parsed(&["-p", "--max-turns=12", "x"]), want(12));
+    }
+
+    #[test]
+    fn max_turns_refuses_zero_and_anything_but_a_count() {
+        for value in ["0", "many", "2.5", "-3"] {
+            let attached = format!("--max-turns={value}");
+            let err = parsed(&["-p", &attached, "x"]).expect_err("not a count");
+            assert!(
+                err.contains("--max-turns") && err.contains(value),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_print_only_flags_need_print() {
+        for args in [
+            &["--output-format", "json", "x"][..],
+            &["--max-turns", "3", "x"],
+            &["-c", "--output-format=stream-json"],
+            &["--verbose", "x"],
+        ] {
+            let err = parsed(args).expect_err("a headless flag without -p");
+            assert!(err.contains("needs --print"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn permission_mode_seeds_either_kind_of_run() {
+        for mode in [
+            PermissionMode::Manual,
+            PermissionMode::Edit,
+            PermissionMode::Auto,
+            PermissionMode::Master,
+        ] {
+            assert_eq!(
+                parsed(&["--permission-mode", mode.label()]),
+                run(SessionArgs {
+                    permission_mode: Some(mode),
+                    ..SessionArgs::default()
+                })
+            );
+            let attached = format!("--permission-mode={}", mode.label());
+            assert_eq!(
+                parsed(&["-p", &attached, "x"]),
+                run(SessionArgs {
+                    prompt: Some("x".into()),
+                    permission_mode: Some(mode),
+                    print: Some(PrintOptions::default()),
+                    ..SessionArgs::default()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_permission_mode_names_the_choices() {
+        let err = parsed(&["--permission-mode", "yolo"]).expect_err("yolo");
+        assert!(
+            err.contains("\"yolo\"") && err.contains("manual, edit, auto or master"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cwd_takes_a_directory_short_long_or_attached_in_either_run() {
+        let want = |print: Option<PrintOptions>| {
+            run(SessionArgs {
+                cwd: Some(PathBuf::from("/srv/repo")),
+                print,
+                ..SessionArgs::default()
+            })
+        };
+        assert_eq!(parsed(&["-C", "/srv/repo"]), want(None));
+        assert_eq!(parsed(&["--cwd", "/srv/repo"]), want(None));
+        assert_eq!(parsed(&["--cwd=/srv/repo"]), want(None));
+        assert_eq!(
+            parsed(&["-p", "-C", "/srv/repo"]),
+            want(Some(PrintOptions::default()))
+        );
+        // `-C` is the directory; `-c` is still --continue.
+        assert_eq!(
+            parsed(&["-c", "-C", "/srv/repo"]),
+            run(SessionArgs {
+                start: SessionStart::Continue,
+                cwd: Some(PathBuf::from("/srv/repo")),
+                ..SessionArgs::default()
+            })
+        );
+    }
+
+    // ===== the system prompt flags (docs/system-prompt.md) =====
+
+    fn inline(text: &str) -> Option<SystemText> {
+        Some(SystemText::Inline(text.to_string()))
+    }
+
+    fn file(path: &str) -> Option<SystemText> {
+        Some(SystemText::File(PathBuf::from(path)))
+    }
+
+    #[test]
+    fn the_system_prompt_flags_parse_separate_and_attached_in_either_run() {
+        for (flag, text, replace) in [
+            ("--system-prompt", true, true),
+            ("--system-prompt-file", false, true),
+            ("--append-system-prompt", true, false),
+            ("--append-system-prompt-file", false, false),
+        ] {
+            let value = if text {
+                inline("be brief")
+            } else {
+                file("be brief")
+            };
+            let want = |print: Option<PrintOptions>, prompt: Option<&str>| {
+                let mut args = SessionArgs {
+                    print,
+                    prompt: prompt.map(str::to_string),
+                    ..SessionArgs::default()
+                };
+                if replace {
+                    args.system_prompt = value.clone();
+                } else {
+                    args.append_system_prompt = value.clone();
+                }
+                run(args)
+            };
+            let attached = format!("{flag}=be brief");
+            assert_eq!(parsed(&[flag, "be brief"]), want(None, None), "{flag}");
+            assert_eq!(parsed(&[&attached]), want(None, None), "{flag}");
+            assert_eq!(
+                parsed(&["-p", flag, "be brief", "fix it"]),
+                want(Some(PrintOptions::default()), Some("fix it")),
+                "{flag}"
+            );
+            assert_eq!(
+                parsed(&["fix it", &attached, "-p"]),
+                want(Some(PrintOptions::default()), Some("fix it")),
+                "{flag}"
+            );
+            assert_eq!(
+                parsed(&["fix it", flag, "be brief"]),
+                want(None, Some("fix it")),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_system_prompt_flags_sit_beside_continue() {
+        assert_eq!(
+            parsed(&["--continue", "--append-system-prompt", "In French."]),
+            run(SessionArgs {
+                start: SessionStart::Continue,
+                append_system_prompt: inline("In French."),
+                ..SessionArgs::default()
+            })
+        );
+        assert_eq!(
+            parsed(&["--system-prompt-file=rules.md", "-c", "and the docs"]),
+            run(SessionArgs {
+                start: SessionStart::Continue,
+                prompt: Some("and the docs".into()),
+                system_prompt: file("rules.md"),
+                ..SessionArgs::default()
+            })
+        );
+    }
+
+    #[test]
+    fn a_replacement_and_an_append_combine() {
+        assert_eq!(
+            parsed(&[
+                "--system-prompt-file",
+                "prompts/reviewer.md",
+                "--append-system-prompt",
+                "Be brief."
+            ]),
+            run(SessionArgs {
+                system_prompt: file("prompts/reviewer.md"),
+                append_system_prompt: inline("Be brief."),
+                ..SessionArgs::default()
+            })
+        );
+        assert_eq!(
+            parsed(&["--append-system-prompt-file=a.md", "--system-prompt=R"]),
+            run(SessionArgs {
+                system_prompt: inline("R"),
+                append_system_prompt: file("a.md"),
+                ..SessionArgs::default()
+            })
+        );
+    }
+
+    #[test]
+    fn each_system_prompt_pair_is_exclusive() {
+        for args in [
+            &["--system-prompt", "a", "--system-prompt-file", "b"][..],
+            &["--system-prompt-file=b", "--system-prompt=a"],
+        ] {
+            assert_eq!(
+                parsed(args),
+                Err("pass at most one of --system-prompt / --system-prompt-file".to_string()),
+                "{args:?}"
+            );
+        }
+        for args in [
+            &[
+                "--append-system-prompt",
+                "a",
+                "--append-system-prompt-file",
+                "b",
+            ][..],
+            &[
+                "--append-system-prompt-file=b",
+                "-p",
+                "--append-system-prompt=a",
+            ],
+        ] {
+            assert_eq!(
+                parsed(args),
+                Err(
+                    "pass at most one of --append-system-prompt / --append-system-prompt-file"
+                        .to_string()
+                ),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_system_prompt_flag_given_twice_is_refused() {
+        for flag in [
+            "--system-prompt",
+            "--system-prompt-file",
+            "--append-system-prompt",
+            "--append-system-prompt-file",
+        ] {
+            let attached = format!("{flag}=b");
+            assert_eq!(
+                parsed(&[flag, "a", &attached]),
+                Err(format!("{flag} was given more than once")),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_system_prompt_flag_with_no_value_needs_one() {
+        for flag in [
+            "--system-prompt",
+            "--system-prompt-file",
+            "--append-system-prompt",
+            "--append-system-prompt-file",
+        ] {
+            let want = Err(format!("{flag} needs a value"));
+            assert_eq!(parsed(&[flag]), want, "{flag}");
+            let attached = format!("{flag}=");
+            assert_eq!(parsed(&[&attached]), want, "{flag}");
+        }
+    }
+
+    #[test]
+    fn a_blank_system_prompt_text_is_refused() {
+        for flag in ["--system-prompt", "--append-system-prompt"] {
+            let want = Err(format!("{flag} needs a value"));
+            for blank in ["", "   "] {
+                assert_eq!(parsed(&[flag, blank]), want, "{flag} {blank:?}");
+                let attached = format!("{flag}={blank}");
+                assert_eq!(parsed(&[&attached]), want, "{attached:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_dash_leading_next_argument_is_refused_with_the_attach_hint() {
+        assert_eq!(
+            parsed(&["--append-system-prompt", "- a list item"]),
+            Err(
+                "--append-system-prompt needs a value (attach text that starts with a dash: \
+                 --append-system-prompt=\"-…\")"
+                    .to_string()
+            )
+        );
+        // `-p` is never taken as a system prompt.
+        assert_eq!(
+            parsed(&["--system-prompt", "-p", "fix it"]),
+            Err(
+                "--system-prompt needs a value (attach text that starts with a dash: \
+                 --system-prompt=\"-…\")"
+                    .to_string()
+            )
+        );
+        // Attached, a dash-leading text is the text, verbatim.
+        assert_eq!(
+            parsed(&["--system-prompt=- a list"]),
+            run(SessionArgs {
+                system_prompt: inline("- a list"),
+                ..SessionArgs::default()
+            })
+        );
+        // The file flags say only that the value is missing.
+        assert_eq!(
+            parsed(&["--system-prompt-file", "-p"]),
+            Err("--system-prompt-file needs a value".to_string())
+        );
+    }
+
+    #[test]
+    fn a_system_prompt_file_is_its_text_verbatim() {
+        let path = Path::new("prompts/x.md");
+        let text = "  You review code.\n\n- one\n";
+        assert_eq!(
+            system_prompt_file_text("--system-prompt-file", path, text.as_bytes().to_vec()),
+            Ok(text.to_string())
+        );
+        // Exactly at the cap is fine.
+        let at_cap = vec![b'a'; SYSTEM_PROMPT_FILE_MAX_BYTES];
+        assert_eq!(
+            system_prompt_file_text("--system-prompt-file", path, at_cap).map(|text| text.len()),
+            Ok(SYSTEM_PROMPT_FILE_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn a_system_prompt_file_over_the_cap_is_refused() {
+        let path = Path::new("prompts/x.md");
+        // One byte over — and a cut that would land mid-character still
+        // reports the size, not the encoding.
+        let mut over = vec![b'a'; SYSTEM_PROMPT_FILE_MAX_BYTES - 1];
+        over.extend_from_slice("é".as_bytes());
+        assert_eq!(over.len(), SYSTEM_PROMPT_FILE_MAX_BYTES + 1);
+        assert_eq!(
+            system_prompt_file_text("--system-prompt-file", path, over),
+            Err("--system-prompt-file prompts/x.md is larger than 1 MiB".to_string())
+        );
+    }
+
+    #[test]
+    fn a_system_prompt_file_that_is_not_utf8_or_blank_is_refused() {
+        let path = Path::new("prompts/x.md");
+        assert_eq!(
+            system_prompt_file_text("--append-system-prompt-file", path, vec![0xff, 0xfe, b'a']),
+            Err("--append-system-prompt-file prompts/x.md is not UTF-8 text".to_string())
+        );
+        for blank in ["", " \n\t\n"] {
+            assert_eq!(
+                system_prompt_file_text("--system-prompt-file", path, blank.as_bytes().to_vec()),
+                Err("--system-prompt-file prompts/x.md is empty".to_string()),
+                "{blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_system_prompt_file_loses_its_byte_order_mark() {
+        // The mark an editor writes ahead of UTF-8 is the file's encoding,
+        // not its text: it would be the prompt's first character otherwise,
+        // and a file holding nothing else would not read as empty.
+        let path = Path::new("prompts/x.md");
+        assert_eq!(
+            system_prompt_file_text(
+                "--system-prompt-file",
+                path,
+                b"\xEF\xBB\xBFYou review code.\n".to_vec()
+            ),
+            Ok("You review code.\n".to_string())
+        );
+        assert_eq!(
+            system_prompt_file_text("--system-prompt-file", path, b"\xEF\xBB\xBF \n".to_vec()),
+            Err("--system-prompt-file prompts/x.md is empty".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_system_prompt_file_names_the_flag_the_path_and_the_cause() {
+        assert_eq!(
+            system_prompt_file_unreadable(
+                "--system-prompt-file",
+                Path::new("prompts/x.md"),
+                "No such file or directory (os error 2)"
+            ),
+            "Cannot read --system-prompt-file prompts/x.md: No such file or directory (os error 2)"
+        );
+    }
+
+    #[test]
+    fn a_flag_given_twice_is_a_usage_error() {
+        for args in [
+            &["-p", "-p", "x"][..],
+            &["-p", "--print", "x"],
+            &["-C", "a", "--cwd", "b"],
+            &["--permission-mode", "auto", "--permission-mode=master"],
+            &["-p", "--output-format", "json", "--output-format", "text"],
+            &["-p", "--max-turns", "1", "--max-turns=2"],
+        ] {
+            let err = parsed(args).expect_err("twice");
+            assert!(err.contains("more than once"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn print_with_the_bare_picker_is_refused() {
+        for args in [&["-p", "--resume"][..], &["-r", "-p"], &["--resume=", "-p"]] {
+            let err = parsed(args).expect_err("the picker headless");
+            assert!(
+                err.contains("--resume") && err.contains("--continue"),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn print_sends_the_prompt_into_a_continued_or_resumed_session() {
+        assert_eq!(
+            parsed(&["-p", "-c", "and the docs"]),
+            run(SessionArgs {
+                start: SessionStart::Continue,
+                prompt: Some("and the docs".into()),
+                print: Some(PrintOptions::default()),
+                ..SessionArgs::default()
+            })
+        );
+        assert_eq!(
+            parsed(&["--resume", "18a9f2c3-1a2b", "-p"]),
+            run(SessionArgs {
+                start: SessionStart::Resume(Some("18a9f2c3-1a2b".into())),
+                print: Some(PrintOptions::default()),
+                ..SessionArgs::default()
+            })
+        );
+    }
+
     // ===== the exit hint (docs/cli.md) =====
 
     #[test]
@@ -1222,6 +2261,20 @@ mod tests {
         assert_eq!(
             resume_hint("alter-zero", "18a9f2c3-1a2b"),
             "Resume this session with:\nalter-zero --resume 18a9f2c3-1a2b",
+        );
+    }
+
+    #[test]
+    fn no_terminal_error_names_the_cause_and_the_mode_that_needs_none() {
+        // The interactive launch with no terminal behind it (cron, CI, a
+        // pipe) used to end on main's Debug print of the io::Error. The
+        // cause stays verbatim, then the way to run without a terminal, its
+        // command alone on the last line like the resume hint's.
+        assert_eq!(
+            no_terminal_error("az", "No such device or address (os error 6)"),
+            "error: could not start the interface: No such device or address (os error 6)\n\
+             It needs a terminal; to run without one (cron, CI, a script), use print mode:\n\
+             az -p \"your prompt\"",
         );
     }
 
@@ -1241,35 +2294,52 @@ mod tests {
     const MAIN_PAGE: &str = "\
 Alter Zero
 
-Starts an interactive session by default — a quoted PROMPT is its first turn.
-Use -p/--print for a headless, machine-readable stream on stdout.
+Starts an interactive session by default; with -p, answers once and exits.
 
 Usage: alter-zero [OPTIONS] [PROMPT]
+       alter-zero -p [OPTIONS] [PROMPT]
        alter-zero mcp <COMMAND>
+       alter-zero plugin <COMMAND>
        alter-zero update
 
 Commands:
-  mcp                     Manage MCP servers in the user config file — see
-                          alter-zero mcp --help
-  update                  Install the newest release over this binary, if one is
-                          out — the one-line installer, checksum-verified
+  mcp                            Manage MCP servers in the user config file —
+                                 see alter-zero mcp --help
+  plugin                         Install and manage plugins and marketplaces —
+                                 see alter-zero plugin --help
+  update                         Install the newest release over this binary,
+                                 if one is out (the checksum-verified installer)
 
 Arguments:
-  [PROMPT]                Send this message as the first turn — of a new
-                          conversation, or of the one --continue/
-                          --resume reopens
+  [PROMPT]                       First message of a new conversation, or the
+                                 next of the one --continue/--resume reopens
 
 Options:
-  -c, --continue          Continue the most recent conversation recorded in this
-                          directory
-  -r, --resume [ID]       Resume a conversation — by the session id the exit
-                          hint prints, or picked from a list when no id is given
-  -p, --print             Run headless — no interface, one JSON record per
-                          line on stdout — and take further turns from stdin
-  --output-format <FMT>   Machine-readable output to stdout (stream-json);
-                          implies --print
-  -h, --help              Print help
-  -V, --version           Print version";
+  -c, --continue                 Continue the most recent conversation recorded
+                                 in this directory
+  -r, --resume [ID]              Resume a conversation by the id the exit hint
+                                 prints — or pick it from a list, given no ID
+  -C, --cwd <DIR>                Run in DIR instead of the current directory
+      --permission-mode <MODE>   manual, edit, auto or master, for this run only
+      --system-prompt <TEXT>     Use TEXT as the system prompt for this run, in
+                                 place of the built-in one
+      --system-prompt-file <PATH>
+                                 The same, with the prompt read from PATH
+      --append-system-prompt <TEXT>
+                                 Add TEXT to the system prompt for this run
+      --append-system-prompt-file <PATH>
+                                 The same, with the text read from PATH
+  -h, --help                     Print help
+  -V, --version                  Print version
+
+Print mode:
+  -p, --print                    Answer PROMPT (or stdin) with no screen: the
+                                 answer on stdout, problems on stderr, then exit
+      --output-format <FORMAT>   text (the answer), json (one result object),
+                                 stream-json (one event per line) or
+                                 claude-stream-json (a conversation on stdin)
+      --max-turns <N>            Stop after N model replies
+      --verbose                  Log each step of the run to stderr";
 
     /// Strip every `ESC[…m` sequence.
     fn strip_ansi(text: &str) -> String {
@@ -1306,6 +2376,51 @@ Options:
             assert!(line.width() <= 80, "{line:?}");
             assert_eq!(line.trim_end(), line, "{line:?}");
         }
+        // The mcp page's usage forms run past 80 by design; its rows still
+        // end on text — the long-cell rule leaves no blank tail anywhere.
+        for line in help(HelpPage::Mcp, HelpStyle::Plain).lines() {
+            assert_eq!(line.trim_end(), line, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_cell_wider_than_the_column_stands_alone_over_its_description() {
+        // clap's rule for a long flag (docs/system-prompt.md): the cell on
+        // its own line, the description under it at the page's column (33).
+        let page = help(HelpPage::Main, HelpStyle::Plain);
+        let column = " ".repeat(33);
+        for (cell, description) in [
+            (
+                "--system-prompt-file <PATH>",
+                "The same, with the prompt read from PATH",
+            ),
+            (
+                "--append-system-prompt <TEXT>",
+                "Add TEXT to the system prompt for this run",
+            ),
+            (
+                "--append-system-prompt-file <PATH>",
+                "The same, with the text read from PATH",
+            ),
+        ] {
+            let want = format!("\n      {cell}\n{column}{description}\n");
+            assert!(page.contains(&want), "{cell}:\n{page}");
+        }
+        // A cell that fits keeps its description beside it.
+        assert!(
+            page.contains("\n      --system-prompt <TEXT>     Use TEXT"),
+            "{page}"
+        );
+        // And the column did not move for anyone else.
+        assert!(
+            page.contains("\n  -h, --help                     Print help"),
+            "{page}"
+        );
+        let styled = help(HelpPage::Main, HelpStyle::Ansi);
+        assert!(
+            styled.contains("\x1b[1m    --append-system-prompt-file\x1b[0m <PATH>\n"),
+            "{styled}"
+        );
     }
 
     #[test]
@@ -1341,10 +2456,24 @@ Options:
             "{styled}"
         );
         assert!(
-            styled.contains("\x1b[1m-r, --resume\x1b[0m [ID]       Resume"),
+            styled.contains("\x1b[1m-r, --resume\x1b[0m [ID]              Resume"),
             "{styled}"
         );
-        assert!(styled.contains("\n  [PROMPT]                Send"), "{styled}");
+        assert!(
+            styled.contains("\n  [PROMPT]                       First"),
+            "{styled}"
+        );
+        // The headless section is a section like any other, and a long-only
+        // flag's pad rides inside its literal.
+        assert!(styled.contains("\x1b[1;36mPrint mode:\x1b[0m"), "{styled}");
+        assert!(
+            styled.contains("\x1b[1malter-zero -p\x1b[0m [OPTIONS] [PROMPT]"),
+            "{styled}"
+        );
+        assert!(
+            styled.contains("\x1b[1m    --max-turns\x1b[0m <N>"),
+            "{styled}"
+        );
         assert!(!styled.contains("\x1b[1m[PROMPT]"), "{styled}");
         // An empty literal never emits an empty escape pair.
         assert!(!styled.contains("\x1b[1m\x1b[0m"), "{styled}");
@@ -1395,7 +2524,9 @@ Options:
         assert_eq!(
             text,
             "error: unrecognized argument: --frob\n\n\
-             Usage: alter-zero [OPTIONS] [PROMPT]\n       alter-zero mcp <COMMAND>\n       alter-zero update\n\n\
+             Usage: alter-zero [OPTIONS] [PROMPT]\n       alter-zero -p [OPTIONS] [PROMPT]\n       \
+             alter-zero mcp <COMMAND>\n       alter-zero plugin <COMMAND>\n       \
+             alter-zero update\n\n\
              For more information, try '--help'."
         );
         let styled = usage_error(HelpPage::Main, "x", HelpStyle::Ansi);
@@ -1446,6 +2577,175 @@ Options:
             parsed(&["-c", "update"]),
             Ok(Cli::Session(SessionArgs { prompt: Some(p), .. })) if p == "update"
         ));
+    }
+
+    // ===== the plugin subcommand (docs/plugins.md *From a shell*) =====
+
+    /// `parse` expecting the `plugin` route.
+    fn parsed_plugin(args: &[&str]) -> Result<PluginCli, String> {
+        let mut all = vec!["plugin"];
+        all.extend_from_slice(args);
+        match parsed(&all) {
+            Ok(Cli::Plugin(cmd)) => Ok(cmd),
+            Ok(other) => panic!("expected a plugin command, got {other:?}"),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[test]
+    fn plugin_routes_as_the_first_argument_only() {
+        assert_eq!(
+            parsed_plugin(&["list"]),
+            Ok(PluginCli::List { available: false })
+        );
+        // Anywhere else the word is a prompt like any other.
+        assert!(matches!(
+            parsed(&["-c", "plugin"]),
+            Ok(Cli::Session(SessionArgs { prompt: Some(p), .. })) if p == "plugin"
+        ));
+    }
+
+    #[test]
+    fn plugin_commands_take_a_plugin_and_both_references_spellings() {
+        let plugin = |name: &str| name.to_string();
+        assert_eq!(
+            parsed_plugin(&["install", "hookify@official"]),
+            Ok(PluginCli::Install {
+                plugin: plugin("hookify@official")
+            })
+        );
+        // Claude Code's `add`/`remove`, codex's `rm`, and `upgrade`.
+        assert_eq!(
+            parsed_plugin(&["add", "hookify"]),
+            Ok(PluginCli::Install {
+                plugin: plugin("hookify")
+            })
+        );
+        for verb in ["uninstall", "remove", "rm"] {
+            assert_eq!(
+                parsed_plugin(&[verb, "hookify"]),
+                Ok(PluginCli::Uninstall {
+                    plugin: plugin("hookify")
+                }),
+                "{verb}"
+            );
+        }
+        for verb in ["update", "upgrade"] {
+            assert_eq!(
+                parsed_plugin(&[verb]),
+                Ok(PluginCli::Update { plugin: None }),
+                "{verb}"
+            );
+            assert_eq!(
+                parsed_plugin(&[verb, "lint"]),
+                Ok(PluginCli::Update {
+                    plugin: Some(plugin("lint"))
+                }),
+                "{verb}"
+            );
+        }
+        assert_eq!(
+            parsed_plugin(&["enable", "lint"]),
+            Ok(PluginCli::Enable {
+                plugin: plugin("lint")
+            })
+        );
+        assert_eq!(
+            parsed_plugin(&["disable", "lint"]),
+            Ok(PluginCli::Disable {
+                plugin: plugin("lint")
+            })
+        );
+        assert_eq!(
+            parsed_plugin(&["list", "--available"]),
+            Ok(PluginCli::List { available: true })
+        );
+    }
+
+    #[test]
+    fn plugin_marketplace_commands_take_a_source_or_a_name() {
+        assert_eq!(
+            parsed_plugin(&["marketplace", "add", "anthropics/claude-plugins-official"]),
+            Ok(PluginCli::MarketplaceAdd {
+                source: "anthropics/claude-plugins-official".to_string()
+            })
+        );
+        assert_eq!(
+            parsed_plugin(&["marketplace", "list"]),
+            Ok(PluginCli::MarketplaceList)
+        );
+        assert_eq!(
+            parsed_plugin(&["marketplace", "update"]),
+            Ok(PluginCli::MarketplaceUpdate { name: None })
+        );
+        assert_eq!(
+            parsed_plugin(&["marketplace", "update", "team"]),
+            Ok(PluginCli::MarketplaceUpdate {
+                name: Some("team".to_string())
+            })
+        );
+        for verb in ["remove", "rm"] {
+            assert_eq!(
+                parsed_plugin(&["marketplace", verb, "team"]),
+                Ok(PluginCli::MarketplaceRemove {
+                    name: "team".to_string()
+                }),
+                "{verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_grammar_errors_say_what_was_expected() {
+        let err = parsed_plugin(&[]).unwrap_err();
+        assert!(err.contains("install"), "{err}");
+        let err = parsed_plugin(&["install"]).unwrap_err();
+        assert!(err.contains("needs a plugin"), "{err}");
+        let err = parsed_plugin(&["install", "a", "b"]).unwrap_err();
+        assert!(err.contains("unrecognized argument: b"), "{err}");
+        let err = parsed_plugin(&["list", "--all"]).unwrap_err();
+        assert!(err.contains("--all"), "{err}");
+        let err = parsed_plugin(&["frobnicate"]).unwrap_err();
+        assert!(err.contains("frobnicate"), "{err}");
+        let err = parsed_plugin(&["marketplace"]).unwrap_err();
+        assert!(err.contains("add, list, update or remove"), "{err}");
+        let err = parsed_plugin(&["marketplace", "add"]).unwrap_err();
+        assert!(err.contains("needs a source"), "{err}");
+        let err = parsed_plugin(&["marketplace", "remove"]).unwrap_err();
+        assert!(err.contains("needs a marketplace name"), "{err}");
+    }
+
+    #[test]
+    fn plugin_help_is_asked_for_anywhere() {
+        for args in [
+            &["--help"][..],
+            &["-h"],
+            &["install", "--help"],
+            &["marketplace", "-h"],
+            &["marketplace", "add", "--help"],
+        ] {
+            assert_eq!(parsed_plugin(args), Ok(PluginCli::Help), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_plugin_page_lists_every_command_in_eighty_columns() {
+        use unicode_width::UnicodeWidthStr;
+        let page = help(HelpPage::Plugin, HelpStyle::Plain);
+        assert!(page.starts_with("alter-zero plugin\n"), "{page}");
+        for form in [
+            "alter-zero plugin install <plugin>[@<marketplace>]",
+            "alter-zero plugin marketplace add <source>",
+            "alter-zero plugin list [--available]",
+        ] {
+            assert!(page.contains(form), "{form}:\n{page}");
+        }
+        for line in page.lines() {
+            assert!(line.width() <= 80, "{line:?}");
+            assert_eq!(line.trim_end(), line, "{line:?}");
+        }
+        let styled = help(HelpPage::Plugin, HelpStyle::Ansi);
+        assert_eq!(strip_ansi(&styled), page);
     }
 
     // ===== the mcp subcommand (docs/mcp-cli.md) =====
@@ -1644,6 +2944,7 @@ Options:
                     command: "server".to_string(),
                     args: Vec::new(),
                     env: BTreeMap::new(),
+                    cwd: None,
                 },
                 client_secret: false,
             })
@@ -1672,6 +2973,7 @@ Options:
                         .map(ToString::to_string)
                         .collect(),
                     env: BTreeMap::new(),
+                    cwd: None,
                 },
                 client_secret: false,
             })
@@ -1687,6 +2989,7 @@ Options:
                     command: "-weird".to_string(),
                     args: vec!["--help".to_string()],
                     env: BTreeMap::new(),
+                    cwd: None,
                 },
                 client_secret: false,
             })
@@ -1707,6 +3010,7 @@ Options:
                     args: Vec::new(),
                     // First `=` splits; empty values are legal.
                     env: pairs(&[("A", "1"), ("B", "x=y"), ("C", "")]),
+                    cwd: None,
                 },
                 client_secret: false,
             })

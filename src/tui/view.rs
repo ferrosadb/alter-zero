@@ -51,6 +51,12 @@ pub(crate) const STATUS_FRAME_INTERVAL: std::time::Duration = std::time::Duratio
 /// `mm:ss` countdown that is its only moving part. See `docs/copilot.md`.
 const DEVICE_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How often an open `/model` picker redraws with no other event. Its
+/// minute-granular `updated 2h ago`, and the `ctrl+r to refresh` offer that
+/// appears once its lists are a minute old, move with the clock alone — so a
+/// picker left open shows them within this long (`docs/model-cache.md`).
+const MODEL_PICKER_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Upper bound on the rows a purge rebuild (`/clear`, resize, a history
 /// rewind) re-renders into scrollback. A purge drops the terminal's own
 /// scrollback, so the whole conversation is rebuilt from history — capped here
@@ -89,6 +95,7 @@ impl Session<'_> {
         // not a measurement: nothing displays it (docs/tool-pulse.md).
         let now = self.clocks.loop_start.elapsed();
         self.app.set_pulse(now);
+        self.update_mascot_clock();
         // The open read/search group's `⎿` row steps through its calls on
         // the same clock, each value held long enough to read
         // (docs/tool-groups.md *The hint row*).
@@ -97,6 +104,12 @@ impl Session<'_> {
         // (docs/usage.md).
         if self.app.usage_page.is_some() {
             self.app.set_usage_now(super::host::unix_secs_signed());
+        }
+        // …and so does the `/model` page's `updated 2h ago`
+        // (docs/model-cache.md).
+        if self.app.model_picker.is_some() {
+            self.app
+                .set_model_picker_now(super::host::unix_secs_signed());
         }
         // How long a `/login` device code has left, when one is on screen
         // (docs/copilot.md).
@@ -112,9 +125,11 @@ impl Session<'_> {
     /// Schedule the redraw for a just-handled key. A plain typed character that
     /// lands in a `PasteBurst` asks for a *relaxed* frame a beat out instead of
     /// an immediate one; every other key (and the first characters of a run)
-    /// paints at once. The scheduler keeps the soonest pending deadline and its
-    /// rate limiter caps everything at 120 fps — that floor, not the burst
-    /// branch, is what coalesces a paste run into a few paints (see
+    /// paints at once — an **input frame**, which is not held to the 120 fps
+    /// floor a streaming reply's frames keep, nor to one of its own
+    /// (`docs/input-latency.md`). The scheduler keeps the soonest pending
+    /// deadline, and that 120 fps floor, not the burst branch, is what
+    /// coalesces a paste run's relaxed frames into a few paints (see
     /// `alter_zero::paste`).
     pub(crate) fn schedule_for_key(&mut self, key: &KeyEvent) {
         let plain_char =
@@ -125,7 +140,7 @@ impl Session<'_> {
         if plain_char && self.burst.note_char(std::time::Instant::now()) {
             self.frame.schedule_frame_in(paste::BURST_CHAR_INTERVAL);
         } else {
-            self.frame.schedule_frame();
+            self.frame.schedule_input_frame();
         }
     }
 
@@ -236,37 +251,149 @@ impl Session<'_> {
     /// chat above it scrolling into real scrollback (`InlineViewport` notes that
     /// one-way move for the close's purge rebuild; `docs/permissions.md`).
     pub(crate) fn draw_conversation(&mut self) -> io::Result<()> {
-        // Compute the strip preview cheaply once per frame (O(one line); a
-        // forming table re-renders just its own block), so the status animation
-        // never re-renders the whole reply — and inject its row count so the
-        // layout reserves it. See `docs/markdown.md`, `docs/table-streaming.md`.
-        let preview = self.stream_preview_lines();
-        let height = self.live_region_height();
-        let app = &self.app;
-        // `term` places the cursor from the final (content-anchored) viewport
-        // via `ui::cursor_position`, which mirrors render_live's layout exactly.
-        self.term.draw(
-            height,
-            |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
-            app,
-        )
+        // One frame: the height, the paint and the cursor seat each ask what
+        // the strip's live cells are, and share one build of them
+        // (`ui::frame`, `docs/input-latency.md`).
+        ui::frame(|| {
+            // Compute the strip preview cheaply once per frame (O(one line); a
+            // forming table re-renders just its own block), so the status
+            // animation never re-renders the whole reply — and inject its row
+            // count so the layout reserves it. See `docs/markdown.md`,
+            // `docs/table-streaming.md`.
+            let preview = self.stream_preview_lines();
+            let height = self.live_region_height();
+            self.pose_banner();
+            let app = &self.app;
+            // `term` places the cursor from the final (content-anchored)
+            // viewport via `ui::cursor_position`, which mirrors render_live's
+            // layout exactly.
+            self.term.draw(
+                height,
+                |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
+                app,
+            )
+        })
     }
 
-    /// Render the full-screen tool-output overlay. Clamps the scroll to the
-    /// current screen first (so the last line can reach the bottom but not
-    /// scroll past it), then paints the view onto the alternate screen.
+    /// Hand the viewport the banner's pose for the frame about to be drawn —
+    /// or let the banner go (`docs/mascot-animation.md`).
+    ///
+    /// While the conversation is empty the banner is still **anchored**
+    /// above the live region, repaintable in place: this frame shows it as
+    /// `ui::banner_frame_lines` says — the mascot mid-blink, or standing
+    /// still, which repaints nothing. The moment a cell is recorded (or a
+    /// turn is in flight to record one) the banner is released instead: the
+    /// viewport puts it back to the rows it was committed as, in the same
+    /// frame that writes the first cell under it, and from then on it is
+    /// scrollback. A viewport with no anchor — a resumed conversation, a
+    /// banner scrolled off a short terminal — has nothing to pose.
+    fn pose_banner(&mut self) {
+        if !self.term.has_anchor() {
+            return;
+        }
+        let width = self.term.screen().width;
+        if !self.app.banner_is_live() {
+            self.term.release_anchor();
+        } else if self.app.mascot_animates() && ui::banner_shows_art(&self.app, width) {
+            self.term
+                .pose_anchor(ui::banner_frame_lines(&self.app, width));
+        } else {
+            // Nothing of it moves — the animation is off, or the terminal
+            // too narrow for the art: the banner stands as it was
+            // committed, and no frame builds its rows to learn that.
+            self.term.still_anchor();
+        }
+    }
+
+    /// Write the mascot's animation clock onto `App`: time since the banner
+    /// first reached the screen (`docs/mascot-animation.md`).
+    fn update_mascot_clock(&mut self) {
+        self.app.set_mascot_clock(
+            self.clocks
+                .banner_start
+                .map_or(std::time::Duration::ZERO, |start| start.elapsed()),
+        );
+    }
+
+    /// A frame **only the banner's mascot asked for**
+    /// (`docs/mascot-animation.md` *A frame of its own*): its clock, its
+    /// pose, the cells of the banner that differ — and nothing else. No
+    /// other clock is read and the live region is not rendered, since
+    /// nothing in it can have changed: whatever else moves by itself asks
+    /// for its own frames, and this one would not be the banner's alone.
+    fn draw_banner_frame(&mut self) -> io::Result<()> {
+        self.update_mascot_clock();
+        self.pose_banner();
+        self.term.draw_anchor(&self.app)?;
+        self.schedule_mascot_frame();
+        Ok(())
+    }
+
+    /// Ask for the frame the mascot's next pose is due at, when one is
+    /// moving on screen. The banner keeps no chain at all: it stands still
+    /// for seconds at a time, so each frame asks when its pose next changes
+    /// and one frame is scheduled for exactly then — a blink costs four,
+    /// and an idle session sleeps between them (`docs/mascot-animation.md`).
+    ///
+    /// That frame is asked for **on the banner's account**
+    /// ([`draw_banner_frame`](Self::draw_banner_frame)) unless the `/mascot`
+    /// picker is open: its preview moves inside the live region, which only
+    /// a whole frame repaints.
+    fn schedule_mascot_frame(&self) {
+        let Some(wait) = self.mascot_frame_due() else {
+            return;
+        };
+        if self.app.highlighted_mascot().is_some() {
+            self.frame.schedule_frame_in(wait);
+        } else {
+            self.frame.schedule_banner_frame_in(wait);
+        }
+    }
+
+    /// How long until the mascot's next animation frame is due, or `None`
+    /// when no mascot is moving on screen — asked after every draw
+    /// (`docs/mascot-animation.md`). The banner counts only while the
+    /// viewport still holds it anchored (so: on screen, over an empty
+    /// conversation) and the terminal is wide enough to draw its art.
+    fn mascot_frame_due(&self) -> Option<std::time::Duration> {
+        let width = self.term.screen().width;
+        let banner = self.term.has_anchor() && ui::banner_shows_art(&self.app, width);
+        self.app.mascot_frame_in(banner)
+    }
+
+    /// Start the mascot's animation over, so the banner about to be shown
+    /// **greets** — the sweep of light, the mascot's own move, a blink
+    /// (`docs/mascot-animation.md`). The three things that open a fresh
+    /// banner call it: the first frame, `/clear`, and a `/mascot` choice. A
+    /// rebuild that only redraws the banner already there — a resize, a
+    /// rewind to an empty conversation — never does, so a dragged window
+    /// edge does not greet on every step.
+    pub(crate) fn greet_from_banner(&mut self) {
+        self.clocks.banner_start = Some(std::time::Instant::now());
+    }
+
+    /// Render the full-screen tool-output overlay. Resolves the ←/→ steps
+    /// (and the scrolls pressed behind them) waiting against the transcript as built and clamps the scroll to the
+    /// current screen (so the last line can reach the bottom but not scroll
+    /// past it), then paints the view onto the alternate screen — the header
+    /// of the cell the window opens inside pinned over its top
+    /// (`docs/transcript-navigation.md`).
     pub(crate) fn draw_tool_view(&mut self) -> io::Result<()> {
         let screen = self.term.screen();
         // An agent session view's Ctrl+O shows the *viewed agent's* transcript —
         // a fresh, bounded build (docs/agent-tool.md); the main cache below is
         // untouched, so the ordinary open stays warm.
-        if let Some(lines) = ui::agent_transcript_lines(&self.app, screen.width) {
-            let max = ui::tool_view_max_scroll_for(lines.len(), screen.height);
+        if let Some(page) = ui::agent_transcript(&self.app, screen.width) {
+            let max = ui::tool_view_max_scroll_for(page.lines.len(), screen.height);
+            if !self.app.tool_moves.is_empty() {
+                let starts: Vec<usize> = page.entries.iter().map(|entry| entry.start).collect();
+                self.app.resolve_tool_moves(&starts, max);
+            }
             self.app.settle_tool_scroll(max);
             let app = &self.app;
             return self
                 .term
-                .draw_overlay(|area, buf| ui::render_tool_view(area, buf, app, &lines));
+                .draw_overlay(|area, buf| ui::render_tool_view(area, buf, app, &page));
         }
         // A backtrack preview open/step requested a scroll to its highlighted
         // message (docs/backtrack.md): apply the pure decision once — consumed,
@@ -287,6 +414,18 @@ impl Session<'_> {
             self.transcript.line_count(&self.app, screen.width),
             screen.height,
         );
+        // A ←/→ press lands against the transcript as built — its width, its
+        // wrapping — before the settle clamps it; the same cached build. The
+        // moves a frame received replay in the order they came.
+        if !self.app.tool_moves.is_empty() {
+            let starts: Vec<usize> = self
+                .transcript
+                .entries(&self.app, screen.width)
+                .iter()
+                .map(|entry| entry.start)
+                .collect();
+            self.app.resolve_tool_moves(&starts, max);
+        }
         self.app.settle_tool_scroll(max);
         let app = &self.app;
         let transcript = &mut self.transcript;
@@ -322,7 +461,7 @@ impl Session<'_> {
         let max = ui::tool_view_max_scroll_for(body.lines.len(), screen.height);
         // A ←/→ press lands against the page as built — its width, its
         // wrapping — before the settle clamps it.
-        self.app.resolve_debug_jump(&body.headers, max);
+        self.app.resolve_debug_moves(&body.headers, max);
         self.app.settle_debug_scroll(max);
         let app = &self.app;
         self.term
@@ -357,7 +496,7 @@ impl Session<'_> {
         let screen = self.term.screen();
         let body = ui::classifier_body(&self.app, screen.width);
         let max = ui::tool_view_max_scroll_for(body.lines.len(), screen.height);
-        self.app.resolve_debug_jump(&body.headers, max);
+        self.app.resolve_debug_moves(&body.headers, max);
         self.app.settle_classifier_scroll(max);
         let app = &self.app;
         self.term
@@ -394,11 +533,24 @@ impl Session<'_> {
             // (`docs/view-flow.md`; the flow check runs first so a prompt
             // opening over a flowed menu cleans the flow in the very rebuild
             // that seats the prompt).
-            View::Conversation if self.view_flow_stale() || self.modal_rebuild_due() => {
+            View::Conversation => {
+                // The two checks and the paint are one frame: each reads the
+                // strip's live cells, and they share one build of them
+                // (`ui::frame`, `docs/input-latency.md`). The rebuild is a
+                // frame of its own — it looks for the pictures' files again
+                // first, which can change what a cell reserves.
+                let painted = ui::frame(|| {
+                    if self.view_flow_stale() || self.modal_rebuild_due() {
+                        return Ok(false);
+                    }
+                    self.draw_conversation().map(|()| true)
+                })?;
+                if painted {
+                    return Ok(());
+                }
                 let _ = self.term.take_modal_scrolled();
                 self.repaint_active_view()
             }
-            View::Conversation => self.draw_conversation(),
             View::ToolOutput => self.draw_tool_view(),
             View::ResumePicker => self.draw_resume_picker(),
             View::DiffReview => self.draw_diff_review(),
@@ -479,46 +631,62 @@ impl Session<'_> {
         // so nothing is "already committed" any more: reset, and let the
         // catch-up below re-commit the whole partial at the current width.
         self.render.reset();
-        // The preview comes FIRST: it injects the strip's preview row count
-        // (`set_stream_preview_rows` — a forming table previews multi-row) that
-        // `live_region_height` below must reserve (docs/table-streaming.md).
-        let preview = self.stream_preview_lines();
-        let height = self.live_region_height();
-        let tail = ui::repaint_tail(
-            // Only what has actually reached scrollback: the open read/search
-            // group, or a parallel MCP run still in flight, has cells
-            // recorded but held, and the strip is showing them
-            // (`docs/tool-groups.md`, `docs/mcp.md`).
-            ui::committed_history(&self.app.history, self.app.tool_queue(), held),
-            self.app.streaming_text(),
-            &mut self.render,
-            screen.width,
-            RESIZE_REFLOW_MAX_ROWS,
-            self.app.path_display(),
-            self.app.settings().verbose,
-        );
-        // Re-emit the header banner atop the rebuilt tail — it lives outside
-        // `history` and would otherwise be lost (docs/header.md).
-        let mut tail = ui::banner_tail(ui::header_lines(&self.app, screen.width), tail);
-        // A screen-tall framed view flows its page top into scrollback: the
-        // rows ride the tail's very end, so they land directly above the live
-        // region — the page reads whole across the seam. Recomputed here, at
-        // the one place every purge rebuild goes through, so a resize or a
-        // rewind under an open menu re-flows at the new state for free; the
-        // stored signature is what the draw tick compares
-        // (`docs/view-flow.md`).
-        let flow = self.current_view_flow();
-        self.flowed_view = flow.as_ref().map(|flow| flow.signature);
-        if let Some(flow) = flow {
-            tail.extend(flow.lines);
-        }
-        let app = &self.app;
-        self.term.reflow(
-            tail,
-            height,
-            |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
-            app,
-        )?;
+        // The rebuild's own frame, opened once the pictures have been looked
+        // for: the height, the flow and the paint share one build of the
+        // strip's live cells (`ui::frame`, `docs/input-latency.md`).
+        ui::frame(|| -> io::Result<()> {
+            // The preview comes FIRST: it injects the strip's preview row
+            // count (`set_stream_preview_rows` — a forming table previews
+            // multi-row) that `live_region_height` below must reserve
+            // (docs/table-streaming.md).
+            let preview = self.stream_preview_lines();
+            let height = self.live_region_height();
+            let tail = ui::repaint_tail(
+                // Only what has actually reached scrollback: the open
+                // read/search group, or a parallel MCP run still in flight,
+                // has cells recorded but held, and the strip is showing them
+                // (`docs/tool-groups.md`, `docs/mcp.md`).
+                ui::committed_history(&self.app.history, self.app.tool_queue(), held),
+                self.app.streaming_text(),
+                &mut self.render,
+                screen.width,
+                RESIZE_REFLOW_MAX_ROWS,
+                self.app.path_display(),
+                self.app.settings().verbose,
+            );
+            // Re-emit the header banner atop the rebuilt tail — it lives
+            // outside `history` and would otherwise be lost (docs/header.md).
+            // A rebuild of an empty conversation writes the banner and
+            // nothing under it: it stays repaintable where it lands, exactly
+            // as at launch (docs/mascot-animation.md).
+            let bare = tail.is_empty() && self.app.banner_is_live();
+            let mut tail = ui::banner_tail(ui::header_lines(&self.app, screen.width), tail);
+            // A screen-tall framed view flows its page top into scrollback:
+            // the rows ride the tail's very end, so they land directly above
+            // the live region — the page reads whole across the seam.
+            // Recomputed here, at the one place every purge rebuild goes
+            // through, so a resize or a rewind under an open menu re-flows at
+            // the new state for free; the stored signature is what the draw
+            // tick compares (`docs/view-flow.md`).
+            let flow = self.current_view_flow();
+            self.flowed_view = flow.as_ref().map(|flow| flow.signature);
+            // …unless a flowed page sits between it and the region.
+            let anchor = (bare && flow.is_none()).then(|| tail.clone());
+            if let Some(flow) = flow {
+                tail.extend(flow.lines);
+            }
+            let app = &self.app;
+            self.term.reflow(
+                tail,
+                height,
+                |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
+                app,
+            )?;
+            if let Some(banner) = anchor {
+                self.term.anchor_above(banner);
+            }
+            Ok(())
+        })?;
         // Catch scrollback up on the in-flight partial the purge dropped:
         // exactly the rows live streaming would have committed, queued for
         // the next draw. Suppressed while a flow is active — the queued rows
@@ -553,36 +721,39 @@ impl Session<'_> {
         let history = ui::committed_history(&run.history, &run.tool_queue, None).to_vec();
         recheck_pictures(&history);
         let streaming = run.streaming.clone().filter(|text| !text.is_empty());
-        // The preview comes FIRST, as in `repaint_conversation`: it injects
-        // the strip's row count (`set_stream_preview_rows`) that
-        // `live_region_height` below must reserve — a rebuild that skipped it
-        // squeezed a multi-row frontier back to one row for that frame
-        // (`docs/agent-view-streaming.md`).
-        let preview = self.stream_preview_lines();
-        let height = self.live_region_height();
-        // An agent's session view keeps a cell per call: its commits are
-        // keyed on the records its own run makes (docs/tool-groups.md).
-        let mut tail =
-            ui::conversation_lines(&history, screen.width, self.app.path_display(), true);
-        if let Some(text) = &streaming {
-            tail.extend(self.agent_render.committed_rows(text, screen.width));
-        }
-        let mut tail = ui::banner_tail(ui::header_lines(&self.app, screen.width), tail);
-        // A framed view opened from the agent view's own palette renders over
-        // it and flows the same way (`docs/view-flow.md`) — the rebuild is
-        // this view's, so the flow rides this tail.
-        let flow = self.current_view_flow();
-        self.flowed_view = flow.as_ref().map(|flow| flow.signature);
-        if let Some(flow) = flow {
-            tail.extend(flow.lines);
-        }
-        let app = &self.app;
-        self.term.reflow(
-            tail,
-            height,
-            |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
-            app,
-        )?;
+        // The rebuild's own frame, as in `repaint_conversation`.
+        ui::frame(|| {
+            // The preview comes FIRST, as in `repaint_conversation`: it
+            // injects the strip's row count (`set_stream_preview_rows`) that
+            // `live_region_height` below must reserve — a rebuild that
+            // skipped it squeezed a multi-row frontier back to one row for
+            // that frame (`docs/agent-view-streaming.md`).
+            let preview = self.stream_preview_lines();
+            let height = self.live_region_height();
+            // An agent's session view keeps a cell per call: its commits are
+            // keyed on the records its own run makes (docs/tool-groups.md).
+            let mut tail =
+                ui::conversation_lines(&history, screen.width, self.app.path_display(), true);
+            if let Some(text) = &streaming {
+                tail.extend(self.agent_render.committed_rows(text, screen.width));
+            }
+            let mut tail = ui::banner_tail(ui::header_lines(&self.app, screen.width), tail);
+            // A framed view opened from the agent view's own palette renders
+            // over it and flows the same way (`docs/view-flow.md`) — the
+            // rebuild is this view's, so the flow rides this tail.
+            let flow = self.current_view_flow();
+            self.flowed_view = flow.as_ref().map(|flow| flow.signature);
+            if let Some(flow) = flow {
+                tail.extend(flow.lines);
+            }
+            let app = &self.app;
+            self.term.reflow(
+                tail,
+                height,
+                |area, buf| ui::render_live_with_preview(area, buf, app, preview.as_deref()),
+                app,
+            )
+        })?;
         // Catch scrollback up on the agent's in-flight partial the purge
         // dropped — `repaint_conversation`'s catch-up over `agent_render`, so
         // a rebuild mid-reply leaves the same rows behind here as it does in
@@ -681,6 +852,14 @@ fn live_region_height(app: &App, screen: ratatui::layout::Rect) -> u16 {
     if let Some(height) = ui::donate_picker_height(app, screen.width, screen.height) {
         return height;
     }
+    // The read-only `/sponsor` page, likewise (docs/sponsor.md).
+    if let Some(height) = ui::sponsor_page_height(app, screen.width, screen.height) {
+        return height;
+    }
+    // The read-only `/discord` page, likewise (docs/discord.md).
+    if let Some(height) = ui::discord_page_height(app, screen.width, screen.height) {
+        return height;
+    }
     // The read-only `/export` page, likewise (docs/export.md).
     if let Some(height) = ui::export_picker_height(app, screen.width, screen.height) {
         return height;
@@ -695,6 +874,10 @@ fn live_region_height(app: &App, screen: ratatui::layout::Rect) -> u16 {
     }
     // The `/mcp` manager, likewise (docs/mcp.md).
     if let Some(height) = ui::mcp_menu_height(app, screen.width, screen.height) {
+        return height;
+    }
+    // The `/plugins` page, likewise (docs/plugins.md).
+    if let Some(height) = ui::plugins_menu_height(app, screen.width, screen.height) {
         return height;
     }
     if let Some(height) = ui::background_view_height(app, screen.width, screen.height) {
@@ -771,6 +954,13 @@ impl Session<'_> {
     /// a thinking pause). The chain seeds from the Submit keypress and stops by
     /// itself on the first draw after the turn ends.
     pub(crate) fn on_draw_tick(&mut self) -> io::Result<()> {
+        // A frame nothing has asked for since the last one began but the
+        // banner's mascot is the banner's alone: its cells, and none of the
+        // work below (`docs/mascot-animation.md` *A frame of its own*).
+        let banner_alone = self.frames.banner_alone(self.frame.asked());
+        if banner_alone && self.app.view == View::Conversation {
+            return self.draw_banner_frame();
+        }
         self.update_status_times();
         // Inject each background shell's runtime (the boundary owns the started
         // clocks — docs/background.md), so the manager's details view ticks.
@@ -786,6 +976,7 @@ impl Session<'_> {
         // …and an open `/usage` page due its minute refresh starts it, the
         // page keeping its own slow frame (docs/usage.md).
         self.tick_usage_page();
+        self.tick_plugins_page();
         self.draw_active_view()?;
         // The ↓ manager band re-arms frames like an active turn: its details
         // view's Runtime ticks with no events otherwise — and so does a non-empty
@@ -798,6 +989,7 @@ impl Session<'_> {
         if self.app.wants_animation_frames() {
             self.frame.schedule_frame_in(STATUS_FRAME_INTERVAL);
         }
+        self.schedule_mascot_frame();
         // The `/login` device page keeps its own, much slower chain. Its only
         // moving part is an `mm:ss` countdown, so a frame a second is exactly
         // the rate its content changes at — and every frame costs a cursor
@@ -806,6 +998,11 @@ impl Session<'_> {
         // shimmer over the page (`docs/copilot.md`).
         if self.app.device_login_active() {
             self.frame.schedule_frame_in(DEVICE_TICK_INTERVAL);
+        }
+        // The `/model` picker keeps a slower chain still: what it says about
+        // its lists' age changes by the minute, with no event of its own.
+        if self.app.model_picker.is_some() {
+            self.frame.schedule_frame_in(MODEL_PICKER_TICK_INTERVAL);
         }
         Ok(())
     }

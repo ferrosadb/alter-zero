@@ -163,8 +163,8 @@ pub fn render_export_picker(area: Rect, buf: &mut Buffer, app: &App) {
 /// The conversation **on screen** as plain text, at `width` columns: the
 /// Ctrl+O page's own rows, top to bottom — the startup banner it opens
 /// with (the mascot beside `Alter Zero (v…)`, the cwd, the
-/// `/login   /model   /resume` hint), then every message and every tool
-/// call's full output, in order, plus the live tail mid-turn — inside a
+/// `/ commands  @ files  ? shortcuts` hint), then every message and every
+/// tool call's full output, in order, plus the live tail mid-turn — inside a
 /// subagent's session view that agent's transcript, else the main one
 /// (the `/copy` rule). The styles are dropped; each row loses the padding
 /// a cell carries on screen (a full-width user bubble, a right-aligned
@@ -172,9 +172,17 @@ pub fn render_export_picker(area: Rect, buf: &mut Buffer, app: &App) {
 /// closes on exactly one newline. The command never exports an empty
 /// conversation, so the pager's `Nothing here yet.` placeholder is never
 /// reached.
+///
+/// One thing is rendered differently from the screen on purpose: a link
+/// keeps its address — `label (url)` — whatever the terminal shows
+/// (`docs/links.md` *Labelled links*). On screen the address may sit behind
+/// the label as a hyperlink; text has nothing behind it, and a style is
+/// exactly what this drops.
 #[must_use]
 pub fn export_text(app: &App, width: u16) -> String {
-    let lines = agent_transcript_lines(app, width).unwrap_or_else(|| transcript_lines(app, width));
+    let lines = crate::links::with_target_display(crate::links::TargetDisplay::Shown, || {
+        agent_transcript_lines(app, width).unwrap_or_else(|| transcript_lines(app, width))
+    });
     let mut rows: Vec<String> = lines
         .iter()
         .map(|line| {

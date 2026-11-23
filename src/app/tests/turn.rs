@@ -225,6 +225,61 @@ fn esc_with_the_palette_open_only_dismisses_it_even_mid_turn() {
 }
 
 #[test]
+fn a_backend_error_says_each_call_died_with_the_turn() {
+    // docs/rollout-records.md: the running call records how long it had run
+    // (the command clock the running cell shows); a sibling that never
+    // started records only why it failed.
+    let mut app = App::new();
+    app.begin_stream();
+    app.start_tool_batch(&ping_batch());
+    app.start_tool("Bash", "ping google.com", None);
+    app.set_command_elapsed(Some(Duration::from_millis(2_500)));
+    let failure = app.fail_stream("network down").expect("was streaming");
+    let kind = Some(crate::stream::ToolErrorKind::BackendError);
+    assert_eq!(failure.tools[0].run.error_kind, kind);
+    assert_eq!(failure.tools[0].run.duration_ms, Some(2_500));
+    assert_eq!(failure.tools[0].run.exit_code, None);
+    for sibling in &failure.tools[1..] {
+        assert_eq!(
+            sibling.run,
+            crate::stream::ToolRun::refused(crate::stream::ToolErrorKind::BackendError),
+            "{sibling:?} never ran"
+        );
+    }
+}
+
+#[test]
+fn an_interrupt_says_each_call_was_interrupted() {
+    let mut app = App::new();
+    app.begin_stream();
+    app.start_tool_batch(&ping_batch());
+    app.start_tool("Bash", "ping google.com", None);
+    app.set_command_elapsed(Some(Duration::from_millis(900)));
+    let InterruptedTurn::Kept { tools, .. } = app.interrupt_turn(1).expect("a turn was active")
+    else {
+        panic!("a running call is kept, not undone");
+    };
+    let kind = Some(crate::stream::ToolErrorKind::Interrupted);
+    assert_eq!(tools[0].run.error_kind, kind);
+    assert_eq!(tools[0].run.duration_ms, Some(900));
+    assert!(
+        tools[1..].iter().all(|call| call.run
+            == crate::stream::ToolRun::refused(crate::stream::ToolErrorKind::Interrupted)),
+        "{tools:?}"
+    );
+    // The records the rollout writes carry the same.
+    let recorded: Vec<_> = app
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            HistoryItem::Tool(call) => Some(call.run.error_kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, vec![kind; 3]);
+}
+
+#[test]
 fn interrupt_turn_keeps_the_partial_and_records_the_notice() {
     let mut app = App::new();
     app.begin_stream();
@@ -647,8 +702,8 @@ fn the_interrupted_receipt_names_the_verb_the_last_frame_drew() {
     verbs_at(&mut app, Duration::from_millis(29_990));
     let summary = interrupted_receipt(&mut app, 30).expect("a receipt");
     assert_eq!(
-        summary.verb, "Worked",
-        "the line never showed `Generating…`"
+        summary.verb, STATUS_VERBS[0].done,
+        "the line never showed the second verb"
     );
     assert_eq!(summary.secs, 30, "the time is still the turn's own");
 }
@@ -661,7 +716,7 @@ fn the_interrupted_receipt_counts_the_shells_still_running() {
     let summary = interrupted_receipt(&mut app, 5).expect("a receipt");
     assert_eq!(
         summary.shells, 2,
-        "Worked for 5s · … · 2 shells still running"
+        "Hatched for 5s · … · 2 shells still running"
     );
 }
 
@@ -1049,13 +1104,15 @@ fn every_status_verb_pairs_with_its_own_past_tense() {
     // must be one verb — a table edit can never leave `Brewing…` settling
     // as `Cooked for 12s` — and no verb repeats in either form, or a
     // rotation could show the same word twice running
-    // (docs/status-indicator.md). The table opens on the neutral `Working`
-    // a session's first turn, an agent's and the /spinner preview start on.
+    // (docs/status-indicator.md). The table opens on `Hatching` — the
+    // default mascot is a crested hatchling — where an unseeded walk (every
+    // unit test) and the smoke suite's pinned one start; a real session
+    // starts wherever the boundary's random pick puts it.
     assert_eq!(
         STATUS_VERBS[0],
         StatusVerb {
-            working: "Working",
-            done: "Worked",
+            working: "Hatching",
+            done: "Hatched",
         }
     );
     for (i, verb) in STATUS_VERBS.iter().enumerate() {
@@ -1071,6 +1128,102 @@ fn every_status_verb_pairs_with_its_own_past_tense() {
             "{verb:?} appears once"
         );
     }
+}
+
+#[test]
+fn a_seeded_session_opens_its_first_turn_on_the_seeded_verb() {
+    // The boundary picks the session's first verb at random
+    // (docs/status-indicator.md *The verb catalog*), so no two launches need
+    // open on the same word; the walk goes on from it exactly as before,
+    // the next turn one verb further.
+    let mut app = App::new();
+    app.seed_status_verbs(17);
+    app.begin_stream();
+    assert_eq!(app.status().unwrap().verb, STATUS_VERBS[17].working);
+    app.finish_stream();
+    app.end_turn(1);
+    app.begin_stream();
+    assert_eq!(app.status().unwrap().verb, STATUS_VERBS[18].working);
+}
+
+#[test]
+fn a_seed_past_the_table_wraps_into_it() {
+    let mut app = App::new();
+    app.seed_status_verbs(STATUS_VERBS.len() + 3);
+    assert_eq!(app.first_status_verb(), 3);
+    app.begin_stream();
+    assert_eq!(app.status().unwrap().verb, STATUS_VERBS[3].working);
+}
+
+#[test]
+fn the_opening_verb_is_the_pinned_one_else_the_entropys_pick() {
+    // `ALTER_ZERO_FIRST_VERB` names the live form (any case, spaces
+    // trimmed) for a run that must know each turn's word — the smoke suite;
+    // a name the table does not hold is no pin at all.
+    let brewing = STATUS_VERBS
+        .iter()
+        .position(|verb| verb.working == "Brewing")
+        .expect("Brewing is in the table");
+    assert_eq!(StatusVerb::opening_index(Some("Brewing"), 5), brewing);
+    assert_eq!(StatusVerb::opening_index(Some(" brewing "), 5), brewing);
+    assert_eq!(StatusVerb::opening_index(Some("Generating"), 5), 5);
+    assert_eq!(StatusVerb::opening_index(Some(""), 5), 5);
+    assert_eq!(StatusVerb::opening_index(None, 5), 5);
+    // The pick spans the whole table and never overflows.
+    let len = STATUS_VERBS.len();
+    let picks: std::collections::HashSet<usize> = (0..2 * len as u64)
+        .map(|entropy| StatusVerb::opening_index(None, entropy))
+        .collect();
+    assert_eq!(picks.len(), len, "every verb can open a session");
+    assert!(StatusVerb::opening_index(None, u64::MAX) < len);
+}
+
+#[test]
+fn no_status_verb_is_a_generic_process_word() {
+    // The line's word is there to give the wait some character, so it is
+    // never a word any program's progress line could print — the table once
+    // opened `Working…`, `Generating…`, and read `Computing…` and
+    // `Synthesizing…` further down (docs/status-indicator.md *The verb
+    // catalog*). What the turn is actually doing is said elsewhere on the
+    // strip: a tool cell, the `● Thinking…` block, a task's activeForm.
+    const GENERIC: &[&str] = &[
+        "Working",
+        "Generating",
+        "Processing",
+        "Computing",
+        "Calculating",
+        "Synthesizing",
+        "Thinking",
+        "Reasoning",
+        "Loading",
+        "Running",
+        "Executing",
+        "Creating",
+        "Doing",
+        "Analyzing",
+        "Preparing",
+        "Responding",
+        "Compiling",
+    ];
+    for verb in STATUS_VERBS {
+        assert!(
+            !GENERIC.contains(&verb.working),
+            "{verb:?} is a generic process word"
+        );
+    }
+}
+
+#[test]
+fn the_line_never_repeats_a_verb_inside_half_an_hour() {
+    // One verb per VERB_ROTATION, so the table's length is how long a single
+    // turn runs before the line comes back round to a word it already wore —
+    // half an hour, long enough for a sizeable agentic task, where the old
+    // ten-entry table lapped every five minutes.
+    let lap = VERB_ROTATION * u32::try_from(STATUS_VERBS.len()).expect("a short table");
+    assert!(
+        lap >= Duration::from_secs(30 * 60),
+        "the walk laps after {lap:?}"
+    );
 }
 
 #[test]
@@ -1098,6 +1251,19 @@ fn the_smoke_scripts_summary_patterns_follow_the_verb_table() {
             format!("SUMMARY_TURN{}=\"{done} for\"", turn + 1),
         ));
     }
+    // The live verb a launch's first turn — and an agent's, and the
+    // /spinner preview — opens on, for the phases that find the status line
+    // by its word rather than by its `esc to interrupt`.
+    required.push((
+        "scripts/smoke/lib.sh",
+        format!("VERB_TURN1=\"{}\"", STATUS_VERBS[0].working),
+    ));
+    // A real session opens on a random verb, so all of the above holds only
+    // because the suite pins the first one to VERB_TURN1.
+    required.push((
+        "scripts/smoke/lib.sh",
+        "export ALTER_ZERO_FIRST_VERB=\"$VERB_TURN1\"".to_string(),
+    ));
     for (script, line) in required {
         let path = format!("{}/{script}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(&path).expect("the script exists");
@@ -1154,19 +1320,14 @@ fn the_status_verb_moves_on_every_thirty_seconds() {
     // long one gets a fresh word each half minute (docs/status-indicator.md).
     let mut app = App::new();
     app.begin_stream();
+    let pair = |i: usize| (STATUS_VERBS[i].working, STATUS_VERBS[i].done);
     assert_eq!(
         verbs_at(&mut app, Duration::from_millis(29_999)),
-        ("Working", "Worked"),
+        pair(0),
         "the opening verb holds for the whole first half minute"
     );
-    assert_eq!(
-        verbs_at(&mut app, Duration::from_secs(30)),
-        ("Generating", "Generated")
-    );
-    assert_eq!(
-        verbs_at(&mut app, Duration::from_secs(65)),
-        ("Pondering", "Pondered")
-    );
+    assert_eq!(verbs_at(&mut app, Duration::from_secs(30)), pair(1));
+    assert_eq!(verbs_at(&mut app, Duration::from_secs(65)), pair(2));
 }
 
 #[test]
@@ -1189,8 +1350,8 @@ fn the_summary_follows_the_verb_the_line_rotated_to() {
     app.finish_stream();
     let summary = app.end_turn(45).expect("a turn was active");
     assert_eq!(
-        summary.verb, "Generated",
-        "the line last said `Generating…`"
+        summary.verb, STATUS_VERBS[1].done,
+        "the line last wore the second verb"
     );
 }
 
@@ -1204,15 +1365,15 @@ fn the_summary_names_the_verb_the_last_frame_drew() {
     app.finish_stream();
     let summary = app.end_turn(30).expect("a turn was active");
     assert_eq!(
-        summary.verb, "Worked",
-        "the line never showed `Generating…`"
+        summary.verb, STATUS_VERBS[0].done,
+        "the line never showed the second verb"
     );
     assert_eq!(summary.secs, 30, "the time is still the turn's own");
 }
 
 #[test]
 fn the_next_turn_opens_on_the_verb_after_the_last_one_shown() {
-    // A turn that rotated to `Generating…` hands the next one `Pondering…` —
+    // A turn that rotated to the second verb hands the next one the third —
     // never the verb the summary above it just named.
     let mut app = App::new();
     app.begin_stream();
@@ -1220,7 +1381,7 @@ fn the_next_turn_opens_on_the_verb_after_the_last_one_shown() {
     app.finish_stream();
     app.end_turn(45);
     app.begin_stream();
-    assert_eq!(app.status().unwrap().verb, "Pondering");
+    assert_eq!(app.status().unwrap().verb, STATUS_VERBS[2].working);
 }
 
 #[test]
@@ -1234,11 +1395,11 @@ fn an_interrupted_turn_hands_on_its_last_verb_too() {
     verbs_at(&mut app, Duration::from_secs(31));
     let summary = interrupted_receipt(&mut app, 31).expect("a receipt");
     assert_eq!(
-        summary.verb, "Generated",
-        "the line last said `Generating…`"
+        summary.verb, STATUS_VERBS[1].done,
+        "the line last wore the second verb"
     );
     app.begin_stream();
-    assert_eq!(app.status().unwrap().verb, "Pondering");
+    assert_eq!(app.status().unwrap().verb, STATUS_VERBS[2].working);
 }
 
 #[test]
@@ -1855,6 +2016,7 @@ fn a_retry_never_reaches_back_into_an_earlier_round() {
             output: "src\n".into(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         },
     );
     stream_event(&mut app, StreamEvent::Chunk("The tree has".into()));
@@ -1903,6 +2065,33 @@ fn a_round_boundary_closes_the_mark_even_when_it_records_nothing() {
             "thought: weighing"
         ]
     );
+}
+
+#[test]
+fn the_settled_history_stops_where_a_retry_could_take_back() {
+    // What a headless run may print (docs/headless.md): records an attempt
+    // made are tentative until the attempt ends, since a retry withdraws
+    // them; everything before is settled.
+    let mut app = streaming_turn();
+    assert_eq!(app.settled_history_len(), 1, "the prompt is settled");
+    stream_event(&mut app, StreamEvent::Chunk("First, ".into()));
+    stream_event(&mut app, StreamEvent::ThinkingStart);
+    stream_event(&mut app, StreamEvent::ThinkingChunk("weighing it".into()));
+    stream_event(&mut app, StreamEvent::ThinkingEnd);
+    assert_eq!(
+        app.history.len(),
+        3,
+        "the attempt recorded text and a thought"
+    );
+    assert_eq!(
+        app.settled_history_len(),
+        1,
+        "…which a retry could still withdraw"
+    );
+    // The attempt ends — its round's calls are announced — and what it
+    // recorded can no longer be taken back.
+    app.track_attempt(&StreamEvent::RoundCalls(Vec::new()));
+    assert_eq!(app.settled_history_len(), 3);
 }
 
 #[test]

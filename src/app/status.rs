@@ -30,11 +30,11 @@ pub enum TokenArrow {
 /// core except as these already-computed values (mirrors the timestamp clock).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStatus {
-    /// The whimsical working verb the line wears right now (e.g. `Working`) —
+    /// The whimsical working verb the line wears right now (e.g. `Hatching`) —
     /// moved on every [`VERB_ROTATION`] by [`App::set_status_times`] when the
     /// turn [rotates](Self::rotates_from).
     pub verb: &'static str,
-    /// The past tense of [`verb`](Self::verb) (e.g. `Worked`), which the
+    /// The past tense of [`verb`](Self::verb) (e.g. `Hatched`), which the
     /// committed summary opens with. Always rotated together with it, so the
     /// summary names the verb the line last wore.
     pub done_verb: &'static str,
@@ -143,9 +143,10 @@ impl TurnStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSummary {
     /// The past tense of the verb the turn's status line wore last (e.g.
-    /// `Worked` after `Working…`) — [`TurnStatus::done_verb`] at turn end. A
-    /// resumed older rollout may carry a verb from before the pairing
-    /// (`Done`, `Finished`, …).
+    /// `Hatched` after `Hatching…`) — [`TurnStatus::done_verb`] at turn end.
+    /// A resumed older rollout may carry a verb from before the pairing
+    /// (`Done`, `Finished`, …) or one the table has since retired
+    /// (`Generated`, `Worked`, …).
     pub verb: &'static str,
     /// The turn's total wall-clock duration in whole seconds.
     pub secs: u64,
@@ -228,8 +229,8 @@ impl App {
     ///
     /// [`begin_reasoning`]: App::begin_reasoning
     pub fn push_thinking(&mut self, chunk: &str) {
-        if let Some(buf) = self.reasoning.as_mut() {
-            buf.push_str(chunk);
+        if let Some(thought) = self.reasoning.as_mut() {
+            thought.push(chunk);
         }
         if let Some(status) = self.status.as_mut() {
             status.tokens += count_tokens(chunk);
@@ -459,12 +460,13 @@ impl App {
     /// be advertising it (`docs/permissions.md`). Nothing is really *running*
     /// while a call waits on the user, either. The ↓ manager band and **every**
     /// composer-replacing picker (`/model`, `/login`, `/settings`, `/hooks`,
-    /// `/skills`, `/mascot`, `/spinner`, `/theme`, `/donate`, `/secrets`,
-    /// `/export`, `/context`, `/usage`) own every key the same way, so the
-    /// running cell they keep visible above themselves stays hintless while
-    /// one is open (`docs/background.md`, `docs/llm.md`, `docs/skills.md`,
-    /// `docs/mascot.md`, `docs/spinner.md`, `docs/theme.md`, `docs/donate.md`,
-    /// `docs/secrets.md`, `docs/export.md`, `docs/usage.md`).
+    /// `/skills`, `/mascot`, `/spinner`, `/theme`, `/donate`, `/sponsor`,
+    /// `/discord`, `/secrets`, `/export`, `/context`, `/usage`) own every key
+    /// the same way, so the running cell they keep visible above themselves
+    /// stays hintless while one is open (`docs/background.md`, `docs/llm.md`,
+    /// `docs/skills.md`, `docs/mascot.md`, `docs/spinner.md`, `docs/theme.md`,
+    /// `docs/donate.md`, `docs/discord.md`, `docs/secrets.md`,
+    /// `docs/export.md`, `docs/usage.md`).
     #[must_use]
     pub fn background_hint_elapsed(&self) -> Option<Duration> {
         if self.permission.is_some()
@@ -478,10 +480,15 @@ impl App {
             || self.spinner_picker.is_some()
             || self.theme_picker.is_some()
             || self.donate_picker.is_some()
+            || self.sponsor_page.is_some()
+            || self.discord_page.is_some()
             || self.secrets_page.is_some()
             || self.export_picker.is_some()
             || self.context_usage.is_some()
             || self.usage_page.is_some()
+            || self.mcp_menu.is_some()
+            || self.plugins_menu.is_some()
+            || self.config_review.is_some()
         {
             return None;
         }

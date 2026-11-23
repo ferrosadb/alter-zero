@@ -12,7 +12,533 @@ release heading when a version is cut.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-23
+
 ### Added
+
+- **Image generation with your ChatGPT sign-in, whatever model you use.**
+  Signed in with ChatGPT Codex (`/login`), every session is offered the
+  `imagegen` tool, Codex's built-in image tool. It makes or edits an image
+  with OpenAI's `gpt-image-2` on your ChatGPT plan, so a Claude, OpenRouter
+  or local model can make one with no OpenAI API key.
+  - Each image is saved to `~/.alter-zero/generated_images/<session>/` and
+    drawn under its cell.
+  - It is shown to the model, so a follow-up edit can see what it is
+    changing. An edit names the images to change by their paths. A picture
+    too large for the model's provider to take is sent as a smaller copy,
+    kept beside it, so a resumed conversation still works.
+  - A new built-in `imagegen` skill, Codex's own, teaches the model when a
+    bitmap is the right answer, how to prompt for one, and where the file
+    belongs in your project. It is listed only while the tool is offered.
+  - A `/settings` **Image generation** row turns both off for a directory.
+    Without a ChatGPT sign-in it is unavailable and says how to sign in.
+    Signing in mid-session turns both on at once, and
+    `ALTER_ZERO_IMAGEGEN=0` starts a run with the row off
+    (`docs/imagegen.md`).
+
+- **Built-in skills and agent types update with each release.** The
+  built-in skills (`skill-creator`, `jina-reader`, `web-search`, `yt-dlp`,
+  `flaredantic`, `imagegen`) and agent types (`general-purpose`, `explore`) are written
+  into `~/.alter-zero` as files you can edit, and until now a file already
+  there was never touched again: a release that improved one reached new
+  installs only, unless you deleted the folder. Each launch now brings a
+  built-in you have not edited up to this release's version — the binary
+  carries the hash of every version it has ever shipped, so a copy one of
+  them wrote is told apart from yours — and says so in one line. A file you
+  edited is never written over: when a release changes it, its new version
+  is saved beside yours as `<file>.new`, once, and a card under the banner
+  names it, so you can merge what you want or delete your copy to take the
+  new one. A `.new` you have started merging into is never written over, and
+  the offer waits for a launch that can show you the card: a `-p` run makes
+  none, and a launch that opens on the `/resume` picker shows it once the
+  conversation is loaded. A file a release stops shipping is removed, unless
+  you edited a file of that skill. Installs from earlier releases are
+  recognised on their first launch of this one (`docs/builtin-updates.md`).
+
+- **Skills in `.agents/skills`, where Codex keeps them.** Skills are now
+  found in `~/.agents/skills` and in a project's `.agents/skills`, beside
+  `.alter-zero/skills` and `.claude/skills`, so a repository or a home folder
+  set up for Codex offers its skills here unchanged. Every directory from the
+  working directory up to the project root is now searched, nearest first,
+  for all three skill directories and for agent definitions in
+  `.alter-zero/agents`. A session started deep inside a monorepo package
+  therefore still finds the package's skills and agents, where before only
+  the starting directory and the repository root were read. Within one
+  directory `.alter-zero/skills` comes first, then `.agents/skills`, then
+  `.claude/skills`, and a project's skill still shadows a personal one of the
+  same name. Started in your home folder, `/skills` no longer lists each
+  directory twice. The built-in `skill-creator` skill names the new folders,
+  and a copy you have not edited is brought up to date like every other
+  built-in (`docs/agents-dir.md`, `docs/skills.md`, `docs/subagents.md`).
+
+- **Plugin marketplaces found in `.agents/plugins`, as Codex finds them.**
+  `/plugins` now lists a marketplace you never added when its catalog is in
+  `~/.agents/plugins/marketplace.json` (where Codex keeps your personal
+  marketplace) or in your project: the working directory's
+  `.agents/plugins/marketplace.json`, or the project root's when the working
+  directory has none. Claude Code's `.claude-plugin/marketplace.json` is found
+  in the same places. Each gets a tab of its own after the marketplaces you
+  added, saying where it was found, and `alter-zero plugin list --available`
+  and `plugin marketplace list` show it too. Nothing it offers is installed
+  until you install it. Installing a plugin adds the marketplace, as
+  `plugin marketplace add` would, so the plugin keeps loading from the
+  project's directory. A marketplace you added keeps its name over one found
+  in your home folder, and that one over the project's, so a checkout can
+  never take over a marketplace you installed from. A found catalog that
+  can't be used (it will not parse, or its name is taken or reserved) still
+  shows under "this project" with the reason (`docs/agents-dir.md`,
+  `docs/plugins.md`).
+
+- **`/mcp` asks for an OAuth client when a sign-in needs one.** Some
+  sign-in providers register no apps by themselves — Google's, for its MCP
+  servers — so signing in takes an OAuth client you create with the
+  provider. That client could only be written into `mcp.json` or passed to
+  `alter-zero mcp add --client-id … --client-secret`, and pressing
+  **Authenticate** without one ended on a one-line error naming config keys.
+  The page now turns into a form of facts and fields: the issuer, as the
+  server's metadata names it, the server's own documentation link when its
+  metadata gives one, and the redirect URI to register with the client (it
+  follows the callback port as you change it), over
+  the client ID and its secret, which is only ever drawn as dots. The same
+  form appears when a provider refuses to register the app. What you enter
+  is kept with the server's tokens — owner-only, never written to a config
+  file, and only ever presented to the provider it was entered for — so it
+  works alike for a server from your own file, a project's or a plugin's,
+  and it outranks a client the server's entry names (`oauth.clientId`): a
+  client shipped in a project's or a plugin's file can be replaced without
+  editing that file. If the provider turns the client away, the form comes
+  back with what you entered and the provider's own reason, rather than an
+  error to start over from, and no longer offers the refused secret as
+  kept. A server's page names the client it signs in with and offers
+  **Change OAuth client** and, for a client entered there, **Forget OAuth
+  client**. Change looks up the server's sign-in provider before its form
+  opens, works over an entry's own client too, and always shows the
+  redirect URI the next sign-in sends: left as it was, the entry's client
+  and its registered callback URL stay in effect. Saving a different
+  client removes the login made as the old one, and the ID and port
+  fields edit anywhere along the line.
+  `alter-zero mcp get` names the client in effect and where it comes from,
+  and `alter-zero mcp add --client-id` forgets a client entered in `/mcp`
+  for the same address and says so (`docs/mcp.md`, `docs/mcp-cli.md`).
+
+- **MCP entries written the way codex writes them.** An entry's `oauth`
+  block is read under codex's snake_case keys too (`client_id`,
+  `client_secret`, `callback_port`, `callback_url`), `scopes` may sit at the
+  top of the entry, and `"type": "streamable_http"` is `http` — in your own
+  `mcp.json`, a project's and a plugin's alike. A client ID or secret left
+  as a template slot such as `<GMAIL_PUBLIC_CLIENT_ID>` counts as not given,
+  so a codex plugin's Gmail, Calendar or Drive server asks for an OAuth
+  client in `/mcp` on the entry's callback port and signs in with the
+  entry's scopes. `callbackUrl` names the exact redirect URI an entry's own
+  client registered; it is sent as written and the callback is answered on
+  its path. A server you already approved in the startup review whose entry
+  carries any of these keys is asked about once more, since the keys now
+  change what it signs in with (`docs/mcp.md`).
+
+- **Plugins: `/plugins` and `alter-zero plugin`.** Add a marketplace — a
+  GitHub `owner/repo`, any git URL, or a directory — and install the plugins
+  it lists: Agent Plugins (agent-plugins.org), Claude Code plugins and Codex
+  plugins all install the same way. A plugin's skills and commands become
+  skills named `plugin:skill` (a `$plugin:skill` mention loads one), its
+  agents become subagent types, and its hooks and MCP servers join yours — its
+  servers under Claude Code's names, `mcp__plugin_<plugin>_<server>__…`, so a
+  plugin written for Claude Code finds its own tools. Hooks and servers are
+  code that runs, so nothing of them runs until you have trusted it:
+  installing one opens the same review the startup review shows for a
+  project's hooks and servers, with the commands on screen first. The page is
+  Codex's: tabs for every plugin, the installed ones, each marketplace and
+  `+ Add`, where Claude Code's and Codex's official marketplaces are one Enter
+  away and `Add a marketplace…` takes any owner/repo, git URL or directory; a
+  search; a page per plugin saying first whether it is on and then exactly
+  what it adds, warning before you install one that may run code; and Space
+  to turn a plugin on or off for the directory you are in. The page never
+  moves under you: it says nothing about what went right — the rows show it —
+  neither a toggle nor moving through the list resizes it, and a narrow
+  terminal cuts a long name before a description. A marketplace kept in a
+  directory has its plugins load in place, so editing one needs no reinstall.
+  Updates are something you ask for: `Update` on a plugin's page, Ctrl+U on a
+  marketplace's tab, or `alter-zero plugin update`, which reinstalls the
+  plugins their marketplace has a newer copy of. Everything is kept under
+  `~/.alter-zero/plugins/` and `plugins.json`; `ALTER_ZERO_PLUGINS=0` loads no
+  plugin for a run (`docs/plugins.md`).
+
+- **`--system-prompt` and `--append-system-prompt` set the system prompt
+  for a run.** `alter-zero --append-system-prompt "Answer in French."`
+  keeps the built-in prompt and adds to it, and `--system-prompt "…"`
+  replaces it. Each has a `-file` form that reads the text from a file
+  (`--system-prompt-file`, `--append-system-prompt-file`), and all four
+  work in the interface and with `-p`. A replaced prompt still gets the
+  environment block, so the agent knows the date, the system, the user and
+  the directory it runs in. Until now the only way in was the
+  `ALTER_ZERO_SYSTEM_PROMPT` variable, which replaces the prompt and cannot
+  add to it; the new flag outranks it (`docs/system-prompt.md`).
+
+- **`/model` opens on the lists it already has, and Ctrl+R refreshes
+  them.** The picker used to ask every configured provider for its model
+  list on every open, so each one began on `Loading models…`, for a second
+  or more with a few providers configured. Each provider's list is now kept
+  in `~/.alter-zero/model-cache/` and shown at once. A list under an hour
+  old is used as it is, with no request at all. An older list is still
+  shown at once while it is fetched again behind the rows (`refreshing…`).
+  A server you run yourself (Ollama, LM Studio) is always asked again, so a
+  model you just pulled still appears. Ctrl+R in the picker asks every
+  provider again (not a plain `r`, which still types into the search, as in
+  `deepseek-r1`). The counter says how old the lists on screen are
+  (`updated 2h ago`), keeping itself current while the picker sits open,
+  and a refresh that fails keeps the rows it could not refresh, noted in
+  amber as `not refreshed` rather than `unavailable`. A list still arriving
+  when you close the picker is kept when it lands, and reopening the picker
+  meanwhile waits for it rather than asking again. Saving a key or signing
+  in again through `/login` drops that provider's kept list, and any list
+  still being fetched with the old key, since another account can list
+  other models (`docs/model-cache.md`).
+
+- **`/sponsor` shows where to sponsor the developer.** The page lists the
+  GitHub Sponsors link and a contact email, each in a box you can click
+  where your terminal follows links, or copy with Enter (`docs/sponsor.md`).
+
+- **`/discord` shows the invite to the community server.** The page offers
+  the Alter Zero Discord invite in a box you can click where your terminal
+  follows links, or copy with Enter. The invite is built into the app, so
+  nothing on disk can change where it points (`docs/discord.md`).
+
+- **Ctrl+O keeps the command you are reading on screen.** The transcript
+  shows every tool call's whole output, so one long `cargo test` or file
+  read runs to hundreds of rows, and halfway down nothing said which
+  command printed them. Scrolled into a cell, the transcript now pins that
+  cell's header over its top rows, the way Ctrl+D pins the message you are
+  reading: `● Bash(cargo test …)` above a test run, `! seq 1 500` above a
+  shell command's output, `● Agent(…)` above an agent's prompt and answer.
+  A command that wraps keeps both rows, and a longer one is cut with `…`.
+  While a command is still running, the pin names it above its live output.
+  ←/→ now step to the previous or next entry, opening it at the top, as in
+  Ctrl+D. During Esc-Esc's message preview they still step between your
+  messages. Inside an agent's session view the title names the agent
+  (`docs/transcript-navigation.md`).
+
+- **The banner mascot moves while the conversation is empty.** On a fresh
+  screen — at launch, and again after `/clear` — the mascot is alive: a
+  light sweeps it as the screen opens, it shows its own move, and it
+  blinks; from there it does something every few seconds, in an order that
+  differs every session. Each of the six knows thirty moves and more: it
+  blinks, glances, winks, stares, crosses its eyes and daydreams; it
+  bounces, wiggles, dances and peeks to one side, the whole creature moving
+  half a cell; it waves and winks, cheers with its arms (petals, ears)
+  thrown up, and pumps them one after the other; it does tricks —
+  ducks out of sight below its block and peeks back over the edge, turns a
+  somersault or a cartwheel; it catches the light — a glint from either
+  side, a glow that swells through it and fades, a glitter of twinkling
+  cells; and it has moves of its own — the crest
+  flares, ripples and ducks its frill, the bloom flutters, swells and
+  wobbles, the sprout sways and unfurls its leaves, the twin flicks, splays
+  and droops its ears, the skiter skitters, stretches its six legs and
+  puffs itself up to the edges of its block,
+  and the gem, which has no eyes, sparkles at every corner, turns its facet,
+  spins edge-on, flashes, and sets like a sun to rise glowing. The moves
+  are dealt like a deck rather than rolled, so the mascot
+  gets through everything it knows before it repeats itself and never does
+  the same thing twice running. While the first message is typed it
+  **watches**: its eyes turn to the text — to its right, where the line
+  runs, never to the screen's left edge —
+  and a few seconds after the last keystroke it goes back to its own moves.
+  Leave it alone for three quarters of a minute and it **naps**: its eyes
+  grow heavy and close to two thin lines, its head goes down, and it
+  sleeps there, still — a `z`, then a `Z`, beside it is all that moves.
+  It wakes by itself after the better
+  part of a minute, stretches, and plays again — and after five minutes
+  alone it sleeps until you are back. **Any key wakes it with a start** — a
+  `!`, and it is wide awake — before it turns to what you are typing.
+  It stops the moment the first message is
+  sent: the banner above a conversation always stands still, and so does
+  the one in the Ctrl+O transcript and in an export. The `/mascot` picker's
+  preview moves too, each mascot greeting as the highlight lands on it, so
+  one can be chosen for how it behaves — and the one you choose greets from
+  the banner.
+  An idle screen stays cheap: a blink rewrites two cells, nothing is
+  written between moves, and the app's memory is what it was — the same
+  with the animation off and once a conversation starts, a few pages more
+  while the mascot moves. Turn it off with the new **Animate mascot** row in
+  `/settings` (saved per directory) or `ALTER_ZERO_MASCOT_ANIMATION=0`.
+
+### Changed
+
+- **A session at rest takes about 40% less memory on Linux.** Most of
+  what an idle session kept in memory was the app's own code, and it ran
+  only a small part of it: the rest was resident because the linker had
+  scattered the functions a session runs across the whole binary, and
+  memory is held by the page. Release builds now place the functions an
+  idle session runs side by side. The installed binary, signed in to a
+  provider and sitting at its prompt, takes about 8.02 MB where
+  the same binary laid out the old way takes 13.96 MB
+  (8.90 MB against 15.86 MB once it has been read
+  back from disk, as after a reboot), and the figure no longer moves by a
+  megabyte when unrelated code is added. Nothing else about the binary
+  changes: the same code, in a different order. macOS builds are laid out
+  as before. Building from source, `ALTER_ZERO_TEXT_LAYOUT=0` turns it off
+  (`docs/text-layout.md`). The plugin system adds nothing to a session that
+  has no plugin on: nothing about plugins is read at startup, and the
+  `/plugins` page reads its catalog only while it is open
+  (`docs/plugins.md`).
+
+- **A failed MCP sign-in stays on its page.** When **Authenticate** in
+  `/mcp` failed, the page closed and the reason rode a one-row notice above
+  the composer, cut off at the terminal's width — and these reasons are
+  long: the provider's own sentence, an error code, sometimes a link. The
+  page now stays, with the whole reason wrapped on it and any link in it
+  clickable. Enter tries again; Esc goes back.
+
+- **Signing in to an MCP server no longer opens a browser by itself.**
+  The `/mcp` Authenticate page used to launch `xdg-open` (`open` on
+  macOS) on the authorize URL, which over SSH, in a container or on a
+  headless machine failed silently or opened a browser somewhere else.
+  The page now shows the URL with `Open this URL in your browser to
+  authenticate (c to copy)`; click it, or press `c` and paste it. The
+  callback and the paste-the-redirect fallback work as before
+  (`docs/mcp.md`).
+
+- **Auto mode's safety check answers in JSON, and a reply that is not
+  exactly a verdict is never acted on.** The classifier that reviews a
+  command in your place used to answer `<block>yes</block>` or
+  `<block>no</block>`, and the app took the first such tag it found anywhere
+  in the reply. Two things could then allow a command nobody had judged
+  safe. A small model asked about `rm -rf ~/` answered
+  `<block>no</block><reason>… I cannot allow this action.</reason>`: it read
+  `no` as "do not run it", and the app ran it. And a model that echoed the
+  command back instead of judging it handed over whatever tags the command
+  itself carried. The verdict is now one JSON object, `{"verdict": "allow"}`
+  or `{"verdict": "block", "reason": "…"}`, whose words say what happens. An
+  allow counts only when it is the whole reply and gives no reason; anything
+  else is asked about once more, and after that the command comes to you.
+  The object is asked for in the prompt rather than through a provider's
+  structured output, which was measured and refused: on small models it
+  produced a well-formed allow for six of sixteen actions that should have
+  been blocked, and some routes reject the parameter outright
+  (`docs/permissions.md`).
+
+- **The startup review's hint names the arrow keys.** The page that asks
+  you to trust new or changed hooks, and which of a project's MCP servers
+  to enable, now starts its hint with `↑/↓ to navigate`, as `/mcp` and
+  `/theme` do, since Space and Enter act on the highlighted row. On a
+  terminal too narrow for the hint on one row, it now breaks between keys
+  rather than in the middle of one (`docs/config-review.md`).
+
+- **A link in a reply is shown as its label, with the address behind it.**
+  A reply that cites its sources used to print every address in full —
+  `Source: FIDE (https://www.fide.com/geneva-to-host-…/)` — which spent a
+  row or more per link and stretched a table to the width of its URLs.
+  Where your terminal opens hyperlinks (kitty, Ghostty, WezTerm, iTerm2, VS
+  Code, Alacritty, foot, GNOME Terminal and the other VTE terminals, Windows
+  Terminal, a herdr pane) the label is now the link: underlined in the link
+  colour, and a click opens the address. The terminal is recognised by the
+  variables it sets, and over `ssh`, where those stay behind, by the name
+  it gives when asked at startup (kitty, Ghostty, WezTerm, foot, iTerm2).
+  Under tmux or screen, inside an editor's terminal, and in a terminal the
+  app cannot name, the address stays on screen as before, since hidden
+  there it would be lost; `ALTER_ZERO_LINK_TARGETS=hide` or `=show` decides
+  for any terminal. A link to a file or an anchor always shows its target,
+  and so does a label that spells a different address than the one it
+  opens, however the label is written. On every terminal a link whose
+  label is its own target is no longer printed twice — a file named by its
+  path, `` [`src/links.rs`](src/links.rs) ``, or an address written out —
+  a link with no target is just its label, and a label of several words is
+  one link rather than one per word. `/export` keeps every address in the
+  text it writes, and nothing renders slower: a reply full of links draws
+  in about a third less time as labels, and one with no link in it in
+  slightly less than before (`docs/links.md`).
+
+### Fixed
+
+- **A signed-in MCP server whose address uses a `${VAR}` keeps its sign-in
+  actions.** Once such a server connected, `/mcp` looked for its login under
+  the address as written in the config, found none, and stopped offering
+  **Re-authenticate** and **Clear authentication** for a server that was
+  signed in. The login is now looked up under the address the entry expands
+  to, where it is kept.
+
+- **MCP servers behind a gateway that refuses unnamed clients now connect.**
+  Requests to a remote MCP server carried no `User-Agent`, and a gateway's
+  stock firewall rules turn such a request away before the server sees it.
+  A server behind one read `✘ failed` in `/mcp`, with `HTTP 403` and a web
+  page as its error, and **Authenticate** failed the same way, since the
+  sign-in's own requests met the same gateway. Every request to a server,
+  and every request of a sign-in to one, now names the app
+  (`alter-zero/{version}`). An entry whose `headers` set a `User-Agent`
+  sends that one instead.
+
+- **An MCP server having a bad moment at startup still connects.** One
+  failed request — the connection dropped, or a gateway's `502`/`503` for a
+  server that was still starting — left the server `✘ failed`, and its
+  tools out of the session, until Reconnect was pressed in `/mcp`. The
+  handshake and the tool listing are now tried up to three times, a moment
+  apart. A tool call is never sent twice.
+
+- **A failed MCP request says why.** A refusal that is a web page (a
+  gateway's, a firewall's) is named by its title, as in `HTTP 403: a web
+  page titled "403 Forbidden"`, where the page's HTML used to be printed as
+  the server's error. A request that got no answer names its cause (the
+  connection refused, no such host, a certificate that isn't trusted)
+  rather than only `error sending request for url (…)`.
+
+- **Signing in to an MCP server registers the scopes it asks for.** Some
+  authorization servers keep an app to the scopes it registered with, and
+  refused the sign-in (`invalid_scope`) after the browser had opened,
+  because the registration named none.
+
+- **Signing in finds an authorization server that publishes its metadata
+  only at the site's root.** For a sign-in address with a path, the
+  metadata was looked for under that path alone, so such a server ended
+  with `could not discover the authorization server`. The root document is
+  read last, and used only when it names that same address.
+
+- **Auto mode reviews your commands on Google Antigravity's Gemini models.**
+  On a model whose thinking level is part of its id, such as
+  `gemini-3.8-flash`, every safety check asked for a model the account's
+  catalog does not list and got a 404, so each command auto mode should have
+  reviewed came to you as a prompt instead. Commands that only read were
+  never checked and still ran, which made it look like the check failed
+  only sometimes. The check now asks under the id your session uses
+  (`docs/antigravity.md`).
+
+- **A provider that is busy for a moment no longer costs you a prompt.** The
+  safety check made one request and gave up on any failure, so a rate limit
+  that cleared in half a second or a reply cut short became a prompt where
+  the turn around it would have retried. The check now retries what the
+  turn retries, on the same **Error retry** setting, and a reply it cannot
+  read is asked for one more time (`docs/permissions.md`).
+
+- **The prompt says why when auto mode's safety check failed.** A prompt
+  raised because the check itself failed looked the same as any other, so
+  there was nothing to tell a wrong model from a rate limit. It now reads
+  `Auto mode's safety check failed:` followed by what the check said, where
+  `This command requires approval` would have been, and a headless run
+  writes the same reason under the refused call (`docs/permissions.md`,
+  `docs/headless.md`).
+
+- **Every ←/→ press in the Ctrl+O transcript and the Ctrl+D view takes a
+  step.** Keys that reached the view between two redraws, over a slow link
+  or on a busy machine, collapsed into the last one, so pressing → three
+  times could move one entry, and a PageDown pressed right after a → scrolled
+  before the step instead of after it. Each press now moves the view in the
+  order it was pressed (`docs/transcript-navigation.md`).
+
+- **Typing stays instant while a reply streams.** A key typed under a
+  streaming reply waited for the stream's next frame, 4 to 5 ms on average
+  and up to 10, and behind a burst of the stream's own events on top of
+  that. A key press, and a paste, now gets a frame of its own, ahead of
+  anything the stream is doing: under a streaming reply a typed character is
+  on screen in under a millisecond, as it is on an idle composer, where it
+  used to take two (`docs/input-latency.md`).
+
+- **The app no longer stops reading keys when a long reply or a big file
+  read lands.** Every finished reply and tool call was rendered for the
+  Ctrl+O transcript on the spot, between two keystrokes: 200 ms for a
+  2000-line `read`, most of a second at the end of a long code reply, and
+  the whole history at once after `/resume`. That rendering now happens on a
+  thread of its own. Ctrl+O still opens at once, and now does so after a
+  resize too, where it used to rebuild the whole conversation first.
+
+- **Typing under a command that prints a lot is no longer sluggish.** While a
+  command printed thousands of lines, each frame measured everything it had
+  printed, several times over, to show its last four rows and say how many
+  sit above them, so the longer a verbose build or test run went on the
+  slower each frame got: a key took 40 ms to show, over 100 ms under a
+  command printing long lines as fast as it could, and the app held most of
+  a CPU core. Each line is now measured once, as it scrolls past, and the
+  cell is built once a frame: the same key appears in about a millisecond.
+  A grouped search's `(12s · 34 lines)` count works the same way
+  (`docs/tool-streaming.md`).
+
+- **Typing stays instant while a model thinks at length.** The thinking
+  block re-wrapped the model's newest paragraph on every frame to show its
+  last three rows, and a model that thinks in one long paragraph made that
+  the whole thought, so typing slowed the longer it thought: twenty seconds
+  into a fast model's think, a typed key took a median of 21 ms to appear,
+  with a core fully busy. Rows that can no longer change are kept now, and
+  a frame wraps only what arrived since the last one
+  (`docs/thinking-stream.md`).
+
+- **Scrolling Ctrl+O while a reply streams is smooth.** The transcript
+  re-rendered the whole reply so far on every frame, so under a long code
+  reply each scroll key took about 150 ms. It renders each line once now,
+  and not again when the reply ends, where the open transcript used to stop
+  for a tenth of a second.
+
+- **More than a kilobyte typed in one go all arrives.** Text pasted into a
+  terminal without bracketed paste, typed by a dictation tool, or delivered
+  in one piece by a connection that had stalled showed its first 1024 bytes;
+  the rest appeared a kilobyte per further key press. The terminal library
+  is patched to read all of it (`vendor/README.md`).
+
+- **A frame reaches the terminal in one write.** It was meant to and did
+  not: a frame went out in three pieces on average, a frame that scrolled
+  sent the scroll ahead of the repaint, and a long commit was one write per
+  row. A terminal without synchronized updates could paint in between.
+
+### Security
+
+- **A command and its description can no longer write lines of the question
+  auto mode's safety check is asked.** The reviewing model was shown the
+  agent's description as written and the command inside a three-backtick
+  code block. A description with line breaks could add a command block of
+  its own, naming something harmless, above the real one. A command
+  containing a line of three backticks (a heredoc makes that valid shell)
+  could end its block and carry on as the request. Shown
+  `rm -rf ~/.ssh ~/.aws` dressed in one of those two ways, Gemini 3.8 Flash
+  allowed it 9 times in 24; it now refuses all 24. The block's fence is
+  always longer than anything inside it, and each description is kept to
+  one line. Many models can still be talked round by what a command says
+  about itself, which no quoting changes, so auto mode's reviewer needs to
+  be a model that resists it (`docs/permissions.md` says how to check one).
+
+## [0.19.0] - 2026-11-13
+
+### Added
+
+- **Headless mode: `alter-zero -p "prompt"` runs with no terminal at all.**
+  The app used to need a terminal that answered its cursor query before it
+  read a prompt, so a cron job, a CI step or an n8n node could not run it
+  (`Device not configured`). With `-p` the same session runs with no screen:
+  the answer goes to stdout and a log of the run to stderr, and the exit
+  status says how it went (0 done, 1 failed, 2 a usage error, 130/143
+  interrupted). `--output-format json` prints one result object with the
+  session id, usage and any refused tool calls; `stream-json` prints one
+  event per line as the run happens. The prompt can come from stdin as well,
+  as in `git diff | alter-zero -p "Review this diff"`. Nothing waits for a
+  reply: a call that would ask for approval is refused and the model is
+  told, `--permission-mode` decides how much runs unasked, and the question
+  tool is not offered. `--max-turns` caps the model replies, `-C` sets the
+  working directory, and `-c`/`--resume` continue a conversation, so a
+  nightly job can keep one session going. The config, providers, skills,
+  agents, hooks and MCP servers are the same ones the interactive app uses
+  (`docs/headless.md`). stderr stays quiet unless something went wrong —
+  a failed run says why, refused calls and stopped background work are
+  named — and `--verbose` logs every step there. Piped input is read to its
+  end however slow the command writing it, while a socket nobody writes to
+  (Node, so n8n) is left alone after 3 s; refused calls are reported in
+  Claude Code's `permission_denials` fields; a call auto mode's safety check
+  could not decide (an error, not a denial) is retried once at most rather
+  than refused for good; a run that cannot start still prints a JSON
+  result; and a background agent that never finishes is
+  stopped after `ALTER_ZERO_HEADLESS_AGENT_WAIT_SECS` (10 minutes by
+  default). Launched without `-p` where there is no terminal, the app now
+  says it needs one and names `-p` instead of ending on
+  `Error: Os { code: 6, … }`.
+
+- **Session files now record how each tool call ran and what each model
+  request cost.** Every `tool` line in a rollout
+  (`~/.alter-zero/sessions/…/rollout-*.jsonl`) carries the command's
+  `exit_code`, how long the call ran (`duration_ms`) and, when it failed,
+  why (`error_kind`: `tool_error`, `timed_out`, `interrupted`, `rejected`,
+  `classifier_denied`, `hook_blocked`, `approval_required`,
+  `tool_call_limit` or `backend_error`). A script no longer has to find
+  `Exit code: N` in the output text. Every model request also leaves a
+  `usage` line with the provider's own counts (`input`, `output`, `cached`,
+  `cache_write` and `reasoning`, plus `agent` for a subagent's and `compact`
+  for the request that wrote a compaction's summary), written where the
+  request finished, so the cost of each request and of each tool step can be
+  read from the file. The existing fields are unchanged, older builds skip what
+  they don't know, and the per-turn `summary` keeps its totals
+  (`docs/rollout-records.md`).
 
 - **A provider of your own can take the thinking level as
   `reasoning_effort`.** Ctrl+T's level rides every chat request in
@@ -57,6 +583,43 @@ release heading when a version is cut.
 
 ### Changed
 
+- **The release binary is over a quarter smaller, and draws faster.**
+  Releases are now built with whole-program link-time optimisation, in a
+  build profile of their own, so the compiler sees every crate at once: the
+  Linux x86_64 binary went from 25.6 MB to 18.6 MB and its download from
+  10.1 MB to 8.6 MB, and redrawing a long code reply got 4–13% faster. Hook
+  matchers also stopped carrying the regex engine's speed-ups for long
+  texts, since a matcher only ever sees a tool name; they match exactly as
+  before. A `RUST_BACKTRACE=1` report still names functions, and
+  `cargo build --release` from a checkout is unchanged
+  (`docs/binary-size.md`).
+
+- **The startup banner shows the keys that open everything else.** Its last
+  row read `/login   /model   /resume`; it now reads
+  `/ commands  @ files  ? shortcuts`: each key in the theme's accent beside
+  a dim label, spaced the way the `?` shortcuts list shows its entries. `/`
+  opens the command palette, which lists `/login`, `/model` and `/resume`
+  with every other command, `@` picks a file to mention, and `?` lists the
+  rest of the keys (`docs/header.md`).
+
+- **The status line has sixty new verbs, and none of them is
+  `Generating…`.** The word beside the spinner came from a list of ten that
+  opened on `Working…` and `Generating…` and later read `Computing…` and
+  `Synthesizing…`, words any progress bar prints, and a long turn was back on
+  `Generating…` every five minutes, and every session opened on the same
+  word. Each session now opens on a verb picked at random, and a subagent's
+  view and the `/spinner` preview open on that same one. From there the
+  line walks on through words like `Percolating…`, `Tinkering…`,
+  `Spelunking…`, `Grepping…`, `Untangling…`, `Soldering…` and `Defragging…`,
+  a new word every 30 seconds and with each new turn, so a single turn runs
+  half an hour before a word comes round again. `ALTER_ZERO_FIRST_VERB`
+  pins the first word for a run. The summary still names the verb you watched
+  (`Spelunked for 3m 2s`). None of the words is one the screen already uses
+  for something else, such as `Running…`, `Waiting…` or `Thinking…`, and
+  conversations recorded before this change resume with their summaries as
+  they were written, `Generated for 12s` included
+  (`docs/status-indicator.md`).
+
 - **The context gauge follows the conversation between replies, and learns
   how your provider counts.** The footer's `{used}/{window}` only moved when
   the provider reported a request, so a large paste or a long tool output
@@ -99,6 +662,25 @@ release heading when a version is cut.
   highlighted and how many there are, or how many match what you typed. A
   terminal narrow enough to wrap the descriptions shows fewer, and the
   palette never takes more than the eight rows it did before.
+
+- **The `$` skill picker lists five skills at a time, with a count.** It
+  showed up to eight. It now shows five, the highlighted one kept in the
+  middle as ↑/↓ scroll through the rest, the way the `/` palette scrolls,
+  over the same dim counter as the palette, `(1/7)`, saying which skill
+  is highlighted and how many match what you typed
+  (`docs/skill-mentions.md`).
+
+- **The `@` file picker lists every matching file, five at a time, with a
+  count.** It showed the best eight matches and nothing past them, so ↑/↓
+  could never reach the ninth. It now keeps every file and folder that
+  matches what you typed, shows five at a time with the highlighted one kept
+  in the middle as ↑/↓ scroll, and counts them under the list, `(1/12)`, the
+  way the `/` palette and the `$` picker do. A bare `@` lists the whole
+  workspace the way a directory listing reads: the working directory's own
+  entries first, folders before files, then each level down. The search
+  still stops after 10,000 entries so a huge directory stays quick; when it
+  does, the count ends in `+`, as in `(1/10000+)`, to say the list is
+  partial (`docs/file-search.md`).
 
 - **The pickers open on a title and show fewer rows at a time.** `/model`,
   `/settings`, `/theme`, `/mascot` and `/spinner` now open on a title
@@ -185,6 +767,13 @@ release heading when a version is cut.
 
 ### Fixed
 
+- **A file with a backslash in its name is offered under that name by
+  `@`.** On Linux and macOS `\` is an ordinary character in a file name,
+  but the `@` picker turned it into a folder separator, so `a\b.txt` was
+  listed as `b.txt` inside a folder `a` that does not exist, and choosing
+  it put a path that named nothing into your message
+  (`docs/file-search.md`).
+
 - **Models an OpenAI-compatible gateway discovered stay in `/model`.**
   OmniRoute lists a model it found upstream, such as a Codex model, under
   the upstream's own endpoints (`"supported_endpoints": ["responses"]`) and
@@ -215,6 +804,16 @@ release heading when a version is cut.
   invalid JSON, the dim row it left under a tool call held the whole
   script. A hook is now named by its command's first line, cut at 80
   characters, there and on the hook-run cell (`docs/hooks.md`).
+
+- **On macOS, `bashkill` lets a command clean up before it is killed.**
+  Stopping a session sends `SIGINT`, then `SIGTERM`, and kills whatever is
+  left 2 s later, so a `docker compose up` can take its containers down.
+  The two signals went through `pkill -s`, and macOS's `pkill` has no `-s`:
+  it refused the option, nothing was signalled, and every stop there was a
+  `SIGKILL` that still reported the session as stopped. Where `pkill` cannot
+  find a session, the stop now finds its processes by the session's
+  terminal, and the final kill reaches a shell's own jobs there as well
+  (`docs/bash-tools.md`).
 
 ## [0.18.0] - 2026-11-03
 
@@ -2264,7 +2863,9 @@ release heading when a version is cut.
   release whose notes come from this file — driven end to end by
   `scripts/release.sh`, which also rehearses a release locally.
 
-[Unreleased]: https://github.com/linuztx/alter-zero/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/linuztx/alter-zero/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/linuztx/alter-zero/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/linuztx/alter-zero/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/linuztx/alter-zero/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/linuztx/alter-zero/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/linuztx/alter-zero/compare/v0.15.0...v0.16.0

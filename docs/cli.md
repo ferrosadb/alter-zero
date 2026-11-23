@@ -14,35 +14,63 @@ boundary also answers the `mcp` subcommand family — `alter-zero mcp
 add/add-json/remove/get/list`, `docs/mcp-cli.md` — and `alter-zero
 update`, which installs the newest release over this binary through the
 one-line installer, `docs/update.md`; each is routed by its first argument
-before the flag grammar below applies.)
+before the flag grammar below applies.) **`-p` runs the same session with no
+screen** — one prompt in, the answer on stdout, an exit status out — with
+its own section on the page; the run itself is `docs/headless.md`, and this
+page covers only its grammar. Either kind of run can also set its system
+prompt (`--system-prompt`, `--append-system-prompt` and their `-file`
+forms, `docs/system-prompt.md`).
 
 ```
 $ alter-zero --help
 Alter Zero
 
-Starts an interactive session by default — a quoted PROMPT is its first turn.
+Starts an interactive session by default; with -p, answers once and exits.
 
 Usage: alter-zero [OPTIONS] [PROMPT]
+       alter-zero -p [OPTIONS] [PROMPT]
        alter-zero mcp <COMMAND>
+       alter-zero plugin <COMMAND>
        alter-zero update
 
 Commands:
-  mcp                 Manage MCP servers in the user config file — see
-                      alter-zero mcp --help
-  update              Install the newest release over this binary, if one is
-                      out — the one-line installer, checksum-verified
+  mcp                            Manage MCP servers in the user config file —
+                                 see alter-zero mcp --help
+  plugin                         Install and manage plugins and marketplaces —
+                                 see alter-zero plugin --help
+  update                         Install the newest release over this binary,
+                                 if one is out (the checksum-verified installer)
 
 Arguments:
-  [PROMPT]            Send this message as the first turn — of a new
-                      conversation, or of the one --continue/--resume reopens
+  [PROMPT]                       First message of a new conversation, or the
+                                 next of the one --continue/--resume reopens
 
 Options:
-  -c, --continue      Continue the most recent conversation recorded in this
-                      directory
-  -r, --resume [ID]   Resume a conversation — by the session id the exit hint
-                      prints, or picked from a list when no id is given
-  -h, --help          Print help
-  -V, --version       Print version
+  -c, --continue                 Continue the most recent conversation recorded
+                                 in this directory
+  -r, --resume [ID]              Resume a conversation by the id the exit hint
+                                 prints — or pick it from a list, given no ID
+  -C, --cwd <DIR>                Run in DIR instead of the current directory
+      --permission-mode <MODE>   manual, edit, auto or master, for this run only
+      --system-prompt <TEXT>     Use TEXT as the system prompt for this run, in
+                                 place of the built-in one
+      --system-prompt-file <PATH>
+                                 The same, with the prompt read from PATH
+      --append-system-prompt <TEXT>
+                                 Add TEXT to the system prompt for this run
+      --append-system-prompt-file <PATH>
+                                 The same, with the text read from PATH
+  -h, --help                     Print help
+  -V, --version                  Print version
+
+Print mode:
+  -p, --print                    Answer PROMPT (or stdin) with no screen: the
+                                 answer on stdout, problems on stderr, then exit
+      --output-format <FORMAT>   text (the answer), json (one result object),
+                                 stream-json (one event per line) or
+                                 claude-stream-json (a conversation on stdin)
+      --max-turns <N>            Stop after N model replies
+      --verbose                  Log each step of the run to stderr
 ```
 
 ```
@@ -161,7 +189,7 @@ to look:
   `mcp` page is titled by its command, `alter-zero mcp`, in the same style.
 - **The description** is the line under it, and it describes the
   *invocation*, not the product: `Starts an interactive session by
-  default — a quoted PROMPT is its first turn.` Both references write this
+  default; with -p, answers once and exits.` Both references write this
   line the same way — codex's *"If no subcommand is specified, options
   will be forwarded to the interactive CLI"*, Claude Code's *"starts an
   interactive session by default, use -p/--print for non-interactive
@@ -181,6 +209,12 @@ to look:
   that same column. Nothing wraps at render time — every description is
   pre-wrapped in the source, so the page reads on disk exactly as it
   prints and a test can pin it.
+- **A long cell does not widen the column.** A cell wider than
+  `HELP_CELL_MAX` (28 columns) is left out of the column's width and its
+  description starts on the next line, at that column — clap's rule for a
+  long flag. The system prompt flags are why (`--append-system-prompt-file
+  <PATH>`): fitted to them, the page's one description column would leave
+  37 columns for every description (`docs/system-prompt.md`).
 - **Styles.** `HelpStyle::Plain` emits no escapes at all — the string the
   tests compare against and what a pipe receives. `HelpStyle::Ansi`
   dresses headings and the title in **bold cyan** (`ESC[1;36m` — the app's
@@ -203,7 +237,9 @@ A **usage error** is clap's shape, not the old whole-page dump:
 error: unrecognized argument: --frob
 
 Usage: alter-zero [OPTIONS] [PROMPT]
+       alter-zero -p [OPTIONS] [PROMPT]
        alter-zero mcp <COMMAND>
+       alter-zero plugin <COMMAND>
        alter-zero update
 
 For more information, try '--help'.
@@ -211,17 +247,26 @@ For more information, try '--help'.
 
 `cli::usage_error(page, message, style)` renders it — the `error:` lead,
 the page's own `Usage:` block, the pointer at `--help` — and the `mcp`
-page's grammar errors take the same shape over its six usage lines. Exit
+page's grammar errors take the same shape over its six usage lines, the
+`plugin` page's over its ten (`docs/plugins.md` *From a shell*). Exit
 `2`, on stderr, as before.
 
 ### The pure `cli` module (src/cli.rs)
 
-- `Cli` — the parsed invocation: `Session(SessionArgs)` (the TUI run — how
-  to start, plus the optional prompt), `Help`, `Version`, `Mcp(McpCli)`,
-  `Update` (the `update` subcommand — `tui::update_cli::run` does the work,
+- `Cli` — the parsed invocation: `Session(SessionArgs)` (a session run —
+  how to start, plus the optional prompt), `Help`, `Version`,
+  `Mcp(McpCli)`, `Plugin(PluginCli)` (the `plugin` subcommands —
+  `tui::plugin_cli::run` does the work, `docs/plugins.md`), `Update` (the
+  `update` subcommand — `tui::update_cli::run` does the work,
   `docs/update.md`).
-  `SessionArgs { start: SessionStart, prompt: Option<String> }` with
-  `SessionStart::{Fresh, Continue, Resume(Option<String>)}`.
+  `SessionArgs { start, prompt, cwd, permission_mode, system_prompt,
+  append_system_prompt, print }` with
+  `SessionStart::{Fresh, Continue, Resume(Option<String>)}`, `cwd` the
+  `-C`/`--cwd` directory, `permission_mode` the `--permission-mode` seed,
+  `system_prompt`/`append_system_prompt` each an `Option<SystemText>`
+  (`Inline(String)` or `File(PathBuf)`, `docs/system-prompt.md`),
+  and `print: Option<PrintOptions { output_format, max_turns }>` — `Some`
+  for a headless run (`docs/headless.md`), `None` for the TUI.
 - `parse(args)` — over `std::env::args().skip(1)`: a first argument of
   `mcp` or `update` routes to that subcommand (`update` takes nothing — a
   trailing argument is a usage error, never a guess); else `--continue`/`-c`,
@@ -234,6 +279,29 @@ page's grammar errors take the same shape over its six usage lines. Exit
   `--resume`'s value may be a following argument or `=`-attached; a leading
   `-` on the next argument means "bare `--resume`, then that flag" (so
   `--resume --help` doesn't eat `--help` as an id).
+- The headless flags (`docs/headless.md`): `-p`/`--print` is a switch, so
+  the prompt stays the one positional (`alter-zero -p "…"`, or none at all
+  when stdin carries it); `--output-format text|json|stream-json`,
+  `--max-turns <N>` (a count above 0) and `--verbose` need `-p` and are
+  refused without it;
+  `--permission-mode manual|edit|auto|master` and `-C`/`--cwd <DIR>` work in
+  either kind of run. Every value-taking flag reads its value like
+  `--resume`'s (separate or `=`-attached, never a `-`-leading next
+  argument), an unknown value is refused naming the choices, any flag given
+  twice is refused, and `-p` with the bare `--resume` is refused — the
+  picker is a screen, so a headless run names its session. At the boundary
+  `-C` is a `chdir` before anything reads the working directory, which is
+  why `--continue` then looks for the newest conversation *there*.
+- The system prompt flags (`docs/system-prompt.md`): `--system-prompt`,
+  `--system-prompt-file`, `--append-system-prompt` and
+  `--append-system-prompt-file` work in either kind of run and read their
+  value like every value flag. A blank value is refused, and a
+  dash-leading next argument is refused with a hint to attach it with `=`
+  (`--append-system-prompt="-…"`). At most one of each pair is given; a
+  replacement and an append combine. Two pure helpers judge a file flag's
+  read: `system_prompt_file_text` turns the bytes into the text, refusing
+  a file over `SYSTEM_PROMPT_FILE_MAX_BYTES` (1 MiB), not UTF-8, or blank,
+  and `system_prompt_file_unreadable` words a file that could not be read.
 - `help(page, style)` / `usage_error(page, message, style)` — the two
   pages above, in either style; `colour_enabled(no_color, term)` the
   colour rule.
@@ -249,9 +317,29 @@ page's grammar errors take the same shape over its six usage lines. Exit
   TUI flags; its argv is `__alter-zero-detached-exec {cmd}`), and the CLI
   work touches no terminal state, so `--help`/errors print to a normal
   cooked-mode stdio and exit before the tokio runtime boots.
+- **An interface that cannot start says what to do instead.** When
+  `InlineViewport::init` fails — no terminal to open (cron, CI, a pipe), or
+  one that never answers the cursor query — `tui_main` prints
+  `cli::no_terminal_error` to stderr (the cause, then `{bin} -p "your
+  prompt"`) and exits 1, where it used to end on the `io::Error`'s Debug
+  form. `init` unwinds the modes it set before it returns the error.
+- **A launch that fails before it starts says so once.** The working
+  directory, the session to reopen and a headless run's prompt are resolved
+  by one `prepare` step whose failures come back as a `Halt` — a usage error
+  (the usage block, exit 2) or a failure with its message (exit 1) — and
+  `resolve_cli` prints it: as text for the TUI, through
+  `headless::not_started` for a headless run, so `--output-format json`
+  still hands a script its result object (`docs/headless.md`).
+- **A system prompt file is read in `prepare`, after `-C`**, so a relative
+  path names a file in the run's directory. The read is bounded at
+  `cli::SYSTEM_PROMPT_FILE_MAX_BYTES`, and a file that cannot be read, is
+  over the cap, is not UTF-8 or is blank is a failure (exit 1) before the
+  terminal is touched. The texts ride `Startup::system_prompt`, a
+  `SystemPromptFlags { replace, append }`, to the one place the prompt is
+  composed (`tui::config::system_prompt`, `docs/system-prompt.md`).
 - **Flags resolve to a `Startup` before `InlineViewport::init`** —
-  `Startup { session: Option<StartupSession>, prompt: Option<String> }`,
-  fail fast, no TUI flash:
+  `Startup { session: Option<StartupSession>, prompt: Option<String>,
+  permission_mode, print, system_prompt }`, fail fast, no TUI flash:
   - `--continue`: `list_sessions(root, None)` (the `/resume` scan —
     eligibility included, so a session you never typed into doesn't
     continue) filtered by `session::latest_for_cwd` against
@@ -310,10 +398,10 @@ page's grammar errors take the same shape over its six usage lines. Exit
 - **The hint prints on every quit with history** (Claude gates some exits);
   it is plain stdout after restore, so it scrolls away naturally and never
   enters the transcript, the recorder, or the model's context.
-- **`[PROMPT]` is interactive-only.** Claude Code's prompt doubles as the
-  input of its `-p/--print` headless mode; this TUI has no non-interactive
-  mode, so the prompt always opens the session it starts. `--print`,
-  `--fork-session` and `--session-id` stay out of scope for the same reason.
+- **`[PROMPT]` doubles as `-p`'s input**, as Claude Code's does — and stdin
+  joins it the way codex joins them, in a tagged `<stdin>` block
+  (`docs/headless.md`). `--fork-session` and `--session-id` stay out of
+  scope.
 - **The help page is titled and coloured.** commander's page opens on
   `Usage:`; ours opens on the product name and the description, cargo's
   ordering, in the app's cyan where commander's is plain.
@@ -333,7 +421,11 @@ page's grammar errors take the same shape over its six usage lines. Exit
   title/headings carrying the heading escape and `alter-zero` the bold
   one; `usage_error`'s three-part shape; `colour_enabled`'s three rules;
   `resume_hint` matches the printed shape; `bin_name` basenames a path and
-  falls back on `None`/empty.
+  falls back on `None`/empty. The system prompt flags parse to
+  `SystemText` separate and `=`-attached, combine across the pairs, and
+  refuse a pair, a repeat, a missing or blank value and a dash-leading one
+  (with its hint); the file helpers' four outcomes; the page's long-cell
+  rule leaving the `mcp` page unchanged (`docs/system-prompt.md`).
 - `session`: `rollout_file_id` round-trips the id `rollout_rel_path` embeds
   (dashed ids included), rejects foreign/stampless names; `latest_for_cwd`
   picks the newest `updated_secs` among matching-cwd rows only, `None`
@@ -343,7 +435,10 @@ page's grammar errors take the same shape over its six usage lines. Exit
   escapes off a tty — and `mcp --help` the `Mcp` page; `--version` prints
   `alter-zero {version}`; a grammar error exits 2 with the `error:` shape
   on stderr and an empty stdout; two positionals name the second with the
-  quote hint; a prompt with the bare picker is refused.
+  quote hint; a prompt with the bare picker is refused; a system prompt
+  flag with no value, both flags of a pair, or a blank value exits 2, and
+  a `-file` flag naming a file that cannot be read exits 1 with its line
+  before any interface starts.
 - `scripts/smoke.sh` Phase 61 (the I/O boundary): quitting a session that
   recorded a turn prints `Resume this session with:` + a `--resume {id}`
   line whose id names the rollout file; `--continue` relaunches straight
@@ -358,7 +453,10 @@ page's grammar errors take the same shape over its six usage lines. Exit
   `--help` on the pane's tty opens on `Alter Zero`, carries `[PROMPT]`,
   and is coloured (the raw pane holds the bold-cyan escape) while the same
   page through a pipe holds none; a usage error prints the clap-shaped
-  trailer and exits 2.
+  trailer and exits 2. **Phase 162**: launched with `--system-prompt-file`
+  and `--append-system-prompt` against a stub provider, the request opens
+  on the file's text, then the appended line, then `## Environment`
+  (`docs/system-prompt.md`).
 - `scripts/live_smoke.sh` Phase L4: against a real provider, the prompt
   shortcut's turn streams and settles, and `--resume {id} "…"` continues
   it.

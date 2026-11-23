@@ -1,7 +1,8 @@
 //! Subagent rendering (`docs/agent-tool.md`).
 
 use super::*;
-use crate::ui::agent::{AgentCellView, agent_cell_lines, agent_group_full_lines};
+use crate::app::STATUS_VERBS;
+use crate::ui::agent::{AgentCellView, agent_cell_lines, agent_group_full_cells};
 use crate::ui::live::preview_lines;
 use crate::ui::theme::{
     TOOL_BULLET, TOOL_PULSE_PERIOD, tool_dim_color, tool_fail_color, tool_ok_color,
@@ -103,6 +104,7 @@ fn a_lone_live_agent_renders_the_tool_cell_shape() {
             output: "+19°C".into(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         },
     );
     let texts: Vec<String> = live_agent_group_lines(&app, 80).iter().map(plain).collect();
@@ -361,6 +363,7 @@ fn a_multi_agent_tree_keeps_the_sticky_tool_activity() {
             output: "Created game.py (10 lines)".into(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         },
     ] {
         app.apply_agent_event("a2", &event);
@@ -419,7 +422,8 @@ fn agent_cell_lines_expand_prompt_response_and_done() {
         timestamp: String::new(),
         batch: None,
     };
-    let texts: Vec<String> = agent_group_full_lines(&group, 100, &PathDisplay::VERBATIM)
+    let texts: Vec<String> = agent_group_full_cells(&group, 100, &PathDisplay::VERBATIM)
+        .concat()
         .iter()
         .map(plain)
         .collect();
@@ -440,7 +444,8 @@ fn agent_cell_lines_expand_prompt_response_and_done() {
     // An interrupted agent ends with the bare Interrupted footer instead.
     let mut stopped = group;
     stopped.agents[0].status = AgentStatus::Interrupted;
-    let texts: Vec<String> = agent_group_full_lines(&stopped, 100, &PathDisplay::VERBATIM)
+    let texts: Vec<String> = agent_group_full_cells(&stopped, 100, &PathDisplay::VERBATIM)
+        .concat()
         .iter()
         .map(plain)
         .collect();
@@ -819,15 +824,43 @@ fn an_agent_views_status_verb_rotates_with_its_runtime() {
     let mut app = App::new();
     app.begin_stream();
     app.start_agent_group(false, &[spec("a1", "Rotate", false)]);
+    let pair = |i: usize| (STATUS_VERBS[i].working, STATUS_VERBS[i].done);
     assert_eq!(
         agent_view_verbs(&app, "a1"),
-        ("Working", "Worked"),
+        pair(0),
         "an agent opens on the first verb"
     );
     app.set_agent_runtime("a1", Duration::from_millis(29_999));
-    assert_eq!(agent_view_verbs(&app, "a1").0, "Working");
+    assert_eq!(agent_view_verbs(&app, "a1"), pair(0));
     app.set_agent_runtime("a1", Duration::from_secs(30));
-    assert_eq!(agent_view_verbs(&app, "a1"), ("Generating", "Generated"));
+    assert_eq!(agent_view_verbs(&app, "a1"), pair(1));
+}
+
+#[test]
+fn an_agent_opens_on_the_sessions_first_verb() {
+    // The session's random first verb is every agent's opener too, so a
+    // subagent's view no longer always reads the table's first word
+    // (docs/status-indicator.md *The verb catalog*) — even launched after
+    // the main walk has moved on.
+    let mut app = App::new();
+    app.seed_status_verbs(9);
+    app.begin_stream();
+    app.set_status_times(Duration::from_secs(95), None);
+    app.start_agent_group(false, &[spec("a1", "Rotate", false)]);
+    assert_eq!(
+        agent_view_verbs(&app, "a1"),
+        (STATUS_VERBS[9].working, STATUS_VERBS[9].done)
+    );
+}
+
+#[test]
+fn an_agent_rebuilt_on_its_prompt_opens_on_the_sessions_first_verb() {
+    // A resumed agent whose transcript was let go is rebuilt on its prompt
+    // — a fresh run, so a fresh run's opener.
+    let mut app = App::new();
+    app.seed_status_verbs(9);
+    app.resume_agent("a9", "Rebuilt", "general-purpose", "the task");
+    assert_eq!(agent_view_verbs(&app, "a9").0, STATUS_VERBS[9].working);
 }
 
 #[test]
@@ -836,13 +869,13 @@ fn an_agent_turns_summary_names_the_verb_its_view_wore() {
     let mut app = App::new();
     app.begin_stream();
     app.start_agent_group(false, &[spec("a1", "Rotate", false)]);
-    app.set_agent_runtime("a1", Duration::from_secs(45)); // `Generating…`
+    app.set_agent_runtime("a1", Duration::from_secs(45)); // the second verb
     app.apply_agent_event("a1", &StreamEvent::Chunk("It is 19°C.".into()));
     app.apply_agent_event("a1", &StreamEvent::StreamDone);
     let summary = agent_summary(&app, "a1");
     assert_eq!(
-        summary.verb, "Generated",
-        "the line last said `Generating…`"
+        summary.verb, STATUS_VERBS[1].done,
+        "the line last wore the second verb"
     );
     assert_eq!(summary.secs, 45);
 }
@@ -862,8 +895,8 @@ fn an_events_runtime_freeze_never_moves_the_agents_verb() {
     app.apply_agent_event("a1", &StreamEvent::StreamDone);
     let summary = agent_summary(&app, "a1");
     assert_eq!(
-        summary.verb, "Worked",
-        "the view never showed `Generating…`"
+        summary.verb, STATUS_VERBS[0].done,
+        "the view never showed the second verb"
     );
     assert_eq!(
         summary.secs, 30,
@@ -882,7 +915,7 @@ fn an_agents_chat_continuation_opens_on_the_verb_after_the_last_one_shown() {
     app.agent_chat("a1", "and in Manila?");
     assert_eq!(
         agent_view_verbs(&app, "a1").0,
-        "Pondering",
+        STATUS_VERBS[2].working,
         "never the verb the summary above it just named"
     );
 }
@@ -946,7 +979,7 @@ fn an_agent_views_strip_shows_every_waiting_sibling_of_a_parallel_batch() {
     // dim `⎿ Waiting…` sibling, blank-separated (docs/parallel-tools.md).
     // The agent session view is the same picture over the agent's own queue:
     // its `ToolBatch` fills `AgentRun::tool_queue` exactly as the main turn's
-    // fills `App::tool_queue`, and `agent_view_preview_lines` walks it through
+    // fills `App::tool_queue`, and `agent_view_cell_lines` walks it through
     // the shared `live_call_lines`.
     let mut app = App::new();
     app.begin_stream();
@@ -1413,6 +1446,7 @@ fn a_live_agent_cells_nested_headers_shorten_from_the_record() {
             output: "Wrote 1 line to ../../notes.md\n1 x".into(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         },
     );
     app.apply_agent_event(

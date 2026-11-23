@@ -125,6 +125,10 @@ pub enum Action {
     /// the picker is **inline** (it grows the bottom region in place), not an
     /// alternate-screen overlay. See `docs/llm.md`.
     OpenModelPicker,
+    /// Ctrl+R in the model picker: fetch every configured provider's list
+    /// again, whatever the cache says, keeping the rows on screen while the
+    /// round runs. See `docs/model-cache.md`.
+    RefreshModels,
     /// The inline model picker was dismissed (Esc on an empty query, or Ctrl+C):
     /// [`App::model_picker`] is already cleared; the loop just repaints the
     /// collapsed region.
@@ -281,6 +285,29 @@ pub enum Action {
     /// system clipboard. The loop does the I/O and raises the toast, like
     /// [`Action::CopyDeviceCode`]; the page stays open. See `docs/donate.md`.
     CopyDonationAddress(DonationAddress),
+    /// `/sponsor`: open the read-only sponsor page. Like `/donate` it works
+    /// mid-turn and the loop has nothing to fetch. See `docs/sponsor.md`.
+    OpenSponsorPage,
+    /// The sponsor page was dismissed (Esc, or Ctrl+C):
+    /// [`App::sponsor_page`] is already cleared; the loop repaints the
+    /// collapsed region.
+    CloseSponsorPage,
+    /// Enter, `c`, or a digit on the sponsor page: copy this row's value to
+    /// the system clipboard. The loop does the I/O and raises the toast;
+    /// the page stays open. See `docs/sponsor.md`.
+    CopySponsorLink(SponsorLink),
+    /// `/discord`: open the read-only Discord page. Like `/sponsor` it
+    /// works mid-turn and the loop has nothing to fetch. See
+    /// `docs/discord.md`.
+    OpenDiscordPage,
+    /// The Discord page was dismissed (Esc, or Ctrl+C):
+    /// [`App::discord_page`] is already cleared; the loop repaints the
+    /// collapsed region.
+    CloseDiscordPage,
+    /// Enter, `c`, or `1` on the Discord page: copy [`DISCORD_INVITE`] to
+    /// the system clipboard. The loop does the I/O and raises the toast;
+    /// the page stays open. See `docs/discord.md`.
+    CopyDiscordInvite,
     /// `/secrets`: the page is already open ([`App::secrets_page`]). Like
     /// `/skills` it works mid-turn — it only replaces the composer. The loop
     /// reloads `secrets.json`, so a secret another session added is listed,
@@ -352,6 +379,24 @@ pub enum Action {
     /// [`App::mcp_menu`] is already cleared; the loop just repaints the
     /// collapsed region.
     CloseMcpMenu,
+    /// `/plugins`: open the plugins page. The *loop* opens it
+    /// ([`App::open_plugins_menu`] — it knows whether the session loads
+    /// plugins) and reads the catalog on a worker. See `docs/plugins.md`.
+    OpenPluginsMenu,
+    /// The `/plugins` page was closed (Esc from the list, or Ctrl+C):
+    /// [`App::plugins_menu`] is already cleared; the loop stops a job still
+    /// running.
+    ClosePluginsMenu,
+    /// Esc while a `/plugins` job runs: stop it. Its answer comes back as a
+    /// failure, `cancelled`.
+    CancelPluginJob,
+    /// One `/plugins` operation, already marked running on the page under
+    /// `round`: the loop runs it on a worker and answers with
+    /// [`App::finish_plugin_job`]. See `docs/plugins.md`.
+    PluginOp {
+        op: crate::app::PluginOp,
+        round: u64,
+    },
     /// One `/mcp` operation to apply against the live manager
     /// (`tui::mcp::Session::apply_mcp_op`) — connection work runs on worker
     /// threads, completions re-inject the snapshot via the MCP event
@@ -507,4 +552,25 @@ pub enum McpOp {
     /// Enter on the auth page's `URL >` field: hand the pasted redirect URL
     /// to the waiting flow.
     SubmitAuthUrl { text: String },
+    /// The auth page's client form, submitted: keep the OAuth client the user
+    /// entered for this server — created with `issuer` — and start the
+    /// sign-in again (`docs/mcp.md` *Pre-registered clients*). With no
+    /// secret typed, `keep_secret` says the field was left on a kept one.
+    SaveAuthClient {
+        server: String,
+        issuer: String,
+        client_id: String,
+        client_secret: Option<crate::secrets::SecretValue>,
+        keep_secret: bool,
+        callback_port: Option<u16>,
+    },
+    /// `Change OAuth client` on a server's page: look
+    /// up the server's authorization server on a worker, then open the
+    /// client form over the client in effect, under the issuer and the
+    /// documentation link the lookup found (`docs/mcp.md` *The client
+    /// form*). The auth page waits on it meanwhile.
+    LookUpAuthClient { server: String },
+    /// `Forget OAuth client` on a server's page: drop the client entered for
+    /// it, and the login that client was granted.
+    ForgetAuthClient { server: String },
 }

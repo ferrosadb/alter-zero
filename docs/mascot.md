@@ -28,9 +28,22 @@ own accent → link gradient (`header_gradient_start()` →
 `header_gradient_end()` — the theme's, `docs/theme.md`), keyed by display
 column across the art block's width.
 
+Each mascot also **moves** — a repertoire of thirty moves and more: it
+blinks, glances, winks and stares, bounces and wiggles and peeks, and has
+moves of its own (the crest flares its frill, the sprout unfurls a leaf, the
+gem twinkles) — while the conversation under the banner is empty, and in the
+picker's preview. Over that empty conversation it also keeps the user
+company: it watches what is typed, naps when it is left alone, and starts
+awake at a key. The frames live beside the art (`app/mascot_motion.rs`),
+each the rest art with one part moved, or the whole of it moved half a
+cell, held to the same rules: the art's three rows, never wider than it,
+single-width glyphs. A new mascot's art should leave a half-row free under
+it or a half-column at its sides, or it will have nothing to bounce or lean
+into. The whole design is `docs/mascot-animation.md`.
+
 ## The `/mascot` picker
 
-On a terminal with room for the list, a gap and the banner — 56 columns over
+On a terminal with room for the list, a gap and the banner — 59 columns over
 this catalog — the preview sits **beside** the list, the `/theme` picker's
 layout (`docs/theme.md`):
 
@@ -46,7 +59,7 @@ layout (`docs/theme.md`):
     sprout
     twin         ▙▄▙▄▟▄▟   Alter Zero (v0.18.0)
     skiter      ▝▜▄███▄▛▘  ~/alter-zero
-    (1/6)         ▘▘ ▝▝    /login   /model   /resume
+    (1/6)         ▘▘ ▝▝    / commands  @ files  ? shortcuts
 
   ↑/↓ to navigate · Type to search · Enter to choose · Esc to cancel
 ────────────────────────────────────────────────────────────────────────────────
@@ -73,7 +86,7 @@ On a narrower one the same preview stacks under the list:
 
    ▙▄▙▄▟▄▟   Alter Zero (v0.14.0)
   ▝▜▄███▄▛▘  ~/alter-zero
-    ▘▘ ▝▝    /login   /model   /resume
+    ▘▘ ▝▝    / commands  @ files  ? shortcuts
 
   ↑/↓ to navigate · Type to search · Enter to choose …
 ──────────────────────────────────────────────────────
@@ -91,7 +104,15 @@ row — over the `(n/total)` counter, and a hint led by the navigation
 preview**. It is built by the *same* `ui::header` builder the startup banner
 uses (`header_lines_for(app, mascot, width)`, at the preview column's width),
 so what the picker shows and what Enter produces can never disagree — the
-cwd, the version, the hint and the gradient all preview exactly. Over it
+cwd, the version, the hint and the gradient all preview exactly. And it
+**moves**: the preview is the banner in the pose the highlighted mascot's
+animation is in now (`header_lines_posed` over `App::mascot_pose_for`), so
+a mascot can be chosen for how it behaves, not only how it stands. It runs
+on a clock of its own, started by the frame that first shows a mascot
+under the highlight, so each one **greets** as the highlight lands on it —
+a light, the move its description names, a blink — and never moves in step
+with the banner above it (`docs/mascot-animation.md`). A frame changes cells inside the art block and
+nothing else, so the page holds still around it. Over it
 sits `/theme`'s caption: the mascot's name as a bold title (`Crest`) over
 its description in the frame's dim.
 
@@ -99,12 +120,14 @@ its description in the frame's dim.
   preview sits beside the list once the terminal has room for the list
   column (the widest row the catalog can paint, 12 columns), then
   `MASCOT_PREVIEW_GAP` (4, the `/theme` gap), then `MASCOT_PREVIEW_MIN_COLS`
-  (40: the banner keeps its art beside its title and its `/login /model
-  /resume` hint, 36 columns, and every caption reads whole, 37). That is 56
-  columns, so every standard terminal gets it. Under that the preview stacks
-  under the list after a gap, inset two columns. There is one breakpoint, and
-  at it the banner still seats its art and every caption reads whole
-  (`the_layout_switches_once_and_beside_the_list_the_banner_keeps_its_art`).
+  (43: the banner keeps its art beside its title and its
+  `/ commands  @ files  ? shortcuts` hint whole, 43 columns beside the
+  widest art, and every caption reads whole, 37). That is 59 columns, so
+  every standard terminal gets it. Under that the preview stacks under the list
+  after a gap, inset two columns. There is one breakpoint, and at it every
+  row of the banner reads as the startup banner draws it and every caption
+  reads whole
+  (`the_layout_switches_once_and_beside_the_list_the_banner_reads_whole`).
   The list column is a constant of the catalog, so neither ↑/↓ nor a search
   moves the preview sideways
   (`the_preview_column_holds_still_as_the_list_moves_and_filters`).
@@ -197,6 +220,9 @@ and closed the picker; the boundary (`tui::mascot::Session::select_mascot`):
    way to redraw it. The switch is visible immediately, exactly like a
    resize's repaint; a mid-turn switch keeps the in-flight partial through
    the standard rebuild path (invariant 3).
+4. **restarts the animation's clock**, so over an empty conversation the
+   mascot just chosen greets — the sweep of light, its own move, a blink
+   (`docs/mascot-animation.md`).
 
 At startup `tui::bootstrap` seeds `App::mascot` from `mascot.json` before the
 first frame commits the header — the directory's own entry, or, launched in
@@ -245,9 +271,12 @@ a project.
 - `app::MascotFile` — the `mascot.json` format: `app::LookFile` over
   `app::Mascot` (`Look::KEY = "mascot"`) — `parse`/`to_json`, `project`,
   `choice_for`, `adopt`, `record`, over the `last` + `projects` fields.
+- `app::MascotPose`, `Mascot::pose` / `pose_holds`, `App::mascot_pose_for` —
+  the animation (`docs/mascot-animation.md`).
 - `ui::mascot_view` — `mascot_view_lines` (the page builder; its length is
   the reserved height, `docs/view-flow.md`), `mascot_picker_height`,
-  `render_mascot_picker`; `ui::header::header_lines_for` renders the preview,
+  `render_mascot_picker`; `ui::header::header_lines_posed` renders the
+  preview (`header_lines_for`, the rest pose, sizes its slot),
   and `ui::model_view::PreviewLayout` (over `MASCOT_PREVIEW_GAP` and
   `MASCOT_PREVIEW_MIN_COLS`) lays it beside the list or under it.
 - `tui::mascot::Session::select_mascot`, `tui::config::{mascot_json_path,
@@ -269,8 +298,9 @@ a project.
   captioned preview, hint) at a wide and a narrow width, the marker and
   indent, the preview beside the list on one column
   (an 80-column terminal included) and stacked under it after a gap on a
-  narrow one, the one breakpoint with the banner's art and every caption
-  kept at it, the preview column holding still through ↑/↓ and searches, the
+  narrow one, the one breakpoint with the whole banner, its hint included,
+  and every caption kept at it, the preview column no wider than that
+  needs, the preview column holding still through ↑/↓ and searches, the
   caption's bold title over its dim description and every caption whole at
   80 columns, the preview following the selection, the stable height, the
   active ✓ and its seat, the no-match placeholder, no stacked blanks, width
@@ -279,6 +309,8 @@ a project.
   search line) and the rungs under it down to the search line, nothing
   flowing at any height.
 - `ui/tests/header.rs` — the banner side (`docs/header.md`).
+- `app/tests/mascot_motion.rs` and the motion tests in the two files above —
+  the animation (`docs/mascot-animation.md`).
 - `scripts/smoke.sh` Phase 139 — the side-by-side page fitting a 12-row
   terminal whole, and the search line on 7.
 - `scripts/smoke.sh` Phase 86 — the picker end to end in a real terminal:

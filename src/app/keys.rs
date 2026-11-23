@@ -11,6 +11,9 @@ use super::*;
 
 impl App {
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        // Someone is at the keyboard — all the banner mascot asks of a key
+        // (docs/mascot-animation.md *The nap*).
+        self.keys_taken = self.keys_taken.wrapping_add(1);
         if self.view == View::DiffReview {
             return self.on_key_diff_review(key);
         }
@@ -78,6 +81,16 @@ impl App {
         if self.view == View::Conversation && self.donate_picker.is_some() {
             return self.on_key_donate_picker(key);
         }
+        // …and the read-only `/sponsor` page, its twin. See
+        // `docs/sponsor.md`.
+        if self.view == View::Conversation && self.sponsor_page.is_some() {
+            return self.on_key_sponsor_page(key);
+        }
+        // …and the read-only `/discord` page, the `/sponsor` page's twin.
+        // See `docs/discord.md`.
+        if self.view == View::Conversation && self.discord_page.is_some() {
+            return self.on_key_discord_page(key);
+        }
         // …and the read-only `/export` page, the `/donate` page's sibling.
         // See `docs/export.md`.
         if self.view == View::Conversation && self.export_picker.is_some() {
@@ -100,6 +113,10 @@ impl App {
         // …and the inline `/skills` menu. See `docs/skills.md`.
         if self.view == View::Conversation && self.mcp_menu.is_some() {
             return self.on_key_mcp(key);
+        }
+        // …and the `/plugins` page. See `docs/plugins.md`.
+        if self.view == View::Conversation && self.plugins_menu.is_some() {
+            return self.on_key_plugins(key);
         }
         if self.view == View::Conversation && self.skills_menu.is_some() {
             return self.on_key_skills(key);

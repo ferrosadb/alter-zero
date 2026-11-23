@@ -83,6 +83,9 @@ impl App {
     ///
     /// [`pasted`]: App::pasted
     pub fn on_paste(&mut self, pasted: &str) {
+        // A paste is a sign of the user like a key (docs/mascot-animation.md
+        // *The nap*).
+        self.keys_taken = self.keys_taken.wrapping_add(1);
         // An open Ctrl+R search owns *every* key ([`on_key`] routes them all to
         // on_key_search) — a bracketed paste is input too, so it extends the
         // query (readline's paste-into-isearch) instead of editing the doomed
@@ -101,6 +104,12 @@ impl App {
         // must not land in a message (`docs/secrets.md`).
         if self.view == View::Conversation && self.secrets_page.is_some() {
             self.paste_into_secrets_page(pasted);
+            return;
+        }
+        // …and so does `/plugins`: a pasted marketplace URL belongs in its
+        // field (`docs/plugins.md`).
+        if self.view == View::Conversation && self.plugins_menu.is_some() {
+            self.paste_into_plugins(pasted);
             return;
         }
         // An edit may change the active /command, @token or $mention, like

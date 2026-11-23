@@ -149,13 +149,21 @@ resizes.
 
 ### Where the pixel size comes from
 
-The row reservation is pure, so it can't open the file. Two sources, and only
-two:
+The row reservation is pure, so it can't open the file. Three sources, and
+only three:
 
 * An **image read** — the `read` tool's own fact line already carries it
   (`Read image (JPEG, 700x689, 63 KB)`), so `images::read_image_size` parses
   it back out. That is also the only record that survives a `/resume`: the
   rollout keeps the cell's text, not the file's header.
+* A **generated image** — the `imagegen` tool's fact line carries the size
+  and the file both (`Generated image (PNG, 1536x1024, 2.1 MB) saved to
+  {path}`, `llm::imagegen::generated_image`, `docs/imagegen.md`); the tool
+  records the size on the registry as it saves the file. What the *model*
+  is sent of one is held to the attachment cap: a picture past it goes up
+  as a copy kept in `.attachments/` beside it, which the encoder prefers
+  over the picture on every later turn (`images::fitted_attachment_data_url`)
+  — the screen still draws the picture itself.
 * A **Ctrl+V paste** — no such line, so the boundary reads the header once
   when the paste lands (`images::remember_size`, from `tui::workers`) — and
   again for every pasted picture a loaded conversation carries
@@ -254,10 +262,13 @@ then the cursor report.
 * **When it asks** (`images::graphics_query_wanted`): only when the
   environment left the half-block fallback and nothing pinned the protocol —
   never when it named one, never with `ALTER_ZERO_IMAGE_PROTOCOL` set
-  (`halfblocks` included, which is the way to turn the question off), never
-  with `ALTER_ZERO_IMAGES=0`, never under a multiplexer (which answers nothing
-  itself), and never on a `linux` or `dumb` console, which would print an
-  escape string it does not know.
+  (`halfblocks` included, which is the way to turn the graphics question
+  off), never with `ALTER_ZERO_IMAGES=0`, never under a multiplexer (which
+  answers nothing itself), and never on a `linux` or `dumb` console, which
+  would print an escape string it does not know. The terminal's **name** can
+  still be asked on its own for the links (below);
+  `ALTER_ZERO_LINK_TARGETS=show` or `hide` settles that question in advance,
+  and with both set nothing is asked but the cursor.
 * **The title push/pop** is for tmux. It files an APC string it does not know
   as the pane's title, so a session that *hides* tmux from the environment
   (`docker exec` without `-e TERM`, `ssh` from a tmux whose
@@ -276,6 +287,18 @@ then the cursor report.
   **answering** terminal's name from XTVERSION (`WezTerm 20240203-…`,
   `libghostty`) and falls back to the variables only when the terminal gave
   no name.
+
+That name has a second reader. The viewport keeps it
+(`InlineViewport::terminal_name`), and it is what lets a reply's link hide
+its address over `ssh`, where no variable names the terminal
+(`docs/links.md` *The terminal's own answer*). The links ask for it on their
+own account too, wherever the answer could decide how a link reads
+(`links::wants_terminal_name`) — `XTVERSION` alone then, with no kitty
+query and so no title bracket. That is how the name is asked where the
+pictures ask nothing: a pinned protocol, pictures switched off, or an
+environment that names a protocol but no terminal the links know — `ssh`
+from iTerm2, whose `LC_TERMINAL` names iTerm2's protocol here. What the
+pictures do is decided as before, since a name alone upgrades nothing.
 
 The read takes in whatever arrived before the cursor report, which includes
 keys typed while it waited — type-ahead sent before the TUI was up. Those are

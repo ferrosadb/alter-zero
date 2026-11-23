@@ -327,6 +327,43 @@ fn a_long_command_wraps_whole_and_its_tail_is_never_cut() {
 }
 
 #[test]
+fn the_hint_leads_with_the_keys_that_move_the_highlight() {
+    // Space and Enter act on the highlighted row, so the hint first names
+    // the keys that move it, as `/mcp`'s and `/theme`'s hints do.
+    let mut app = review_app(vec![hooks_page(), servers_page()]);
+    let texts = texts(&app, 100, TALL);
+    let hint = find(&texts, "Esc to continue without trusting");
+    assert_eq!(
+        texts[hint].trim(),
+        "↑/↓ to navigate · Space to select · Enter to confirm · Esc to continue without trusting"
+    );
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let texts = self::texts(&app, 100, TALL);
+    let hint = find(&texts, "Esc to disable all");
+    assert_eq!(
+        texts[hint].trim(),
+        "↑/↓ to navigate · Space to select · Enter to confirm · Esc to disable all"
+    );
+}
+
+#[test]
+fn a_hint_too_wide_for_one_row_breaks_between_its_keys() {
+    // What Esc does is what differs between the two pages, so the hint
+    // never splits an entry across rows where a break between two fits.
+    let app = review_app(vec![hooks_page()]);
+    let texts = texts(&app, 80, TALL);
+    let esc = find(&texts, "Esc to continue without trusting");
+    assert_eq!(texts[esc].trim(), "Esc to continue without trusting");
+    assert_eq!(
+        texts[esc - 1].trim(),
+        "↑/↓ to navigate · Space to select · Enter to confirm"
+    );
+    // An entry wider than the row still wraps rather than overflowing it.
+    let narrow = config_review_lines(&app, 30, TALL);
+    assert!(narrow.iter().all(|line| line.width() <= 30), "{narrow:#?}");
+}
+
+#[test]
 fn an_unselected_item_shows_an_empty_box() {
     let mut app = review_app(vec![servers_page()]);
     app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
@@ -461,4 +498,39 @@ fn a_long_file_heading_wraps_whole() {
     // the width.
     assert!(joined.contains(&format!("Project ·{long}")), "{joined}");
     assert!(!joined.contains('…'), "{joined}");
+}
+
+#[test]
+fn a_plugins_servers_are_said_to_come_from_the_plugins() {
+    // A plugin's server is no project's: the headline says where the
+    // servers come from — by the scope each file is shown under.
+    let plugin_section = |name: &str| ReviewSection {
+        scope: Some(format!("Plugin {name}@demo")),
+        path: format!("~/.alter-zero/plugins/installed/demo/{name}/.mcp.json"),
+        items: vec![server(&format!("plugin:{name}:db"), "stdio", &["db"])],
+    };
+    let plugins = ReviewPage::new(
+        ReviewKind::McpServers,
+        vec![plugin_section("hello"), plugin_section("guard")],
+    );
+    let page = texts(&review_app(vec![plugins]), 80, TALL);
+    assert!(
+        page[1].contains("2 new MCP servers found in your plugins"),
+        "{page:#?}"
+    );
+    assert!(
+        page.iter().any(|t| t.starts_with("  Plugin hello@demo ·")),
+        "{page:#?}"
+    );
+    let mut project = plugin_section("hello");
+    project.scope = Some("Project".to_string());
+    let both = ReviewPage::new(
+        ReviewKind::McpServers,
+        vec![project, plugin_section("guard")],
+    );
+    let page = texts(&review_app(vec![both]), 80, TALL);
+    assert!(
+        page[1].contains("found in this project and your plugins"),
+        "{page:#?}"
+    );
 }

@@ -162,6 +162,14 @@ Two smaller guards keep the fetch bounded beyond the parse:
   balloon the worker with an unbounded `read_to_string`; a body cut at the
   cap fails the parse as an ordinary decode error.
 
+Since the picker kept its lists (`docs/model-cache.md`), an open within the
+hour makes no request at all, so it pays none of the above: it reads each
+provider's kept rows off disk, typed, through a buffer and never through a
+`Value` tree. A 611 KB OpenRouter-shaped listing keeps as a 37 KB file, so
+what an open allocates is the same ~0.05 MB of rows the table already
+counts. The cache is not held between opens: the disk is the cache, and the
+rows live only while the picker is open, as they always did.
+
 ## Measured and deliberately not changed
 
 **`ModelPicker::matches` allocates** a `Vec<&ModelEntry>` per call and
@@ -548,6 +556,27 @@ full-budget match test compare exact `DiffLine` output to the original
 algorithm. The isolated peak regression measured **8.5 MB before, 2.1 MB
 after** and requires a budget-sized diff to stay below 4 MiB.
 
+### Rendering it on another thread
+
+The transcript's rows are now rendered on a worker thread, so that the loop
+reads keys while a long reply or a 2000-line `read` goes through the grammar
+(`docs/input-latency.md`). A second thread is a second allocator arena, and
+the first version of it showed why that matters. Rendering an item built
+every row as owned lines — a `String` and a `Style` per highlighted token —
+and compacted them afterwards. On the loop thread that transient was a hole
+the next allocation reused. On the worker it was a heap of its own, with the
+grammar's lazily compiled regexes allocated in the middle of it, and it
+stayed: **+2.2 MB** resident after twenty 60 KB code replies, **+11 MB** after
+one 400 KB table.
+
+So no thread builds an item whole as lines any more. `transcript_item_into`
+writes rows straight into the compact store, and an assistant reply's are
+handed over one at a time as its lines render (`assistant_rows`). The
+worker's transient is a line. After the same two runs resident memory is the
+loop-thread baseline's or under it (35.3 MB against 34.4, and 50.3 against
+49.5), and the loop thread's own renders — an open pager's — lost the same
+transient.
+
 ### Share generated arguments across request snapshots
 
 A `write` tool call contains the complete generated file in its JSON arguments.
@@ -643,6 +672,68 @@ HTTP/TLS state remain, and raw conversation history still grows as work
 is recorded. A single item's temporary expanded rows and the allocator's
 retained pages can also affect RSS, so the reduction varies with the session.
 
+## An idle animation, on the emptiest screen
+
+The banner mascot moves while the conversation is empty
+(`docs/mascot-animation.md`) — on the one screen where the process is at
+its smallest, about 1.1 MB of memory of its own. As first written it added
+0.06 MB to that with the animation switched off and 0.18 MB with the
+mascot moving, and none of it was the animation's state, which is a clock
+and four numbers. Three things were, and each had a general shape:
+
+- **A table of references is memory of the process's own.** The frames
+  were written as stills, clips of stills and decks of clips — `&'static`
+  all the way down, 2,300 of them. Each is an address the loader fills in
+  at startup, so every page of `.data.rel.ro` holding one is private and
+  dirty from the first instruction: 52 kB, paid by every session whether
+  it ever animated or not. `readelf -S` shows it and nothing in the source
+  does. The tables are still written that way and are folded at compile
+  time into integers — row bytes and indices, no address in them — which
+  is ordinary read-only data, shared and paged in on demand.
+- **A diff does not need both pictures whole.** A repaint rendered the
+  banner's four rows twice at the terminal's width and diffed the two
+  buffers: 0.4 kB a column, 38 kB at 100 columns and 115 kB at 300, for a
+  blink that changes two cells. It renders the rows that changed, as far
+  along each as the spans ahead of the tail its two versions share — a
+  dozen columns — and is held to the same cells by a test.
+- **A frame that changes one thing should build one thing.** Every frame
+  of the animation went through the whole draw: a buffer the live region's
+  size beside the one on screen, rendered to learn that nothing in it had
+  changed. Worse than its size was its rhythm — freed each frame, split by
+  the small blocks allocated before the next, so the next took a new one
+  from the top of the heap. Frames nothing but the mascot asked for now
+  write the banner's cells and nothing else.
+
+Measured the same way as everything above (release builds, 100 by 30,
+`RssAnon`): with the animation off, and from the first reply on, the
+process is the size it is without the feature; while the mascot moves it
+is 0.04 MB larger, which is what the churn of building one banner's rows a
+frame leaves in glibc's heap. valgrind's dhat puts the heap's peak at
+191,187 bytes with the mascot moving against 191,082 with it still.
+
+## Most of an idle session was code it never ran
+
+Everything above is about data. Measured as a whole, though, an idle
+session is mostly **the binary's own code**: 8 to 10 MB of it resident, of
+which a session at rest runs about one and a half. Code is resident by the
+page and the kernel maps the block around each page touched, so what
+decides the figure is how scattered the megabyte that runs is — and the
+linker's default order scatters it across all twelve, in a way that shifts
+by a megabyte with any unrelated change. The plugin system
+(`docs/plugins.md`) is what brought it to light: its code, none of which
+runs without a plugin, moved a configured session's idle figure by
+0.95 MB.
+
+The fix is a layout, not a diet: `build.rs` has the linker put the
+functions an idle session runs side by side (`.text.idle`), and a
+configured session of the shipped binary went from 13.96 to
+8.02 MB at rest (15.86 to 8.90 MB once
+read back from disk). `docs/text-layout.md` holds the measurement, the
+mechanism, what it costs and what it leaves. Its consequence for everything
+else on this page: **an idle figure is only comparable between two builds
+laid out the same way and measured in the same page-cache state** —
+`scripts/text_layout.sh measure` does both.
+
 ## The rule
 
 The pattern generalises past this one function: **do not build a tree of a
@@ -673,3 +764,19 @@ And a fourth for anything rendered as it streams: **keep what the view can
 show, not everything it has seen.** A cache sized to the input rather than to
 its window is a cache sized by the largest input the session ever met, for the
 rest of the session.
+
+And a fifth for anything that moves on an idle screen: **an idle screen
+pays for what changes, not for what is on it.** Constant tables hold no
+addresses, a diff is built no wider than the change, and a frame that
+changes one thing does not render the rest to prove it.
+
+And a sixth for work moved off the loop: **a new thread is a new arena.** A
+transient that was harmless on the loop thread, where the next allocation
+filled the hole it left, is a high-water mark of its own on a worker. Build
+the final form directly, in pieces the size of a line.
+
+And a seventh for the code itself: **what runs at startup is resident for
+good, with whatever the linker left beside it.** Keep the functions an idle
+session runs listed (`layout/idle-functions.txt`, `docs/text-layout.md`),
+so a session keeps in memory the megabyte it runs and not the eight around
+it, and take the list again when startup changes.

@@ -1,5 +1,6 @@
-//! Machine-readable output for the headless mode (`docs/cli.md`): the NDJSON
-//! records a `--output-format stream-json` run writes, one per line.
+//! Machine-readable output for the headless mode's
+//! `--output-format claude-stream-json` (`docs/headless.md`): the NDJSON records
+//! a conversational run writes, one per line, in the Claude Code SDK's shapes.
 //!
 //! The consuming caller is a phone voice agent, so two shapes are a contract
 //! rather than a preference: an assistant message
@@ -29,39 +30,6 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::stream::StreamEvent;
-
-/// The one format name this build speaks.
-pub const STREAM_JSON: &str = "stream-json";
-
-/// A headless run's output format (`--output-format`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    /// Newline-delimited JSON records (`--output-format stream-json`).
-    StreamJson,
-}
-
-impl OutputFormat {
-    /// Parse a `--output-format` value. Unknown values come back as the
-    /// message the usage error prints, naming what is supported.
-    ///
-    /// # Errors
-    /// A model-facing-grammar message (the caller prints it as a usage error)
-    /// when the value names no format this build speaks.
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            STREAM_JSON => Ok(Self::StreamJson),
-            other => Err(format!(
-                "invalid output format \"{other}\" (use {STREAM_JSON})"
-            )),
-        }
-    }
-
-    /// The value as the flag spells it.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        STREAM_JSON
-    }
-}
 
 /// Writes one JSON record per line and flushes after each — a voice caller
 /// must be able to speak a delta the moment it lands, so nothing is batched.
@@ -329,17 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn a_format_is_parsed_by_name_and_refuses_unknown_ones() {
-        assert_eq!(
-            OutputFormat::parse("stream-json"),
-            Ok(OutputFormat::StreamJson)
-        );
-        assert_eq!(OutputFormat::StreamJson.as_str(), "stream-json");
-        let err = OutputFormat::parse("yaml").unwrap_err();
-        assert!(err.contains("yaml") && err.contains("stream-json"), "{err}");
-    }
-
-    #[test]
     fn the_writer_puts_one_record_on_each_line_and_ends_with_a_newline() {
         let text = written(&[json!({"a": 1}), json!({"b": "two"})]);
         assert_eq!(text, "{\"a\":1}\n{\"b\":\"two\"}\n");
@@ -418,6 +375,7 @@ mod tests {
             output: "secret output".to_string(),
             ok: true,
             truncated: false,
+            run: crate::stream::ToolRun::default(),
         });
         assert_eq!(ended[0]["type"], "tool_result");
         assert_eq!(ended[0]["tool_use_id"], "call_1");
@@ -501,7 +459,10 @@ mod tests {
     fn a_blank_segment_is_not_an_answer() {
         let mut turn = TurnRecords::new();
         let _ = turn.on_event(&StreamEvent::Chunk("\n\n".to_string()));
-        assert!(turn.on_event(&StreamEvent::ToolBatch(Vec::new())).is_empty());
+        assert!(
+            turn.on_event(&StreamEvent::ToolBatch(Vec::new()))
+                .is_empty()
+        );
         assert_eq!(turn.text(), "");
     }
 

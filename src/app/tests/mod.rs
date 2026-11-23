@@ -21,6 +21,7 @@ mod compact;
 mod composer;
 mod config_review;
 mod context_usage;
+mod discord;
 mod donate;
 mod drafts;
 mod export;
@@ -30,9 +31,11 @@ mod input_history;
 mod keys;
 mod login;
 mod mascot;
+mod mascot_motion;
 mod mcp_menu;
 mod model_picker;
 mod permission;
+mod plugins_menu;
 mod queue;
 mod reasoning;
 mod resume;
@@ -41,6 +44,7 @@ mod settings;
 mod skill_picker;
 mod skills_menu;
 mod spinner;
+mod sponsor;
 mod tasks;
 mod theme;
 mod tips;
@@ -86,12 +90,11 @@ pub(super) fn submit(app: &mut App, text: &str) {
     );
 }
 
-/// A bare file match (no score/indices) for the file-picker tests.
+/// A bare file match (no score) for the file-picker tests.
 pub(super) fn fm(path: &str) -> FileMatch {
     FileMatch {
         path: path.to_string(),
         score: 0,
-        indices: Vec::new(),
     }
 }
 

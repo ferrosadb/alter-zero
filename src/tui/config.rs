@@ -28,9 +28,10 @@ use alter_zero::app::{
 };
 use alter_zero::checkpoint;
 use alter_zero::llm::config::Provider;
+use alter_zero::llm::model_cache::{self, CachedListing};
 use alter_zero::llm::{
     self, AuthScheme, EnvFile, ModelConfig, ModelSelection, ProvidersFile, ReasoningSupport,
-    Selection, Settings, ThinkingMode, ThinkingSettings, backend::DEFAULT_SYSTEM_PROMPT,
+    Selection, Settings, ThinkingMode, ThinkingSettings,
 };
 use alter_zero::permission::{PermissionMode, PermissionRules, PermissionsFile};
 use alter_zero::scratchpad;
@@ -455,6 +456,75 @@ pub(crate) fn settings_file_path() -> Option<PathBuf> {
     config_home().map(|dir| dir.join("config.json"))
 }
 
+/// Where the `/model` picker keeps each provider's listing
+/// (`{config_home}/model-cache/`), or `None` when there's no config home —
+/// the picker then fetches every list on every open, as it did before the
+/// cache. See `docs/model-cache.md`.
+pub(crate) fn model_cache_dir() -> Option<PathBuf> {
+    config_home().map(|dir| dir.join("model-cache"))
+}
+
+/// The listing kept for `provider`, if one was and it reads: an absent,
+/// unreadable, oversized-past-[`model_cache::CACHE_FILE_MAX_BYTES`] or
+/// corrupt file — or one of another format version — is no cache at all
+/// (the `load_settings` posture: never in the way). Read through a buffer,
+/// never into one string first (`docs/memory.md`).
+pub(crate) fn load_model_listing(dir: &Path, provider: &str) -> Option<CachedListing> {
+    let file = std::fs::File::open(dir.join(model_cache::file_name(provider))).ok()?;
+    let reader = io::BufReader::new(io::Read::take(file, model_cache::CACHE_FILE_MAX_BYTES));
+    CachedListing::read_from(reader, provider)
+}
+
+/// Keep `listing` as `provider`'s, replacing what was kept — written beside
+/// the file then renamed over it, so another instance reading at that moment
+/// reads the old listing or the new one, never half of either. Best-effort
+/// like every write here: a cache that could not be written is a list
+/// fetched again next time, never an error the user sees.
+pub(crate) fn store_model_listing(dir: &Path, provider: &str, listing: &CachedListing) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = dir.join(model_cache::file_name(provider));
+    let temp = dir.join(format!(
+        ".{}.{}.tmp",
+        model_cache::file_name(provider),
+        std::process::id()
+    ));
+    let written = std::fs::File::create(&temp).ok().is_some_and(|file| {
+        let mut out = io::BufWriter::new(file);
+        listing.write_to(&mut out).is_ok() && io::Write::flush(&mut out).is_ok()
+    });
+    if !written || std::fs::rename(&temp, &path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+/// Drop what was kept for each of `providers` — a `/login` save just
+/// changed what they sign in with or where they point, so their kept lists
+/// may be another account's or another server's. Best-effort.
+pub(crate) fn forget_model_listings(dir: &Path, providers: &[String]) {
+    for provider in providers {
+        let _ = std::fs::remove_file(dir.join(model_cache::file_name(provider)));
+    }
+}
+
+/// Every provider that `var` configures — its key (or token) is stored
+/// under it, or its address is read from it. What a `/login` save of `var`
+/// changes, and so whose kept lists it makes stale (`docs/model-cache.md`).
+pub(crate) fn providers_reading(providers: &ProvidersFile, var: &str) -> Vec<String> {
+    providers
+        .ids()
+        .into_iter()
+        .filter(|id| {
+            key_env_name(providers, id) == var
+                || providers
+                    .get(id)
+                    .and_then(|p| p.api_base_env.as_deref())
+                    .is_some_and(|base| base == var)
+        })
+        .collect()
+}
+
 /// The persisted per-project permissions path
 /// (`{config_home}/permissions.json`) — the "don't ask again" command rules
 /// and the manual/edit mode, keyed by project directory — or `None` when
@@ -667,6 +737,32 @@ pub(crate) fn paste_store_dir(session: &str) -> PathBuf {
     }
 }
 
+/// Where this session's **generated images** are saved:
+/// `{config_home}/generated_images/{session}` (`docs/imagegen.md`) — durable
+/// like the paste folder, so a resumed conversation still shows its
+/// pictures, and kept: an image is something the user asked for. With no
+/// config home the same layout under the system temp dir. Created by the
+/// first image, not here.
+pub(crate) fn generated_images_dir(session: &str) -> PathBuf {
+    match config_home() {
+        Some(home) => home.join("generated_images").join(session),
+        None => std::env::temp_dir()
+            .join("alter-zero-generated-images")
+            .join(session),
+    }
+}
+
+/// The provider id of the stored **ChatGPT Codex sign-in**, when there is
+/// one: its own token variable resolving from the environment or the `.env`
+/// store — never the generic `ALTER_ZERO_API_KEY` (`docs/imagegen.md`).
+pub(crate) fn chatgpt_signin_id(providers: &ProvidersFile, env_file: &EnvFile) -> Option<String> {
+    providers
+        .signed_in_with(alter_zero::llm::AuthScheme::ChatGptCodex, |name| {
+            resolve_env(env_file, name)
+        })
+        .map(str::to_string)
+}
+
 /// Read `ALTER_ZERO_IMAGE_CACHE_MAX_BYTES`, else
 /// [`clipboard::IMAGE_CACHE_MAX_BYTES`]; `0` means no limit.
 fn image_cache_cap() -> u64 {
@@ -852,6 +948,31 @@ pub(crate) fn permission_mode_seed() -> Option<PermissionMode> {
     alter_zero::permission::mode_by_env(value.as_deref())
 }
 
+/// Whether the session loads the plugins it has on (`docs/plugins.md`
+/// *Switches*): `ALTER_ZERO_PLUGINS`, on unless set falsy. `/plugins` opens
+/// either way and says so.
+pub(crate) fn plugins_enabled() -> bool {
+    env_flag("ALTER_ZERO_PLUGINS")
+}
+
+/// Where plugins are kept (`docs/plugins.md` *On disk*): the tree
+/// `ALTER_ZERO_PLUGINS_DIR` names — `plugins.json` beside it — else the
+/// config home's `plugins/` and `plugins.json`; `None` without either, when
+/// there is nowhere to install anything. Git's detach tier gets this binary.
+pub(crate) fn plugin_store() -> Option<alter_zero::plugins::PluginStore> {
+    let layout = match std::env::var_os("ALTER_ZERO_PLUGINS_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            alter_zero::plugins::PluginLayout::at(&std::path::absolute(&dir).unwrap_or(dir))
+        }
+        None => alter_zero::plugins::PluginLayout::under(&config_home()?),
+    };
+    Some(alter_zero::plugins::PluginStore::new(
+        layout,
+        std::env::current_exe().ok(),
+    ))
+}
+
 /// A feature toggle read from the environment: **on** unless `name` is set to
 /// one of `0`/`false`/`no`/`off` (case- and whitespace-insensitive). The one
 /// grammar every `ALTER_ZERO_*` on/off flag uses.
@@ -864,6 +985,10 @@ fn env_flag(name: &str) -> bool {
         Err(_) => true,
     }
 }
+
+/// The variable that seeds the `/settings` **Animate mascot** row for a run
+/// (`docs/mascot-animation.md`).
+const MASCOT_ANIMATION_ENV: &str = "ALTER_ZERO_MASCOT_ANIMATION";
 
 /// An **explicitly set** `ALTER_ZERO_*` on/off flag, or `None` when the
 /// variable is absent. The `/settings` seed needs the distinction [`env_flag`]
@@ -1331,6 +1456,12 @@ pub(crate) fn apply_setting_overrides(mut settings: SessionSettings) -> SessionS
     if let Some(on) = env_flag_set("ALTER_ZERO_MCP") {
         settings.mcp = on;
     }
+    // `ALTER_ZERO_IMAGEGEN` seeds the **Image generation** row for the run,
+    // never saved — its falsy value used to withdraw the tool outright; now
+    // `/settings` can turn it back on (docs/imagegen.md).
+    if let Some(on) = env_flag_set(alter_zero::llm::imagegen::IMAGEGEN_ENV) {
+        settings.imagegen = on;
+    }
     if let Some(t) = temperature() {
         settings.temperature = Some(t);
     }
@@ -1355,6 +1486,12 @@ pub(crate) fn apply_setting_overrides(mut settings: SessionSettings) -> SessionS
     // privacy switch, so it never withdraws the row (`docs/tips.md`).
     if let Some(on) = env_flag_set(alter_zero::tips::TIPS_ENV) {
         settings.tips = on;
+    }
+    // The Animate mascot row: `ALTER_ZERO_MASCOT_ANIMATION` seeds it for the
+    // run, never saved — the smoke suite exports it falsy so the banner its
+    // phases read holds still (docs/mascot-animation.md).
+    if let Some(on) = env_flag_set(MASCOT_ANIMATION_ENV) {
+        settings.animate_mascot = on;
     }
     settings
 }
@@ -1441,9 +1578,12 @@ pub(crate) fn context_window_override() -> Option<u64> {
 }
 
 /// The real backend's system prompt: the "Alter Zero" persona
-/// (`prompts/alter_zero.md`) unless `ALTER_ZERO_SYSTEM_PROMPT` overrides it
-/// (an empty value sends no system prompt at all — `with_system_prompt` drops
-/// blanks). Either way we fold in the runtime environment — date, os, user,
+/// (`prompts/alter_zero.md`) unless `--system-prompt[-file]` or, below it,
+/// `ALTER_ZERO_SYSTEM_PROMPT` replaces it (an empty variable sends no system
+/// prompt at all — `with_system_prompt` drops blanks), with
+/// `--append-system-prompt[-file]`'s text after it — the pure
+/// `backend::compose_persona`, `docs/system-prompt.md`. Either way we fold
+/// in the runtime environment — date, os, user,
 /// cwd — so the agent has context awareness (`docs/environment.md`), and —
 /// when the session has one — the `## Scratchpad` block pointing every
 /// temporary file at the session's own directory (`docs/scratchpad.md`), for
@@ -1453,25 +1593,28 @@ pub(crate) fn context_window_override() -> Option<u64> {
 /// Resolved once at startup, so
 /// every backend the loop rebuilds (a `/model` switch, a Ctrl+T thinking
 /// change, the capability probe) inherits it by clone.
-pub(crate) fn system_prompt(cwd: &Path, scratchpad: Option<&Path>) -> Option<String> {
-    std::env::var("ALTER_ZERO_SYSTEM_PROMPT")
-        .ok()
-        .or_else(|| Some(DEFAULT_SYSTEM_PROMPT.to_string()))
-        .map(|base| {
-            let base = llm::backend::augment_with_environment(
-                &base,
-                &local_date(),
-                &os_context(),
-                &user_context(),
-                &cwd.display().to_string(),
-            );
-            match scratchpad {
-                Some(dir) => {
-                    llm::backend::augment_with_scratchpad(&base, &dir.display().to_string())
-                }
-                None => base,
-            }
-        })
+pub(crate) fn system_prompt(
+    cwd: &Path,
+    scratchpad: Option<&Path>,
+    flags: &super::startup::SystemPromptFlags,
+) -> Option<String> {
+    // The flag outranks the variable.
+    let replacement = flags
+        .replace
+        .clone()
+        .or_else(|| std::env::var("ALTER_ZERO_SYSTEM_PROMPT").ok());
+    let base = llm::backend::compose_persona(replacement.as_deref(), flags.append.as_deref());
+    let base = llm::backend::augment_with_environment(
+        &base,
+        &local_date(),
+        &os_context(),
+        &user_context(),
+        &cwd.display().to_string(),
+    );
+    Some(match scratchpad {
+        Some(dir) => llm::backend::augment_with_scratchpad(&base, &dir.display().to_string()),
+        None => base,
+    })
 }
 
 /// The **runtime half** of [`system_prompt`] alone: the environment block and
@@ -1548,4 +1691,104 @@ pub(crate) fn mcp_tool_timeout() -> std::time::Duration {
         "ALTER_ZERO_MCP_TOOL_TIMEOUT_MS",
         alter_zero::llm::mcp::DEFAULT_TOOL_TIMEOUT,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        forget_model_listings, load_model_listing, providers_reading, store_model_listing,
+    };
+    use alter_zero::llm::model_cache::CachedListing;
+    use alter_zero::llm::{ModelEntry, ProvidersFile};
+
+    #[test]
+    fn a_saved_variable_names_every_provider_it_configures() {
+        // A `/login` save drops the kept lists of the providers the saved
+        // variable configures (docs/model-cache.md) — by key, or by address.
+        let shipped = ProvidersFile::builtin();
+        assert_eq!(
+            providers_reading(&shipped, "OPENROUTER_API_KEY"),
+            ["openrouter"]
+        );
+        assert_eq!(providers_reading(&shipped, "OLLAMA_HOST"), ["ollama"]);
+        assert_eq!(providers_reading(&shipped, "LMSTUDIO_HOST"), ["lmstudio"]);
+        // The two Ollama providers read two variables: a pasted cloud key
+        // says nothing about the local server's list.
+        assert_eq!(
+            providers_reading(&shipped, "OLLAMA_API_KEY"),
+            ["ollama_cloud"]
+        );
+        assert!(providers_reading(&shipped, "NOT_A_PROVIDER_KEY").is_empty());
+    }
+
+    fn listing(id: &str, at: i64) -> CachedListing {
+        CachedListing {
+            fetched_at: at,
+            app_version: "1.0.0".into(),
+            source: "sha256:s".into(),
+            models: vec![ModelEntry {
+                id: id.into(),
+                provider: "openrouter".into(),
+                display_name: id.into(),
+                reasoning: None,
+                vision: None,
+                context: Some(128_000),
+                service_tiers: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_kept_listing_reads_back_and_is_replaced_whole() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = dir.path().join("model-cache");
+        assert_eq!(
+            load_model_listing(&cache, "openrouter"),
+            None,
+            "nothing kept yet"
+        );
+        store_model_listing(&cache, "openrouter", &listing("a/x", 1));
+        assert_eq!(
+            load_model_listing(&cache, "openrouter"),
+            Some(listing("a/x", 1))
+        );
+        store_model_listing(&cache, "openrouter", &listing("b/y", 2));
+        assert_eq!(
+            load_model_listing(&cache, "openrouter"),
+            Some(listing("b/y", 2))
+        );
+        // The write went beside the file and was renamed over it: nothing
+        // but the one file is left in the directory.
+        let names: Vec<String> = std::fs::read_dir(&cache)
+            .expect("the cache directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["openrouter.json"]);
+    }
+
+    #[test]
+    fn a_corrupt_listing_is_no_listing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(dir.path().join("openrouter.json"), "{\"version\":1,").expect("a file");
+        assert_eq!(load_model_listing(dir.path(), "openrouter"), None);
+    }
+
+    #[test]
+    fn a_forgotten_listing_is_gone_and_the_others_stay() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        store_model_listing(dir.path(), "openrouter", &listing("a/x", 1));
+        store_model_listing(dir.path(), "ollama", &listing("llama", 1));
+        forget_model_listings(
+            dir.path(),
+            &["openrouter".to_string(), "never_kept".to_string()],
+        );
+        assert_eq!(load_model_listing(dir.path(), "openrouter"), None);
+        assert!(load_model_listing(dir.path(), "ollama").is_some());
+    }
 }

@@ -88,6 +88,10 @@ pub struct RealToolExecutor {
     /// instead of attaching pixels the provider would reject with the whole
     /// turn (`docs/tools.md`). `None`/`Some(true)` attach as normal.
     vision: Option<bool>,
+    /// The `imagegen` tool's sign-in and output folder, when the backend
+    /// offers it (`docs/imagegen.md`). `None` declines a call recoverably —
+    /// a model can name a tool it was never offered.
+    imagegen: Option<crate::llm::imagegen::ImagegenSetup>,
 }
 
 impl RealToolExecutor {
@@ -129,6 +133,15 @@ impl RealToolExecutor {
     #[must_use]
     pub fn with_vision(mut self, vision: Option<bool>) -> Self {
         self.vision = vision;
+        self
+    }
+
+    /// Run `imagegen` calls with this sign-in and output folder — the
+    /// backend copies its own on, when it offers the tool
+    /// (`docs/imagegen.md`).
+    #[must_use]
+    pub fn with_imagegen(mut self, setup: Option<crate::llm::imagegen::ImagegenSetup>) -> Self {
+        self.imagegen = setup;
         self
     }
 }
@@ -180,6 +193,12 @@ impl ToolExecutor for RealToolExecutor {
             "read" => run_read(&call.arguments, self.vision),
             "write" => run_write(&call.arguments),
             "edit" => run_edit(&call.arguments),
+            crate::llm::imagegen::IMAGEGEN_TOOL_NAME => match &self.imagegen {
+                Some(setup) => {
+                    crate::llm::imagegen::run_imagegen(&call.arguments, setup, self.vision, cancel)
+                }
+                None => ToolOutcome::error(crate::llm::imagegen::UNAVAILABLE),
+            },
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -389,7 +408,8 @@ fn run_piped(
             // The interrupt path owns the UI; return a terse outcome (the loop
             // discards it — the channel is already swapped). The group kill has
             // reaped any straggler, so the detached readers finish on their own.
-            return ToolOutcome::error("Interrupted by user");
+            return ToolOutcome::error("Interrupted by user")
+                .with_error_kind(crate::stream::ToolErrorKind::Interrupted);
         }
         // Ctrl+B — or the model's own `wait` passing: hand the run off to
         // the background registry mid-flight. It replays what we already read
@@ -485,7 +505,8 @@ fn run_piped(
             "command timed out after {} ms and was stopped — nothing here can keep it running \
              past its wait\n{body}",
             wait.as_millis()
-        ));
+        ))
+        .with_error_kind(crate::stream::ToolErrorKind::TimedOut);
     }
     let exit_code = status.as_ref().and_then(std::process::ExitStatus::code);
     let ok = status
@@ -502,8 +523,12 @@ fn run_piped(
         truncated: false,
         background: None,
         image: None,
+        image_withheld: false,
         tasks: None,
         context,
+        // The status the frame above names, as data (docs/rollout-records.md).
+        exit_code,
+        error_kind: None,
     }
 }
 
@@ -568,6 +593,7 @@ fn run_tty(
         WaitEnd::Cancelled => {
             registry.kill(&task.id);
             ToolOutcome::error("Interrupted by user")
+                .with_error_kind(crate::stream::ToolErrorKind::Interrupted)
         }
         WaitEnd::Handoff => {
             registry.announce(&task.id);
@@ -584,6 +610,7 @@ fn run_tty(
             ToolOutcome {
                 ok: code == Some(0),
                 context,
+                exit_code: code,
                 ..ToolOutcome::ok(report)
             }
         }
@@ -832,7 +859,8 @@ fn run_session(
             if let Some(observed) = io.end_wait() {
                 registry.finalize(id, observed);
             }
-            return ToolOutcome::error("Interrupted by user");
+            return ToolOutcome::error("Interrupted by user")
+                .with_error_kind(crate::stream::ToolErrorKind::Interrupted);
         }
         Some(WaitEnd::Settled(Settle::Exited)) => Status::Exited(io.exit().flatten()),
         _ if call.kill && !spare => {
@@ -880,6 +908,11 @@ fn run_session(
     ToolOutcome {
         ok: !matches!(status, Status::Exited(code) if code != Some(0)),
         context: (!notes.is_empty()).then(|| format!("{report}\n{}", notes.join("\n"))),
+        // The call that saw the session exit records how (docs/rollout-records.md).
+        exit_code: match status {
+            Status::Exited(code) => code,
+            _ => None,
+        },
         ..ToolOutcome::ok(report)
     }
 }
@@ -918,6 +951,7 @@ fn claimed_exit_report(
     ToolOutcome {
         ok: exit.code == Some(0),
         context: (!notes.is_empty()).then(|| format!("{report}\n{}", notes.join("\n"))),
+        exit_code: exit.code,
         ..ToolOutcome::ok(report)
     }
 }
@@ -1438,6 +1472,37 @@ mod tests {
         RealToolExecutor::new().execute(&call(name, args), &CancelToken::new(), &mut |_| {})
     }
 
+    #[test]
+    fn an_imagegen_call_with_no_setup_is_declined_recoverably() {
+        // A model can name a tool it was never offered (docs/imagegen.md).
+        let outcome = exec(
+            crate::llm::imagegen::IMAGEGEN_TOOL_NAME,
+            r#"{"prompt": "a fox"}"#,
+        );
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("/login"), "{}", outcome.output);
+    }
+
+    #[test]
+    fn an_imagegen_call_reaches_the_tool_when_a_setup_is_attached() {
+        let setup = crate::llm::imagegen::ImagegenSetup {
+            signin: crate::llm::imagegen::ChatGptSignin::default(),
+            dir: std::path::PathBuf::from("/nowhere"),
+            skill: None,
+        };
+        let outcome = RealToolExecutor::new().with_imagegen(Some(setup)).execute(
+            &call(
+                crate::llm::imagegen::IMAGEGEN_TOOL_NAME,
+                r#"{"prompt": "a fox"}"#,
+            ),
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        // The tool itself answered: nobody is signed in.
+        assert!(!outcome.ok);
+        assert_eq!(outcome.output, crate::llm::auth::NOT_SIGNED_IN);
+    }
+
     /// A running cell as the TUI keeps it: a `ToolScreen`'s settled text
     /// appended and its live rows replacing the last ones
     /// (`App::push_tool_screen`), every state it passed through kept as a
@@ -1499,6 +1564,14 @@ mod tests {
         // — the read that made the update due — the cell showed the blanked
         // line instead of the spinner, frame after frame; it is sampled in
         // the pause between frames instead (`pty::pace`).
+        //
+        // The pieces are a millisecond apart, spent running rather than
+        // asleep: a sleep ends when the scheduler gets back to it, which on
+        // a loaded runner — macOS's three cores under the whole suite —
+        // came past the pacer's settle often enough to split a frame there
+        // every run. Woken by the sleep between frames, the program draws
+        // a whole frame in one slice, and a millisecond is still far longer
+        // than a read, so the pieces still arrive apart.
         let python = std::env::var_os("PATH").is_some_and(|path| {
             std::env::split_paths(&path).any(|dir| dir.join("python3").is_file())
         });
@@ -1510,7 +1583,9 @@ mod tests {
 os.write(1, b"installing\n")
 for glyph in "abcdefghijkl":
     os.write(1, b"\x1b[1G\x1b[0K")
-    time.sleep(0.001)
+    apart = time.perf_counter() + 0.001
+    while time.perf_counter() < apart:
+        pass
     os.write(1, glyph.encode())
     time.sleep(0.06)
 os.write(1, b"\n")'"#;
@@ -1639,6 +1714,8 @@ os.write(1, b"\n")'"#;
         assert!(out.ok);
         assert!(out.output.starts_with("Exit code: 0"), "got {}", out.output);
         assert!(out.output.contains("hello"));
+        // …and as data, for the rollout (docs/rollout-records.md).
+        assert_eq!(out.exit_code, Some(0));
     }
 
     #[test]
@@ -1646,6 +1723,9 @@ os.write(1, b"\n")'"#;
         let out = exec("bash", r#"{"command":"exit 3"}"#);
         assert!(!out.ok);
         assert!(out.output.contains("Exit code: 3"));
+        assert_eq!(out.exit_code, Some(3));
+        // An ordinary failure: the loop's default kind covers it.
+        assert_eq!(out.error_kind, None);
     }
 
     #[test]
@@ -1661,6 +1741,9 @@ os.write(1, b"\n")'"#;
         let out = exec("bash", r#"{"command":"sleep 5","timeout":150}"#);
         assert!(!out.ok);
         assert!(out.output.contains("timed out"), "got {}", out.output);
+        // Stopped, not exited: the reason without an exit code.
+        assert_eq!(out.error_kind, Some(crate::stream::ToolErrorKind::TimedOut));
+        assert_eq!(out.exit_code, None);
     }
 
     #[test]
@@ -2251,7 +2334,13 @@ os.write(1, b"\n")'"#;
             "alter-zero-exec-bg-test-{}-{seq}",
             std::process::id()
         ));
-        (crate::background::BackgroundRegistry::new(tx, dir), rx)
+        // The helper `main()` installs, so a terminal session starts where
+        // there is no `setsid` binary too (macOS).
+        let helper = crate::subprocess::test_detach_helper().map(std::path::Path::to_path_buf);
+        (
+            crate::background::BackgroundRegistry::new(tx, dir).with_detach_helper(helper),
+            rx,
+        )
     }
 
     #[test]
@@ -2486,6 +2575,8 @@ os.write(1, b"\n")'"#;
         );
         let id = session_of(&out.output);
         assert!(out.output.contains("started"), "{}", out.output);
+        // Still running when its call returned: no exit status yet.
+        assert_eq!(out.exit_code, None);
         assert!(
             out.context_text()
                 .contains(&crate::pty::report::continued_note(&id)),
@@ -2498,6 +2589,8 @@ os.write(1, b"\n")'"#;
             &serde_json::json!({"session_id": id, "wait": 10}).to_string(),
         );
         assert_eq!(waited.output, "Exit code: 0\ndone");
+        // The call that saw the exit records it.
+        assert_eq!(waited.exit_code, Some(0));
         registry.kill_all();
     }
 
@@ -2634,6 +2727,7 @@ os.write(1, b"\n")'"#;
         );
         assert!(!out.ok, "exit 3 is a failure: {}", out.output);
         assert_eq!(out.output, "Exit code: 3\non-a-terminal\na\tb  \n");
+        assert_eq!(out.exit_code, Some(3));
         assert!(out.background.is_none());
         assert!(
             events_within(&mut rx, std::time::Duration::from_millis(200)).is_empty(),
@@ -2920,13 +3014,16 @@ os.write(1, b"\n")'"#;
         assert!(context.contains("HTML-escaped"), "{context}");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn indented_lines_reach_a_program_that_takes_pastes_as_one_paste() {
         // vim, bash, Python 3.13: a program in bracketed-paste mode is sent
         // typed code the way a person pastes it, so its auto-indent leaves
         // the indentation alone (docs/interactive-shell.md). This one turns
-        // the mode on and shows exactly what reached it.
+        // the mode on and shows exactly what reached it. Linux only: the
+        // paste goes to the program the process table names, and elsewhere
+        // none does, so on the main screen the code is typed
+        // (docs/interactive-shell.md *Limits*).
         if std::process::Command::new("python3")
             .arg("--version")
             .output()
@@ -4244,8 +4341,10 @@ os.write(1, b"\r omarchy [##########] 100%\r\nComplete\r\n\x1b[?25h")'"#;
         registry.kill_all();
     }
 
-    /// A program that reads two bytes raw and prints them in hex — on the
-    /// alternate screen when `full_screen`, else at a plain prompt.
+    /// A program that reads two bytes raw and prints them in hex, one space
+    /// apart — on the alternate screen when `full_screen`, else at a plain
+    /// prompt. `$k` goes unquoted so the shell splits it into words: GNU
+    /// `od` prints ` 1b 4f`, macOS's pads its columns (`           1b  4f`).
     #[cfg(unix)]
     fn two_byte_reader(full_screen: bool) -> String {
         let (enter, leave) = if full_screen {
@@ -4256,7 +4355,7 @@ os.write(1, b"\r omarchy [##########] 100%\r\nComplete\r\n\x1b[?25h")'"#;
         format!(
             "{enter}stty raw -echo; printf 'keys> '; \
              k=$(dd bs=1 count=2 2>/dev/null | od -An -tx1); \
-             stty sane; {leave}echo \"got:$k\""
+             stty sane; {leave}echo got: $k"
         )
     }
 
@@ -4412,6 +4511,7 @@ os.write(1, b"\r omarchy [##########] 100%\r\nComplete\r\n\x1b[?25h")'"#;
             "{}",
             killed.output
         );
+        assert_eq!(killed.exit_code, Some(3));
         let told = killed
             .context
             .expect("the model is told nothing was stopped");

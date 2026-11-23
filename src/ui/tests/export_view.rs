@@ -354,8 +354,8 @@ fn export_text_is_the_transcript_as_plain_text_in_order() {
 fn export_text_opens_with_the_startup_banner() {
     // The export is the Ctrl+O page as text, top to bottom — and that page
     // opens with the startup banner the terminal did: the mascot beside
-    // `Alter Zero (v…)`, the cwd, the `/login   /model   /resume` hint, one
-    // blank, then the conversation.
+    // `Alter Zero (v…)`, the cwd, the `/ commands  @ files  ? shortcuts` hint,
+    // one blank, then the conversation.
     let mut app = with_session();
     app.record_user_message("hello");
     let lines = export_lines(&app, 80);
@@ -370,9 +370,9 @@ fn export_text_opens_with_the_startup_banner() {
         "the export opens on the banner's first row: {lines:?}"
     );
     assert!(pos("Alter Zero (v") < pos("~/alter-zero"), "{lines:?}");
-    assert!(pos("~/alter-zero") < pos("/login   /model   /resume"));
+    assert!(pos("~/alter-zero") < pos("/ commands  @ files  ? shortcuts"));
     let hello = pos("❯ hello");
-    assert!(pos("/login   /model   /resume") < hello);
+    assert!(pos("/ commands  @ files  ? shortcuts") < hello);
     assert_eq!(
         lines[hello - 1],
         "",
@@ -433,6 +433,34 @@ fn export_text_wraps_at_the_width_it_is_asked_for() {
             "the reply wrapped at {width}: {lines:?}"
         );
     }
+}
+
+#[test]
+fn export_text_spells_out_the_address_a_label_hides_on_screen() {
+    // On screen a link may be its label alone, the address behind it as a
+    // hyperlink (`docs/links.md` *Labelled links*). A text file has nothing
+    // behind it, so the export keeps `label (url)` whatever the terminal
+    // shows — or the one record of a reply's sources would be a list of
+    // names.
+    let url = "https://www.fide.com/geneva-to-host-fide-world-championship-match-2026/";
+    let mut app = App::new();
+    app.record_user_message("q");
+    app.begin_stream();
+    app.push_chunk(&format!("Source: [FIDE]({url})"));
+    app.finish_stream();
+    let (screen, text) =
+        crate::links::with_target_display(crate::links::TargetDisplay::Hidden, || {
+            let screen: Vec<String> = transcript_lines(&app, 200).iter().map(plain).collect();
+            (screen.join("\n"), export_text(&app, 200))
+        });
+    assert!(
+        screen.contains("Source: FIDE") && !screen.contains("https://"),
+        "the screen shows the label alone: {screen:?}"
+    );
+    assert!(
+        text.contains(&format!("Source: FIDE ({url})")),
+        "the export keeps the address: {text:?}"
+    );
 }
 
 #[test]

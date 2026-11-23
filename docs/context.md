@@ -136,7 +136,10 @@ An **image `read`** (detected from the stored record: `name == "Read"` + the
 live loop attached — `llm::tools::image_attachment_note` over the path as an
 `images` attachment — so later turns keep *seeing* the image, served from the
 session's one shared encoding like a Ctrl+V paste (`docs/tools.md`,
-`docs/memory.md`).
+`docs/memory.md`). A **generated image** (`name == "ImageGen"`, its
+`Generated image … saved to {path}` fact line) replays the same way from the
+file the line names, its note naming the `imagegen` call
+(`llm::tools::recorded_attachment`, `docs/imagegen.md`).
 
 ### The result the model read, not the cell it saw
 
@@ -339,26 +342,33 @@ rows, so the view carries three aids, all fed by `DebugBody::headers` — the
 row each entry's header sits on, built beside the rows:
 
 - **←/→ step between messages**, opening the previous or next entry at the
-  top of the body. The key records only the direction (`App::debug_jump`, an
-  `EntryJump`): where the neighbouring entry starts is a fact about the page
-  as built — its width, its wrapping — so the draw resolves it against the
-  rows it is about to paint (`App::resolve_debug_jump`, before the scroll
-  settle), never against a previous frame's. ← from inside an entry opens
-  that entry's own head first, the way a paragraph motion does; past the
-  last entry → is the end and before the first ← is the top; the window's
-  top row is the page's current end while it tail-follows, so a page that
-  grew since its last draw is stepped from its new bottom; and a step that
-  lands within the last screenful re-engages the tail-follow, as End does.
-  Tab and a close drop a step still pending, so it never lands on a page it
-  was not pressed on. They are the keys the transcript pager's backtrack
-  uses for the previous and next message, meaning the same thing here.
+  top of the body. The key records only the direction (a `PagerMove::Step`
+  carrying an `EntryJump`, queued on `App::debug_moves`): where the
+  neighbouring entry starts is a fact about the page as built — its width,
+  its wrapping — so the draw resolves it against the rows it is about to
+  paint (`App::resolve_debug_moves`, before the scroll settle), never
+  against a previous frame's. Each press is a step of its own, and a scroll
+  pressed behind one waits with it, so keys that reach the view between two
+  draws land in the order they came (`docs/transcript-navigation.md`). ←
+  from inside an entry opens that entry's own head first, the way a
+  paragraph motion does; past the last entry → is the end and before the
+  first ← is the top; the window's top row is the page's current end while
+  it tail-follows, so a page that grew since its last draw is stepped from
+  its new bottom; and a step that lands within the last screenful re-engages
+  the tail-follow, as End does. Tab and a close drop the moves still
+  waiting, so a step never lands on a page it was not pressed on. They are
+  the keys the transcript pager's backtrack uses for the previous and next
+  message, meaning the same thing here — and outside a backtrack preview the
+  transcript pager steps between its own entries with them, by this same
+  rule (`app::views::step_target`, shared; `docs/transcript-navigation.md`).
 - **The entry the window opens inside is pinned** over the top row while its
   own header is scrolled off (`pinned_header`): deep in a long system prompt
   or tool result the top row still says whose text it is. Not on the header
   row itself (it is already on top), not once only the entry's spacer would
   sit under the pin (a header stacked on the next one), and not in a body
   shorter than `CONTEXT_PIN_MIN_ROWS`, where the pin would cost the text it
-  names.
+  names. The transcript pager pins its cells' headers by the same rule,
+  extended to headers that wrap (`docs/transcript-navigation.md`).
 - **The bottom rule counts the window**: `5 messages · ≈1.2k tokens` set into
   its left end (`transcript::labeled_separator`), the percentage keeping its
   place — left out whole when the rule cannot hold both.

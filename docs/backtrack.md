@@ -22,6 +22,13 @@ idle, empty composer, a previous user message exists:
   q / Ctrl+O     → cancel: close the overlay, conversation untouched
 ```
 
+Outside a preview, ← and → in the Ctrl+O view step between the transcript's
+entries instead (`docs/transcript-navigation.md`); a preview keeps them for
+the highlight, beginning one drops an entry step still waiting for its draw
+(which would otherwise land after the scroll to the highlight and push it off
+the page), and while it is up the first hint row names only the scroll keys,
+since the row under it says what ← and → do there.
+
 Priming is codex-faithful: **no timeout** (it persists until the second Esc or
 any other key), and **any other key un-primes** — the next keypress just does
 its normal job. The overlay preview can also be entered from an already-open
@@ -193,4 +200,4 @@ slot, and the three-way shortcuts entry. `scripts/smoke.sh`'s backtrack phase
 drives the real binary end-to-end: two exchanges, Esc-Esc, a step older,
 Enter, then asserts the composer holds the first message, the second exchange
 left the repainted screen, and a resubmitted turn still streams to its
-summary (`Pondered for …`, the third turn's).
+summary (`Tinkered for …`, the third turn's).

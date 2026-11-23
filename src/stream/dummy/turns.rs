@@ -275,11 +275,13 @@ impl ScriptedCall {
                 display: self.result(),
                 result: ack.clone(),
                 truncated: false,
+                run: crate::stream::ToolRun::default(),
             },
             None => StreamEvent::ToolEnd {
                 output: self.result(),
                 ok: self.ok(),
                 truncated: false,
+                run: crate::stream::ToolRun::default(),
             },
         }
     }
@@ -562,6 +564,7 @@ pub(in crate::stream) fn hooks_turn(cue: &Cue) -> Vec<StreamEvent> {
         result,
         // The hook refused it, so nothing ran and nothing was capped.
         truncated: false,
+        run: crate::stream::ToolRun::default(),
     });
 
     // The allowed call, with the hook's provenance row on its resolved cell.
@@ -573,6 +576,7 @@ pub(in crate::stream) fn hooks_turn(cue: &Cue) -> Vec<StreamEvent> {
         output: ran.result(),
         ok: true,
         truncated: false,
+        run: crate::stream::ToolRun::default(),
     });
 
     events.extend(say(&second));
@@ -1198,9 +1202,10 @@ pub(in crate::stream) fn download_turn(cue: &Cue) -> Vec<StreamEvent> {
 /// what the one-line cell hides.
 const SKILLS_REPLY: &str = concat!(
     "Skills are folders of authored markdown I can pull in on demand — a \
-     `SKILL.md` per skill under `.claude/skills/` or `~/.alter-zero/skills/`. \
-     Only each one's description sits in my context until I need it, so a \
-     library of them costs almost nothing. Let me load one.\n\n",
+     `SKILL.md` per skill under a project's `.alter-zero/skills/`, \
+     `.agents/skills/` or `.claude/skills/`, or the same folders in your home \
+     directory. Only each one's description sits in my context until I need \
+     it, so a library of them costs almost nothing. Let me load one.\n\n",
     "That's the whole visible surface: one green line. What I got back is the \
      skill's entire body — its instructions are in front of me now, so the \
      rest of this turn follows them. The transcript keeps just this line; \
@@ -1246,6 +1251,7 @@ pub(in crate::stream) fn skills_turn(cue: &Cue) -> Vec<StreamEvent> {
         display: crate::skills::SKILL_LOADED_DISPLAY.to_string(),
         result: crate::skills::render_skill_body(std::path::Path::new(SKILL_DIR), SKILL_BODY),
         truncated: false,
+        run: crate::stream::ToolRun::default(),
     });
     events.extend(say(&second));
     events.push(StreamEvent::StreamDone);

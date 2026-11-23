@@ -107,8 +107,9 @@ and `SMOKE_BIN` are the environment spellings of the knobs.
   them away); `--yes` deletes them;
 - **`$HOME` moved into the tree** as well, so there is no path by which the
   binary under test — or tmux, or git, whatever a phase's own env string
-  says — reaches the developer's home: `~/.alter-zero`, `~/.claude/skills`,
-  `~/.tmux.conf` and `~/.gitconfig` all resolve to an empty directory that
+  says — reaches the developer's home: `~/.alter-zero`, `~/.agents`,
+  `~/.claude/skills`, `~/.tmux.conf` and `~/.gitconfig` all resolve to an
+  empty directory that
   dies with the phase (the checkpoint store supplies its own git identity).
   A phase that tests HOME-relative behaviour sets its own;
 - **a tmux server that reads no configuration file** (`-f /dev/null`): a
@@ -118,8 +119,12 @@ and `SMOKE_BIN` are the environment spellings of the knobs.
   own scratchpad — land inside it;
 - the sanitized environment (`smoke_sanitize_env`: every `*_API_KEY`, every
   `ALTER_ZERO_*`, `OLLAMA_HOST`, `NO_COLOR`, the display variables unset;
-  telemetry, the update check, the spinner tips and the project's `AGENTS.md`
-  exported off; the permission mode exported `manual`, since a session starts
+  telemetry, the update check, the spinner tips, the banner mascot's
+  animation (whose moves, dealt afresh every session, would put a different
+  pose in every capture of a fresh screen and a frame in every byte count of
+  an idle one —
+  Phases 159 and 160 turn it back on, `docs/mascot-animation.md`) and the project's
+  `AGENTS.md` exported off; the permission mode exported `manual`, since a session starts
   in auto, where the dummy's writes never ask, and the prompt phases are
   about the prompt — Phase 64 unsets it to cover the default; and
   **Verbose output** exported on, since by default a run of reads, searches
@@ -143,6 +148,7 @@ was not a safe transformation until each carried its own.
 | `pane SESSION [capture opts]` | `capture-pane -p`; `-S -N` reaches scrollback, `-e` keeps the SGR escapes |
 | `wait_for SECS SESSION [capture opts --] [grep opts] PATTERN` | poll until the pane matches; 1 on timeout |
 | `wait_pane SECS SESSION … PATTERN` | the same wait, **printing the last capture** so the phase can assert on — and log — the frame that satisfied it |
+| `wait_row SECS SESSION ROW TEXT` | until the pane's row ROW (1-based) reads exactly TEXT, trailing blanks trimmed, printing the last capture: the wait for a key that **moves** the screen (below) |
 | `wait_settled SECS SESSION … PATTERN` | matches AND two identical samples 0.2s apart: the settled layout after a reply, not a mid-stream frame |
 | `wait_summaries SECS SESSION COUNT [capture opts]` / `count_summaries CONTENT` | "the COUNTth turn settled": the committed turn summaries on screen, **whatever verbs they wear** (`SUMMARY_RE`, below) |
 | `poll SECS COMMAND ARGS…` | the generic form for a compound condition |
@@ -156,16 +162,22 @@ was not a safe transformation until each carried its own.
 | `count_bare_prompts` / `count_rules` / `count_footers` / `count_msg_lines` | the "exactly one input box on screen" counters the resize phases share |
 
 A turn's summary wears the past tense of the status verb it ended on
-(`Worked for 3s`, `Generated for 1m 5s` — `docs/status-indicator.md`), and a
+(`Hatched for 3s`, `Percolated for 1m 5s` — `docs/status-indicator.md`), and a
 turn that runs past 30s ends on a later verb than it opened on. So a phase
 that waits for *a* turn to settle matches `SUMMARY_RE`, the lib's pattern
 naming every past tense (`-E "^$SUMMARY_RE"`, or `wait_summaries` to count
 them), and only a phase that must tell turns apart on one screen names a
-turn's own verb — `SUMMARY_TURN1`…`3`, since a launch's turns end `Worked`,
-`Generated`, `Pondered`, … in order while each stays under 30s.
-`app::tests::turn` pins the pattern, its copies in the standalone scripts and
-the per-turn names to the verb table, so a verb added, dropped or reordered
-fails `cargo test` rather than a smoke run.
+turn's own verb — `SUMMARY_TURN1`…`3`, since a launch's turns end `Hatched`,
+`Percolated`, `Tinkered`, … in order while each stays under 30s — and a phase
+that finds the live status line by its word writes `"${VERB_TURN1}…"`, the
+word a launch's first turn, an agent's and the `/spinner` preview open on.
+A real session opens on a random verb, so the lib pins the suite's first one
+to `VERB_TURN1` (`ALTER_ZERO_FIRST_VERB`, exported and in every launch
+string) — a phase that builds its own launch string inherits the export.
+`app::tests::turn` pins the pattern, its copies in the standalone scripts,
+the per-turn names, `VERB_TURN1` and that export to the verb table, so a
+verb added, dropped or reordered fails `cargo test` rather than a smoke
+run.
 
 A slash-palette row opens on the selection's `→ ` marker or the two-space
 inset every other row wears, so a phase finds one by `PALETTE_ROW`
@@ -228,6 +240,19 @@ wait_for 3 "$S116" -F "dummy_model_name ·" || fail "Esc did not close the page"
   clone. A 43-character checkout path already cut `· 1 shell` to `· 1 sh…` at
   80 columns, failing Phase 42 and silently timing out Phase 43's wait for the
   same text. `~/work` is six columns wherever the repo lives.
+- **Wait for the row a key moves, not for text it brings into view.** A
+  scroll or a step in a pager shows text that was often on screen already —
+  the key before it left it there — so a `wait_for` that text returns before
+  the key has landed, and the read after it races the key. The next key then
+  goes out before the last one drew, and both can reach the app in one
+  frame. Phase 157 failed both ways on a busy CI runner while passing every
+  time on a fast machine: its → walk waited for a prompt, a reply and a call
+  that were all on screen from the top, read a row one frame early, and sent
+  keys fast enough that two → reached the pager between draws (which the app
+  collapsed into one step until each press became a move of its own,
+  `docs/transcript-navigation.md`). `wait_row` waits on the row the key is
+  meant to change — the window's top row after a step, the row under a pin
+  after a scroll — whose text holds only once every key has landed.
 - **Wait for a turn to start before waiting for it to end.** A settle loop that
   breaks on the *absence* of the status line samples before the first frame
   paints on a loaded machine, breaks at once and races the turn. Phases 58 to

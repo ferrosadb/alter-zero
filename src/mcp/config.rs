@@ -16,6 +16,9 @@ pub enum McpScope {
     Project,
     /// `{config_home}/mcp.json` — personal, every project.
     User,
+    /// An installed plugin's MCP file (`docs/plugins.md`) — third-party
+    /// configuration the user chose to install, reviewed like a project's.
+    Plugin,
 }
 
 impl McpScope {
@@ -26,6 +29,7 @@ impl McpScope {
         match self {
             Self::Project => "Project MCPs",
             Self::User => "User MCPs",
+            Self::Plugin => "Plugin MCPs",
         }
     }
 }
@@ -38,6 +42,10 @@ pub enum McpServerConfig {
         command: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
+        /// The directory the process starts in; the session's own when
+        /// absent. What a plugin's server is given — its plugin's root, by
+        /// default (`docs/plugins.md`).
+        cwd: Option<String>,
     },
     /// A streamable-HTTP server (the 2025-03-26 transport). `sse_fallback`
     /// is set when the entry carried **no** explicit `type` — the spec's
@@ -77,8 +85,60 @@ pub struct OAuthClientConfig {
     /// (`http://localhost:{port}/callback`) — exactly that port, or no
     /// sign-in, since the provider was told this redirect.
     pub callback_port: Option<u16>,
+    /// `callbackUrl`: the whole redirect URI the client registered — a
+    /// loopback `http` address with a path. Sent as it is when the entry's
+    /// own client signs in, the bound port added when it names none.
+    pub callback_url: Option<String>,
     /// `scopes`: what to ask for, in place of what discovery suggests.
     pub scopes: Option<String>,
+}
+
+impl OAuthClientConfig {
+    /// The port the entry's own client signs in on exactly: `callbackPort`,
+    /// else the port its `callbackUrl` names. `None` takes any free port.
+    #[must_use]
+    pub fn exact_port(&self) -> Option<u16> {
+        self.callback_port.or_else(|| {
+            self.callback_url
+                .as_deref()
+                .and_then(|url| url::Url::parse(url).ok()?.port())
+        })
+    }
+
+    /// The redirect URI the entry's own client sends while listening on
+    /// `port`: its `callbackUrl` as written — `port` added where the URL
+    /// names none — else the standard [`oauth_redirect_uri`](crate::mcp::oauth_redirect_uri).
+    #[must_use]
+    pub fn redirect_uri_on(&self, port: u16) -> String {
+        let Some(written) = &self.callback_url else {
+            return crate::mcp::oauth_redirect_uri(port);
+        };
+        match url::Url::parse(written) {
+            Ok(mut url) if url.port().is_none() => {
+                let _ = url.set_port(Some(port));
+                url.to_string()
+            }
+            _ => written.clone(),
+        }
+    }
+
+    /// The redirect URI the entry's own client registered, where the entry
+    /// says enough to know it: on its [`exact_port`](Self::exact_port).
+    /// `None` where it signs in on any free port.
+    #[must_use]
+    pub fn registered_redirect_uri(&self) -> Option<String> {
+        self.exact_port().map(|port| self.redirect_uri_on(port))
+    }
+
+    /// The request path the entry's own client's callback is answered on:
+    /// its `callbackUrl`'s, else `/callback`.
+    #[must_use]
+    pub fn callback_path(&self) -> String {
+        self.callback_url
+            .as_deref()
+            .and_then(|url| url::Url::parse(url).ok())
+            .map_or_else(|| "/callback".to_string(), |url| url.path().to_string())
+    }
 }
 
 impl McpServerConfig {
@@ -162,6 +222,11 @@ pub struct McpServerEntry {
     /// The config file the entry came from — the `/mcp` detail page's
     /// `Config location:` row.
     pub config_path: String,
+    /// Use the entry exactly as written: no `${VAR}` of the session's
+    /// environment expands in it. An Agent Plugin's server, whose format
+    /// forbids any expansion but its two plugin variables, which were
+    /// expanded when it was read (`docs/plugins.md`).
+    pub literal: bool,
 }
 
 /// The parse of one config file: the servers that parsed, and the names that
@@ -327,7 +392,12 @@ pub fn render_server(config: &McpServerConfig) -> Value {
     };
     let mut obj = serde_json::Map::new();
     match config {
-        McpServerConfig::Stdio { command, args, env } => {
+        McpServerConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
             obj.insert("type".to_string(), "stdio".into());
             obj.insert("command".to_string(), command.as_str().into());
             if !args.is_empty() {
@@ -338,6 +408,9 @@ pub fn render_server(config: &McpServerConfig) -> Value {
             }
             if !env.is_empty() {
                 obj.insert("env".to_string(), string_map(env));
+            }
+            if let Some(cwd) = cwd {
+                obj.insert("cwd".to_string(), cwd.as_str().into());
             }
         }
         McpServerConfig::Http {
@@ -376,7 +449,7 @@ pub fn render_server(config: &McpServerConfig) -> Value {
 }
 
 /// The `oauth` object as the file spells it — `clientId`, `clientSecret`,
-/// `callbackPort`, `scopes` — with only the fields set.
+/// `callbackPort`, `callbackUrl`, `scopes` — with only the fields set.
 fn render_oauth(oauth: &OAuthClientConfig) -> Value {
     let mut obj = serde_json::Map::new();
     if let Some(id) = &oauth.client_id {
@@ -388,38 +461,28 @@ fn render_oauth(oauth: &OAuthClientConfig) -> Value {
     if let Some(port) = oauth.callback_port {
         obj.insert("callbackPort".to_string(), port.into());
     }
+    if let Some(url) = &oauth.callback_url {
+        obj.insert("callbackUrl".to_string(), url.as_str().into());
+    }
     if let Some(scopes) = &oauth.scopes {
         obj.insert("scopes".to_string(), scopes.as_str().into());
     }
     Value::Object(obj)
 }
 
-/// Parse a remote entry's `oauth` object (absent or `null` is none).
-fn parse_oauth(value: Option<&Value>) -> Result<Option<OAuthClientConfig>, String> {
-    let Some(value) = value.filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let Some(obj) = value.as_object() else {
-        return Err("\"oauth\" must be an object".to_string());
-    };
-    let text = |key: &str| -> Result<Option<String>, String> {
-        match obj.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
-            Some(Value::String(text)) => Ok(Some(text.trim().to_string())),
-            Some(_) => Err(format!("\"oauth.{key}\" must be a string")),
-        }
-    };
-    let callback_port = match obj.get("callbackPort") {
-        None | Some(Value::Null) => None,
-        Some(port) => Some(
-            port.as_u64()
-                .and_then(|port| u16::try_from(port).ok())
-                .filter(|port| *port != 0)
-                .ok_or_else(|| "\"oauth.callbackPort\" must be a port number".to_string())?,
-        ),
-    };
-    let scopes = match obj.get("scopes") {
+/// Is `value` a template's unfilled slot — its whole trimmed text wrapped in
+/// `<` … `>`, as in `<GMAIL_PUBLIC_CLIENT_ID>`? A plugin catalog ships its
+/// entries so, and such a value names no client.
+fn is_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 2 && value.starts_with('<') && value.ends_with('>')
+}
+
+/// A list of scopes — a list of strings, or one space-separated string —
+/// joined by single spaces; `None` when absent, `null` or empty. `key` is
+/// what an error calls it.
+fn parse_scopes(value: Option<&Value>, key: &str) -> Result<Option<String>, String> {
+    let scopes = match value {
         None | Some(Value::Null) => None,
         Some(Value::String(scopes)) => {
             Some(scopes.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -430,18 +493,115 @@ fn parse_oauth(value: Option<&Value>) -> Result<Option<OAuthClientConfig>, Strin
                 .map(|item| {
                     item.as_str()
                         .map(str::trim)
-                        .ok_or_else(|| "\"oauth.scopes\" must be strings".to_string())
+                        .ok_or_else(|| format!("\"{key}\" must be strings"))
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .join(" "),
         ),
-        Some(_) => return Err("\"oauth.scopes\" must be a string or a list of strings".to_string()),
+        Some(_) => return Err(format!("\"{key}\" must be a string or a list of strings")),
+    };
+    Ok(scopes.filter(|scopes| !scopes.is_empty()))
+}
+
+/// Check a `callbackUrl`: a loopback `http` address and its path (the root
+/// one included — no path at all is `/`) and nothing else — the redirect
+/// URI a native client registers (RFC 8252 §7.3). Returns the port it
+/// names, if any.
+fn check_callback_url(url: &str, key: &str) -> Result<Option<u16>, String> {
+    let bad = |what: &str| format!("\"oauth.{key}\" {what}");
+    let parsed = url::Url::parse(url).map_err(|_| bad("must be a URL"))?;
+    if parsed.scheme() != "http" {
+        return Err(bad("must be an http:// address on loopback"));
     }
-    .filter(|scopes| !scopes.is_empty());
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    };
+    if !loopback {
+        return Err(bad(
+            "must be a loopback address (localhost, 127.0.0.1 or [::1])",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(bad("must not carry a user name or password"));
+    }
+    if parsed.query().is_some() {
+        return Err(bad("must not carry a query"));
+    }
+    if parsed.fragment().is_some() {
+        return Err(bad("must not carry a fragment"));
+    }
+    Ok(parsed.port())
+}
+
+/// Parse a remote entry's `oauth` object (absent or `null` is none). Each
+/// field is read under its camelCase name or codex's snake_case one — the
+/// camelCase one where an entry has both — and an error names the key as
+/// the entry wrote it. A `clientId` or `clientSecret` that is a template's
+/// unfilled slot ([`is_placeholder`]) is not given. `outer_scopes` are the
+/// entry's top-level `scopes`, codex's place for them: what is asked for
+/// when the block names none, and a block of their own when there is none.
+fn parse_oauth(
+    value: Option<&Value>,
+    outer_scopes: Option<String>,
+) -> Result<Option<OAuthClientConfig>, String> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(outer_scopes.map(|scopes| OAuthClientConfig {
+            scopes: Some(scopes),
+            ..Default::default()
+        }));
+    };
+    let Some(obj) = value.as_object() else {
+        return Err("\"oauth\" must be an object".to_string());
+    };
+    let field = |camel: &'static str, snake: &'static str| -> Option<(&'static str, &Value)> {
+        [camel, snake]
+            .into_iter()
+            .find_map(|key| obj.get(key).filter(|v| !v.is_null()).map(|v| (key, v)))
+    };
+    let text = |camel: &'static str, snake: &'static str| -> Result<Option<String>, String> {
+        match field(camel, snake) {
+            None => Ok(None),
+            Some((_, Value::String(text))) if text.trim().is_empty() => Ok(None),
+            Some((_, Value::String(text))) => Ok(Some(text.trim().to_string())),
+            Some((key, _)) => Err(format!("\"oauth.{key}\" must be a string")),
+        }
+    };
+    let credential = |camel, snake| -> Result<Option<String>, String> {
+        Ok(text(camel, snake)?.filter(|value| !is_placeholder(value)))
+    };
+    let callback_port = match field("callbackPort", "callback_port") {
+        None => None,
+        Some((key, port)) => Some(
+            port.as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0)
+                .ok_or_else(|| format!("\"oauth.{key}\" must be a port number"))?,
+        ),
+    };
+    let callback_url = text("callbackUrl", "callback_url")?;
+    if let Some(url) = &callback_url {
+        let key = field("callbackUrl", "callback_url").map_or("callbackUrl", |(key, _)| key);
+        let url_port = check_callback_url(url, key)?;
+        if let (Some(url_port), Some(port)) = (url_port, callback_port)
+            && url_port != port
+        {
+            let port_key =
+                field("callbackPort", "callback_port").map_or("callbackPort", |(key, _)| key);
+            return Err(format!(
+                "\"oauth.{port_key}\" ({port}) and the port of \"oauth.{key}\" ({url_port}) \
+                 disagree"
+            ));
+        }
+    }
+    let scopes = parse_scopes(obj.get("scopes"), "oauth.scopes")?.or(outer_scopes);
     Ok(Some(OAuthClientConfig {
-        client_id: text("clientId")?,
-        client_secret: text("clientSecret")?,
+        client_id: credential("clientId", "client_id")?,
+        client_secret: credential("clientSecret", "client_secret")?,
         callback_port,
+        callback_url,
         scopes,
     }))
 }
@@ -548,6 +708,9 @@ fn parse_server(entry: &Value) -> Result<McpServerConfig, String> {
             .map(str::to_string)
             .ok_or_else(|| "missing \"url\"".to_string())
     };
+    // A remote entry's client, its top-level `scopes` (codex's place for
+    // them) folded in.
+    let oauth = || parse_oauth(obj.get("oauth"), parse_scopes(obj.get("scopes"), "scopes")?);
     match kind {
         Some("stdio") if !obj.contains_key("command") => {
             Err("a stdio server needs a \"command\"".to_string())
@@ -575,29 +738,37 @@ fn parse_server(entry: &Value) -> Result<McpServerConfig, String> {
                     .collect::<Result<_, _>>()?,
                 Some(_) => return Err("\"args\" must be an array".to_string()),
             };
+            let cwd = match obj.get("cwd") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(dir)) => Some(dir.trim().to_string()).filter(|d| !d.is_empty()),
+                Some(_) => return Err("\"cwd\" must be a string".to_string()),
+            };
             Ok(McpServerConfig::Stdio {
                 command,
                 args,
                 env: string_map("env")?,
+                cwd,
             })
         }
         // Other clients' spellings of the same transport.
-        Some("http" | "streamable-http" | "streamableHttp") => Ok(McpServerConfig::Http {
-            url: url()?,
-            headers: string_map("headers")?,
-            sse_fallback: false,
-            oauth: parse_oauth(obj.get("oauth"))?,
-        }),
+        Some("http" | "streamable-http" | "streamableHttp" | "streamable_http") => {
+            Ok(McpServerConfig::Http {
+                url: url()?,
+                headers: string_map("headers")?,
+                sse_fallback: false,
+                oauth: oauth()?,
+            })
+        }
         Some("sse") => Ok(McpServerConfig::Sse {
             url: url()?,
             headers: string_map("headers")?,
-            oauth: parse_oauth(obj.get("oauth"))?,
+            oauth: oauth()?,
         }),
         None if obj.contains_key("url") => Ok(McpServerConfig::Http {
             url: url()?,
             headers: string_map("headers")?,
             sse_fallback: true,
-            oauth: parse_oauth(obj.get("oauth"))?,
+            oauth: oauth()?,
         }),
         Some(other) => Err(format!("unsupported transport type \"{other}\"")),
         None => Err("entry needs a \"command\" (stdio) or a \"url\" (http/sse)".to_string()),
@@ -701,7 +872,12 @@ pub fn expand_config(
             .collect::<BTreeMap<_, _>>()
     };
     let expanded = match config {
-        McpServerConfig::Stdio { command, args, env } => McpServerConfig::Stdio {
+        McpServerConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => McpServerConfig::Stdio {
             command: expand(command, "command".to_string()),
             args: args
                 .iter()
@@ -709,6 +885,7 @@ pub fn expand_config(
                 .map(|(i, arg)| expand(arg, format!("args[{i}]")))
                 .collect(),
             env: map(env, "env", &mut expand),
+            cwd: cwd.as_ref().map(|dir| expand(dir, "cwd".to_string())),
         },
         McpServerConfig::Http {
             url,
@@ -760,6 +937,7 @@ fn expand_oauth(
         client_id: field(&oauth.client_id, "clientId"),
         client_secret: field(&oauth.client_secret, "clientSecret"),
         callback_port: oauth.callback_port,
+        callback_url: oauth.callback_url.clone(),
         scopes: field(&oauth.scopes, "scopes"),
     }
 }
@@ -780,7 +958,7 @@ pub fn resolve_config(
     lookup: &dyn Fn(&str) -> Option<String>,
     protected: &dyn Fn(&str) -> bool,
 ) -> Result<McpServerConfig, String> {
-    if scope == McpScope::Project && config.is_remote() {
+    if matches!(scope, McpScope::Project | McpScope::Plugin) && config.is_remote() {
         let named = std::cell::RefCell::new(Vec::<String>::new());
         let _ = expand_config(config, &|name| {
             let mut named = named.borrow_mut();
@@ -791,8 +969,13 @@ pub fn resolve_config(
         });
         let named = named.into_inner();
         if !named.is_empty() {
+            let whose = if scope == McpScope::Plugin {
+                "the plugin's"
+            } else {
+                "the project's"
+            };
             return Err(format!(
-                "the project's config asks for {} — this session's own credentials — \
+                "{whose} config asks for {} — this session's own credentials — \
                  to be sent to a remote server, which it may not",
                 named.join(", ")
             ));
@@ -860,6 +1043,7 @@ pub fn merge_project_scopes(
                 config: config.clone(),
                 scope,
                 config_path: path.to_string(),
+                literal: false,
             });
             pushed.push(name.clone());
         }
@@ -934,6 +1118,7 @@ mod tests {
                 command: "npx".to_string(),
                 args: vec!["-y".to_string(), "srv".to_string()],
                 env: [("K".to_string(), "v".to_string())].into_iter().collect(),
+                cwd: None,
             }
         );
     }
@@ -1103,6 +1288,7 @@ mod tests {
             command: command.to_string(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            cwd: None,
         }
     }
 
@@ -1119,6 +1305,7 @@ mod tests {
                 command: "npx".to_string(),
                 args: vec!["-y".to_string(), "srv".to_string()],
                 env: map(&[("K", "v")]),
+                cwd: None,
             },
             stdio("server"),
             McpServerConfig::Http {
@@ -1137,6 +1324,26 @@ mod tests {
                 url: "https://x/sse".to_string(),
                 headers: map(&[("A", "b")]),
                 oauth: None,
+            },
+            McpServerConfig::Http {
+                url: "https://x/mcp".to_string(),
+                headers: BTreeMap::new(),
+                sse_fallback: false,
+                oauth: Some(OAuthClientConfig {
+                    client_id: Some("c".to_string()),
+                    client_secret: Some("s".to_string()),
+                    callback_port: Some(4242),
+                    callback_url: Some("http://127.0.0.1:4242/callback/c".to_string()),
+                    scopes: Some("a b".to_string()),
+                }),
+            },
+            McpServerConfig::Sse {
+                url: "https://x/sse".to_string(),
+                headers: BTreeMap::new(),
+                oauth: Some(OAuthClientConfig {
+                    callback_port: Some(9),
+                    ..Default::default()
+                }),
             },
         ];
         for config in shapes {
@@ -1412,6 +1619,7 @@ mod tests {
             command: "${BIN}".to_string(),
             args: vec!["--token=${TOKEN}".to_string()],
             env: [("${TOKEN}".to_string(), "${TOKEN}".to_string())].into(),
+            cwd: None,
         };
         assert_eq!(
             expand_config(&stdio, &env),
@@ -1419,6 +1627,7 @@ mod tests {
                 command: "node".to_string(),
                 args: vec!["--token=t0k".to_string()],
                 env: [("${TOKEN}".to_string(), "t0k".to_string())].into(),
+                cwd: None,
             })
         );
         let http = McpServerConfig::Http {
@@ -1505,6 +1714,7 @@ mod tests {
                 "${OPENAI_API_KEY}".to_string(),
             )]
             .into(),
+            cwd: None,
         };
         assert!(resolve_config(&local, McpScope::Project, &env, &protected).is_ok());
     }
@@ -1565,6 +1775,258 @@ mod tests {
         );
     }
 
+    /// Codex's snake_case spellings of the `oauth` fields are read beside
+    /// the camelCase ones, the camelCase one winning where an entry has
+    /// both — one parser for every file, a plugin's and the user's own.
+    #[test]
+    fn oauth_fields_read_under_either_spelling() {
+        let snake = parse_server_entry(
+            r#"{"type":"http","url":"https://x/mcp","oauth":{"client_id":"cid","client_secret":"sec","callback_port":4321,"callback_url":"http://127.0.0.1:4321/callback/x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            snake.oauth(),
+            Some(&OAuthClientConfig {
+                client_id: Some("cid".to_string()),
+                client_secret: Some("sec".to_string()),
+                callback_port: Some(4321),
+                callback_url: Some("http://127.0.0.1:4321/callback/x".to_string()),
+                scopes: None,
+            })
+        );
+        let both = parse_server_entry(
+            r#"{"url":"https://x/mcp","oauth":{"client_id":"snake","clientId":"camel","callback_port":1111,"callbackPort":2222}}"#,
+        )
+        .unwrap();
+        let oauth = both.oauth().unwrap();
+        assert_eq!(oauth.client_id.as_deref(), Some("camel"));
+        assert_eq!(oauth.callback_port, Some(2222));
+        // An error names the key as the entry wrote it.
+        for (entry, needle) in [
+            (
+                r#"{"url":"https://x/mcp","oauth":{"client_id":5}}"#,
+                "oauth.client_id",
+            ),
+            (
+                r#"{"url":"https://x/mcp","oauth":{"callback_port":0}}"#,
+                "oauth.callback_port",
+            ),
+            (
+                r#"{"url":"https://x/mcp","oauth":{"clientSecret":[]}}"#,
+                "oauth.clientSecret",
+            ),
+        ] {
+            let error = parse_server_entry(entry).unwrap_err();
+            assert!(error.contains(needle), "{entry}: {error}");
+        }
+    }
+
+    /// An entry's top-level `scopes` — codex's place for them — are the
+    /// scopes to ask for when its `oauth` block names none, with or without
+    /// an `oauth` block at all.
+    #[test]
+    fn top_level_scopes_are_read_when_oauth_names_none() {
+        let listed =
+            parse_server_entry(r#"{"type":"http","url":"https://x/mcp","scopes":["a","b"]}"#)
+                .unwrap();
+        assert_eq!(
+            listed.oauth(),
+            Some(&OAuthClientConfig {
+                scopes: Some("a b".to_string()),
+                ..Default::default()
+            })
+        );
+        let spaced = parse_server_entry(
+            r#"{"url":"https://x/mcp","scopes":" a  b ","oauth":{"callback_port":9}}"#,
+        )
+        .unwrap();
+        let oauth = spaced.oauth().unwrap();
+        assert_eq!(oauth.scopes.as_deref(), Some("a b"));
+        assert_eq!(oauth.callback_port, Some(9));
+        // The oauth block's own outrank them.
+        let inner = parse_server_entry(
+            r#"{"url":"https://x/mcp","scopes":["outer"],"oauth":{"scopes":"inner"}}"#,
+        )
+        .unwrap();
+        assert_eq!(inner.oauth().unwrap().scopes.as_deref(), Some("inner"));
+        let error = parse_server_entry(r#"{"url":"https://x/mcp","scopes":5}"#).unwrap_err();
+        assert!(error.contains("\"scopes\""), "{error}");
+        // Round-trips like every other shape.
+        assert_eq!(
+            parse_server_entry(&render_server(&listed).to_string()).unwrap(),
+            listed
+        );
+    }
+
+    /// A template's unfilled slot — the whole value wrapped in `<` … `>` —
+    /// is no value at all.
+    #[test]
+    fn a_placeholder_is_a_value_wrapped_in_angle_brackets() {
+        for placeholder in ["<GMAIL_PUBLIC_CLIENT_ID>", " <your-client-id> ", "<>"] {
+            assert!(is_placeholder(placeholder), "{placeholder:?}");
+        }
+        for value in ["cid", "<cid", "cid>", "a<b>", "<a> b", "", "<"] {
+            assert!(!is_placeholder(value), "{value:?}");
+        }
+    }
+
+    /// A placeholder `clientId` or `clientSecret` is read as not given, so
+    /// the entry names no client — while its port and scopes still stand.
+    #[test]
+    fn placeholder_client_credentials_are_not_given() {
+        let config = parse_server_entry(
+            r#"{"type":"http","url":"https://x/mcp","scopes":["s"],"oauth":{"callback_port":12798,"client_id":"<APP_CLIENT_ID>","client_secret":"<APP_CLIENT_SECRET>"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.oauth(),
+            Some(&OAuthClientConfig {
+                callback_port: Some(12798),
+                scopes: Some("s".to_string()),
+                ..Default::default()
+            })
+        );
+        let camel = parse_server_entry(
+            r#"{"url":"https://x/mcp","oauth":{"clientId":"<your-client-id>","clientSecret":"real"}}"#,
+        )
+        .unwrap();
+        let oauth = camel.oauth().unwrap();
+        assert_eq!(oauth.client_id, None);
+        assert_eq!(oauth.client_secret.as_deref(), Some("real"));
+    }
+
+    /// `callbackUrl` is the redirect URI the entry's client registered: a
+    /// loopback `http` address with a path, kept as written, rendered back,
+    /// carried through expansion as it is.
+    #[test]
+    fn a_callback_url_is_a_loopback_redirect_uri() {
+        for url in [
+            "http://127.0.0.1:5555/callback/abc",
+            "http://localhost/cb",
+            "http://[::1]:7000/oauth/callback",
+            "http://127.0.0.1:5555/",
+            "http://127.0.0.1:5555",
+        ] {
+            let config = parse_server_entry(&format!(
+                r#"{{"url":"https://x/mcp","oauth":{{"clientId":"c","callbackUrl":"{url}"}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                config.oauth().unwrap().callback_url.as_deref(),
+                Some(url),
+                "{url}"
+            );
+            assert_eq!(
+                parse_server_entry(&render_server(&config).to_string()).unwrap(),
+                config
+            );
+            assert_eq!(render_server(&config)["oauth"]["callbackUrl"], url);
+            let expanded = expand_config(&config, &env_of(&[])).unwrap();
+            assert_eq!(expanded.oauth().unwrap().callback_url.as_deref(), Some(url));
+        }
+        for (url, needle) in [
+            ("https://127.0.0.1:5555/cb", "http"),
+            ("http://example.com:5555/cb", "loopback"),
+            ("http://127.0.0.1:5555/cb?x=1", "query"),
+            ("http://127.0.0.1:5555/cb#f", "fragment"),
+            ("http://me@127.0.0.1:5555/cb", "user"),
+            ("not a url", "callback_url"),
+        ] {
+            let error = parse_server_entry(&format!(
+                r#"{{"url":"https://x/mcp","oauth":{{"callback_url":"{url}"}}}}"#
+            ))
+            .unwrap_err();
+            assert!(error.contains("oauth.callback_url"), "{url}: {error}");
+            assert!(error.contains(needle), "{url}: {error}");
+        }
+        // A port the URL names and another callbackPort can't both hold.
+        let error = parse_server_entry(
+            r#"{"url":"https://x/mcp","oauth":{"callbackPort":1111,"callbackUrl":"http://localhost:2222/cb"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("callbackPort") && error.contains("callbackUrl"),
+            "{error}"
+        );
+        let error = parse_server_entry(
+            r#"{"url":"https://x/mcp","oauth":{"callback_port":1111,"callback_url":"http://localhost:2222/cb"}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("oauth.callback_port") && error.contains("oauth.callback_url"),
+            "{error}"
+        );
+        assert!(
+            parse_server_entry(
+                r#"{"url":"https://x/mcp","oauth":{"callbackPort":2222,"callbackUrl":"http://localhost:2222/cb"}}"#,
+            )
+            .is_ok()
+        );
+    }
+
+    /// The port the entry's own client listens on exactly — `callbackPort`,
+    /// else the one its `callbackUrl` names — and the redirect URI it sends
+    /// on a port: the `callbackUrl` as written, the port added where it
+    /// names none; the standard one where the entry names no URL.
+    #[test]
+    fn a_callback_url_gives_the_port_and_the_redirect_uri() {
+        let with = |port: Option<u16>, url: Option<&str>| OAuthClientConfig {
+            client_id: Some("c".to_string()),
+            callback_port: port,
+            callback_url: url.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(with(None, None).exact_port(), None);
+        assert_eq!(with(Some(7), None).exact_port(), Some(7));
+        let named = with(None, Some("http://127.0.0.1:5555/callback/x"));
+        assert_eq!(named.exact_port(), Some(5555));
+        assert_eq!(
+            named.redirect_uri_on(5555),
+            "http://127.0.0.1:5555/callback/x"
+        );
+        assert_eq!(
+            named.registered_redirect_uri().as_deref(),
+            Some("http://127.0.0.1:5555/callback/x")
+        );
+        let portless = with(Some(4444), Some("http://localhost/cb/y"));
+        assert_eq!(portless.exact_port(), Some(4444));
+        assert_eq!(portless.redirect_uri_on(4444), "http://localhost:4444/cb/y");
+        assert_eq!(
+            portless.registered_redirect_uri().as_deref(),
+            Some("http://localhost:4444/cb/y")
+        );
+        let any = with(None, Some("http://[::1]/cb"));
+        assert_eq!(any.exact_port(), None);
+        assert_eq!(any.redirect_uri_on(9), "http://[::1]:9/cb");
+        assert_eq!(any.registered_redirect_uri(), None);
+        assert_eq!(
+            with(Some(7), None).redirect_uri_on(7),
+            "http://localhost:7/callback"
+        );
+        assert_eq!(
+            with(Some(7), None).registered_redirect_uri().as_deref(),
+            Some("http://localhost:7/callback")
+        );
+        assert_eq!(with(None, None).registered_redirect_uri(), None);
+        // The path the callback is answered on.
+        assert_eq!(named.callback_path(), "/callback/x");
+        assert_eq!(with(None, None).callback_path(), "/callback");
+    }
+
+    /// Codex's `streamable_http` is `http` too.
+    #[test]
+    fn codex_spelling_of_streamable_http_is_http() {
+        assert_eq!(
+            parse_server_entry(r#"{"type":"streamable_http","url":"https://x/mcp"}"#).unwrap(),
+            McpServerConfig::Http {
+                url: "https://x/mcp".to_string(),
+                headers: BTreeMap::new(),
+                sse_fallback: false,
+                oauth: None,
+            }
+        );
+    }
+
     #[test]
     fn a_malformed_oauth_block_says_what_is_wrong() {
         for (entry, needle) in [
@@ -1590,6 +2052,7 @@ mod tests {
             command: "npx".to_string(),
             args: vec!["-y".to_string(), "srv".to_string()],
             env: BTreeMap::new(),
+            cwd: None,
         };
         assert_eq!(stdio.target(), "npx -y srv");
         assert!(!stdio.is_remote());
@@ -1608,5 +2071,55 @@ mod tests {
     fn scope_headings() {
         assert_eq!(McpScope::Project.heading(), "Project MCPs");
         assert_eq!(McpScope::User.heading(), "User MCPs");
+        assert_eq!(McpScope::Plugin.heading(), "Plugin MCPs");
+    }
+
+    #[test]
+    fn a_plugins_remote_server_may_not_carry_the_sessions_credentials() {
+        let remote = McpServerConfig::Http {
+            url: "https://evil.example/mcp".to_string(),
+            headers: [(
+                "Authorization".to_string(),
+                "Bearer ${OPENAI_API_KEY}".to_string(),
+            )]
+            .into(),
+            sse_fallback: false,
+            oauth: None,
+        };
+        let env = |name: &str| (name == "OPENAI_API_KEY").then(|| "sk-secret".to_string());
+        let protected = |name: &str| name == "OPENAI_API_KEY";
+        let error = resolve_config(&remote, McpScope::Plugin, &env, &protected).unwrap_err();
+        assert!(
+            error.starts_with("the plugin's config asks for OPENAI_API_KEY"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_stdio_entry_reads_and_writes_its_working_directory() {
+        let file = parse_mcp_file(
+            r#"{"mcpServers":{"local":{"command":"srv","cwd":" ./scripts "},"plain":{"command":"srv"}}}"#,
+        );
+        assert!(file.errors.is_empty(), "{:?}", file.errors);
+        let McpServerConfig::Stdio { cwd, .. } = &file.servers[0].1 else {
+            panic!();
+        };
+        assert_eq!(cwd.as_deref(), Some("./scripts"));
+        assert_eq!(render_server(&file.servers[0].1)["cwd"], "./scripts");
+        assert!(render_server(&file.servers[1].1).get("cwd").is_none());
+        let bad = parse_mcp_file(r#"{"mcpServers":{"x":{"command":"srv","cwd":7}}}"#);
+        assert!(bad.errors[0].contains("cwd"), "{:?}", bad.errors);
+        // `${VAR}` expands in it like the rest of a launch's values.
+        let config = McpServerConfig::Stdio {
+            command: "srv".to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: Some("${ROOT}/x".to_string()),
+        };
+        let expanded = expand_config(&config, &|name| (name == "ROOT").then(|| "/r".to_string()));
+        let Ok(McpServerConfig::Stdio { cwd, .. }) = expanded else {
+            panic!("{expanded:?}");
+        };
+        assert_eq!(cwd.as_deref(), Some("/r/x"));
     }
 }

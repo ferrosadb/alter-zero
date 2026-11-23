@@ -121,7 +121,8 @@ pub(super) fn inline_code_color() -> Color {
     palette().accent
 }
 
-/// A link's URL, shown as ` (url)` after its text — blue and underlined.
+/// The link colour — a bare URL, a link's ` (url)` target, and a label
+/// standing in for its target (`docs/links.md`) — always underlined.
 pub(super) fn link_url_color() -> Color {
     palette().link
 }
@@ -507,6 +508,13 @@ pub(super) fn agent_notice_resumed_color() -> Color {
 /// under a backend tool's `● name(args)` header (req 2: a running cell shows the
 /// header *and* this row, previewed live) and as the whole `!` shell cell.
 pub(super) const TOOL_RUNNING: &str = "Running…";
+/// A running `imagegen` call's corner row, before its `(Ns)` clock — a
+/// generation takes minutes, and a bare `Running…` that long reads as stuck
+/// (`docs/imagegen.md`).
+pub(super) const IMAGEGEN_RUNNING: &str = "Generating image…";
+/// What a finished `imagegen` cell's second row opens with, before the file
+/// it names (`docs/imagegen.md`).
+pub(super) const IMAGEGEN_SAVED_TO: &str = "Saved to";
 
 /// Placeholder body for a tool queued in a **parallel batch** but not yet
 /// started — the dim `⎿ Waiting…` row shown under a not-yet-running sibling's
@@ -819,9 +827,25 @@ pub(super) const TOOL_VIEW_TITLE_ROWS: u16 = 1;
 /// percentage, two key-hint rows, and the final blank row (codex's pager).
 pub(super) const TOOL_VIEW_FOOTER_ROWS: u16 = 4;
 
-/// First key-hint row under the separator (codex's pager hints, all dim).
+/// First key-hint row under the separator (codex's pager hints, all dim),
+/// with Ctrl+D's entry step: ←/→ open the previous or next entry — a
+/// message, a tool call, a thought — at the window's top
+/// (`docs/transcript-navigation.md`).
 pub(super) const TOOL_VIEW_HINT_KEYS: &str =
+    " ↑/↓ to scroll   ←/→ prev/next entry   pgup/pgdn to page   home/end to jump";
+
+/// The first key-hint row while a backtrack preview highlights a user
+/// message: ← and → step the highlight then ([`TOOL_VIEW_HINT_BACKTRACK`]
+/// says so on the row under it), so this one names only the scroll keys.
+pub(super) const TOOL_VIEW_HINT_SCROLL_KEYS: &str =
     " ↑/↓ to scroll   pgup/pgdn to page   home/end to jump";
+
+/// The most header rows the transcript pins over a window that opens inside
+/// a cell — the inline cell's own ceiling ([`TOOL_HEADER_MAX_ROWS`]), so a
+/// wrapped command pins as the two rows the conversation showed it in, and a
+/// taller header pins its first two, the second ending on
+/// [`TOOL_HEADER_ELLIPSIS`] (`docs/transcript-navigation.md`).
+pub(super) const TRANSCRIPT_PIN_MAX_ROWS: usize = TOOL_HEADER_MAX_ROWS;
 
 /// Second key-hint row: every key that closes the overlay.
 pub(super) const TOOL_VIEW_HINT_QUIT: &str = " q/esc/ctrl+o to quit";
@@ -866,9 +890,10 @@ pub(super) const CONTEXT_VIEW_AGENT_SEPARATOR: &str = " · ";
 /// See [`CONTEXT_VIEW_AGENT_SEPARATOR`].
 pub(super) const CONTEXT_VIEW_AGENT_SUFFIX: &str = " agent";
 
-/// First key-hint row — the pager's ([`TOOL_VIEW_HINT_KEYS`]) with the
-/// message step added, since a window of a few dozen entries is thousands
-/// of rows and ←/→ open the previous or next one at the top.
+/// First key-hint row — the transcript pager's ([`TOOL_VIEW_HINT_KEYS`]),
+/// its step naming what every entry here is: a window of a few dozen
+/// messages is thousands of rows, and ←/→ open the previous or next one at
+/// the top.
 pub(super) const CONTEXT_VIEW_HINT_KEYS: &str =
     " ↑/↓ to scroll   ←/→ prev/next message   pgup/pgdn to page   home/end to jump";
 
@@ -1188,6 +1213,45 @@ pub(super) const MODEL_STATUS_SEP: &str = "   ·   ";
 /// The counter's dim suffix while other providers are still being fetched (the
 /// list shows what's landed so far and keeps growing). See `docs/llm.md`.
 pub(super) const MODEL_LOADING_MORE: &str = "loading more…";
+
+/// The counter's dim note while the lists on screen — kept from an earlier
+/// open — are being fetched again behind them: the `/usage` page's word
+/// (`docs/model-cache.md`).
+pub(super) const MODEL_REFRESHING: &str = "refreshing…";
+
+/// What leads the note saying how old the lists on screen are
+/// (`updated 2h ago`).
+pub(super) const MODEL_UPDATED: &str = "updated ";
+
+/// How old, in seconds, the oldest list on screen must be before the page
+/// says so — and offers Ctrl+R. A list listed a moment ago has no age worth
+/// reading, and asking for it again would bring back the same rows, so a
+/// page fresh off the network stays the page it always was.
+pub(super) const MODEL_AGE_SHOWN_SECS: i64 = 60;
+
+/// The key that asks every provider for its list again
+/// (`docs/model-cache.md`), said beside the counter where pressing it is
+/// worth something: the lists are old, or a provider failed. Left out whole
+/// rather than cut when the row has no room for it.
+pub(super) const MODEL_REFRESH_HINT: &str = "ctrl+r to refresh";
+
+/// Under the red rows of a page where every provider failed.
+pub(super) const MODEL_RETRY_HINT: &str = "ctrl+r to try again";
+
+/// What a provider whose fetch failed with nothing of it to show is noted
+/// as, in red — `GitHub Copilot unavailable`.
+pub(super) const MODEL_UNAVAILABLE: &str = "unavailable";
+
+/// What a provider whose kept list could not be refreshed is noted as —
+/// `OpenRouter not refreshed`, beside the rows it still shows.
+pub(super) const MODEL_NOT_REFRESHED: &str = "not refreshed";
+
+/// The amber a list kept through a failed refresh is noted in, and its
+/// reason: its rows are still there and still usable, so not the red of a
+/// provider with nothing to show — the `/usage` page's failed-refresh note.
+pub(super) fn model_stale_color() -> Color {
+    usage_warn_color()
+}
 
 /// The most display rows a failed provider's *reason* block may take under the
 /// list. The collapsed `{provider} unavailable` note names the provider and
@@ -1520,11 +1584,13 @@ pub(super) const MASCOT_MENU_MAX_ROWS: u16 = SETTINGS_MENU_MAX_ROWS;
 pub(super) const MASCOT_PREVIEW_GAP: usize = THEME_PREVIEW_GAP;
 
 /// The narrowest preview column the side-by-side page lays out: the banner
-/// keeps its art beside its title and its `/login /model /resume` hint (36
-/// columns) and every caption reads whole (37), with a little room left for
-/// the cwd row, which the banner `…`-cuts as it always has. A terminal with
-/// less than the list, the gap and this stacks the preview under the list.
-pub(super) const MASCOT_PREVIEW_MIN_COLS: usize = 40;
+/// keeps its art beside its title and its
+/// `/ commands  @ files  ? shortcuts` hint whole (43 columns beside the
+/// widest art, the banner's widest row) and every caption reads whole
+/// (37), the cwd row `…`-cut past that as the banner always cuts it. A
+/// terminal with less than the list, the gap and this stacks the preview
+/// under the list.
+pub(super) const MASCOT_PREVIEW_MIN_COLS: usize = 43;
 
 // --- the inline /spinner picker (docs/spinner.md). The /theme picker's
 // layout over the spinner-style catalog: the family's header, frame and `❯`
@@ -1562,9 +1628,8 @@ pub(super) const SPINNER_MENU_GAP: usize = 3;
 pub(super) const SPINNER_PREVIEW_GAP: usize = THEME_PREVIEW_GAP;
 
 /// The narrowest preview column the side-by-side page lays out: the sample
-/// status line reads whole with a minute on its clock (`Working… (1m 5s ·
-/// esc to interrupt)` behind the eight-cell track), the `/theme` sample's
-/// width. A terminal with less than the list, the gap and this stacks the
+/// status line reads whole as the page opens (`Hatching… (0s · esc to
+/// interrupt)` behind the eight-cell track), the `/theme` sample's width. A terminal with less than the list, the gap and this stacks the
 /// preview under the list.
 pub(super) const SPINNER_PREVIEW_MIN_COLS: usize = THEME_PREVIEW_MIN_COLS;
 
@@ -1640,8 +1705,9 @@ pub(super) const THEME_PREVIEW_REPLY: &str = "Done — `greet.py` greets by name
 // rounded box (the `DEVICE_BOX_*` glyphs). Only its own words and the three
 // colours below live here; the title borrows the banner's gradient. ---
 
-/// The heart leading the title — the sponsor glyph, in a span of its own so
-/// it keeps a colour of its own beside the gradient-washed name.
+/// The heart leading the title — the glyph of the pages about the people
+/// behind the project (`/donate`, `/sponsor`, `/discord`), in a span of its
+/// own so it keeps a colour of its own beside the gradient-washed name.
 pub(super) const DONATE_HEART: &str = "♥ ";
 
 /// The title's verb; the app's name ([`HEADER_NAME`]) follows it, so the
@@ -1696,6 +1762,42 @@ pub(super) fn donate_address_color() -> Color {
 pub(super) fn donate_caution_color() -> Color {
     ask_warning_color()
 }
+
+// --- the read-only /sponsor page (docs/sponsor.md). The /donate page's
+// twin: its heart, gradient title, label rows and rounded boxes over the
+// const sponsor catalog. Only its own words live here. ---
+
+/// The title's verb; the app's name follows it: `Sponsor Alter Zero`.
+pub(super) const SPONSOR_TITLE_PREFIX: &str = "Sponsor ";
+
+/// The dim row under the title: who is being sponsored and what it buys.
+pub(super) const SPONSOR_BLURB: &str = "Alter Zero is built and maintained by one developer. \
+A sponsorship pays for the time that goes into it — thank you.";
+
+/// The dim key hint — the page's whole grammar.
+pub(super) const SPONSOR_HINT: &str = "↑↓ navigate  enter/c copy  esc close";
+
+// --- the read-only /discord page (docs/discord.md). The /sponsor page's
+// twin: its heart, gradient title, label row and rounded box over the const
+// invite. Only its own words live here. ---
+
+/// The words on either side of the app's name in the title: `Join the Alter
+/// Zero Discord`.
+pub(super) const DISCORD_TITLE_PREFIX: &str = "Join the ";
+pub(super) const DISCORD_TITLE_SUFFIX: &str = " Discord";
+
+/// The dim rows under the title: what the server is for.
+pub(super) const DISCORD_BLURB: &str = "Ask for help, share what you have built, and hear \
+about new releases first. Ideas for new features are welcome too.";
+
+/// The row's bold label, and the dim note beside it saying what the boxed
+/// value is.
+pub(super) const DISCORD_LABEL: &str = "Discord";
+pub(super) const DISCORD_NOTE: &str = "invite to the community server";
+
+/// The dim key hint — the page's whole grammar. One row leaves nothing to
+/// navigate, so it names no arrows.
+pub(super) const DISCORD_HINT: &str = "enter/c copy invite link  esc close";
 
 // --- the /secrets page (docs/secrets.md). The /donate page's frame — the
 // family's indent, its `❯` marker, the dim meta ink, the banner-gradient
@@ -2200,10 +2302,15 @@ pub(super) const REVIEW_SKIP_LABEL: &str = "Continue without trusting";
 pub(super) const REVIEW_ENABLE_LABEL: &str = "Enable selected";
 pub(super) const REVIEW_DISABLE_LABEL: &str = "Disable all";
 
-/// The key hints, saying what Esc means on each page.
+/// The key hints, led by the navigation the `/mcp` list's hint leads with,
+/// and saying what Esc means on each page.
 pub(super) const REVIEW_HOOKS_HINT: &str =
-    "Space to select · Enter to confirm · Esc to continue without trusting";
-pub(super) const REVIEW_MCP_HINT: &str = "Space to select · Enter to confirm · Esc to disable all";
+    "↑/↓ to navigate · Space to select · Enter to confirm · Esc to continue without trusting";
+pub(super) const REVIEW_MCP_HINT: &str =
+    "↑/↓ to navigate · Space to select · Enter to confirm · Esc to disable all";
+
+/// Between a key hint's entries — where a hint too wide for one row breaks.
+pub(super) const REVIEW_HINT_SEPARATOR: &str = " · ";
 
 /// A changed item's amber badge, and the line saying what it was: a hook's
 /// old command, or what changed in a server's entry.
@@ -2291,9 +2398,8 @@ pub(super) const MCP_TOOL_FIELD_GAP: &str = " ";
 pub(super) const MCP_PARAM_BULLET: &str = "  ● ";
 pub(super) const MCP_PARAM_INDENT: &str = "    ";
 /// The auth page's fixed lines.
-pub(super) const MCP_AUTH_BROWSER_NOTE: &str = "*  A browser window will open for authentication";
 pub(super) const MCP_AUTH_COPY_NOTE: &str =
-    "If your browser doesn't open automatically, copy this URL manually (c to copy)";
+    "Open this URL in your browser to authenticate (c to copy)";
 pub(super) const MCP_AUTH_PASTE_NOTE: &str =
     "If the redirect page shows a connection error, paste the URL from your browser's address bar:";
 pub(super) const MCP_AUTH_PROMPT: &str = "URL > ";
@@ -2301,10 +2407,172 @@ pub(super) const MCP_AUTH_RETURN_NOTE: &str =
     "Return here after authenticating in your browser. Press Esc to go back.";
 pub(super) const MCP_AUTH_WAITING: &str = "Preparing the authorization request…";
 pub(super) const MCP_AUTH_SUBMITTED: &str = "Checking the pasted URL…";
+/// A failed sign-in's page: its title leads the server's name, and the
+/// reason stays on screen, whole, over this hint (`docs/mcp.md`).
+pub(super) const MCP_AUTH_FAILED_TITLE: &str = "Couldn't authenticate with ";
+pub(super) const MCP_AUTH_FAILED_HINT: &str = "Enter to try again · Esc to go back";
+/// The auth page's client form, shown when the authorization server
+/// registers no client for this app or turned the user's own away
+/// (`docs/mcp.md` *Pre-registered clients*). The title leads the server's
+/// name. The page states facts and asks for fields — MCP describes no
+/// provider, so it describes none.
+pub(super) const MCP_CLIENT_TITLE: &str = "OAuth client for ";
+/// What the auth page says while `Change OAuth client` looks the server's
+/// authorization server up for the form — one status line, nothing to type.
+pub(super) const MCP_CLIENT_LOOKUP: &str = "Looking up the authorization server…";
+/// The issuer row's label — the authorization server as discovery named it
+/// — padded to the redirect URI label's width so the two values line up.
+pub(super) const MCP_CLIENT_ISSUER_LABEL: &str = "Issuer:        ";
+/// The documentation row's label: the link the server's metadata gives,
+/// the same width as the other two.
+pub(super) const MCP_CLIENT_DOCS_LABEL: &str = "Docs:          ";
+/// The redirect URI row: its label, and what stands in for the address
+/// while the port typed is no port.
+pub(super) const MCP_CLIENT_REDIRECT_LABEL: &str = "Redirect URI:  ";
+pub(super) const MCP_CLIENT_REDIRECT_UNSET: &str = "set the callback port";
+/// The form's three prompts, padded to one width so the values line up —
+/// each a span of its own, which is how the caret finds its field's row.
+pub(super) const MCP_CLIENT_PORT_PROMPT: &str = "Callback port > ";
+pub(super) const MCP_CLIENT_ID_PROMPT: &str = "Client ID     > ";
+pub(super) const MCP_CLIENT_SECRET_PROMPT: &str = "Client secret > ";
+/// What an empty secret field means: the kept secret stays, or the client
+/// is a public one.
+pub(super) const MCP_CLIENT_SECRET_KEPT: &str = "unchanged — type to replace it";
+pub(super) const MCP_CLIENT_SECRET_OPTIONAL: &str = "optional — leave empty if the client has none";
+/// The form's keys: all three fields, or the secret alone.
+pub(super) const MCP_CLIENT_HINT: &str =
+    "Tab to switch fields · Enter to continue · Esc to go back";
+pub(super) const MCP_CLIENT_SECRET_HINT: &str = "Enter to continue · Esc to go back";
 
 /// The closing direction on the detail page.
 pub(super) const HOOKS_MODIFY_NOTE: &str =
     "To modify or remove this hook, edit hooks.json directly or ask alter-zero to help.";
+
+// --- The inline `/plugins` page (docs/plugins.md): the `/skills` menu's list
+// under a tab strip, and the `/mcp` manager's detail pages — so it borrows
+// both frames (the picker family's rows, the `MCP_FIELD_COL` fact rows, the
+// `HOOKS_MARKER` actions, the ask modal's chips) and adds only its own
+// vocabulary. ---
+
+/// The scope word a plugin's files are shown under on the startup review —
+/// `Plugin hello@demo · …/hooks/hooks.json` — and what tells its servers
+/// from a project's there.
+pub const REVIEW_PLUGIN_SCOPE: &str = "Plugin";
+
+/// The list page's title.
+pub(super) const PLUGINS_TITLE: &str = "Plugins";
+
+/// The tab strip's fixed tabs (`app::PluginsTab`): every plugin, the
+/// installed ones and — last, after a tab per marketplace — the add tab.
+pub(super) const PLUGINS_TAB_ALL: &str = "All";
+pub(super) const PLUGINS_TAB_INSTALLED: &str = "Installed";
+pub(super) const PLUGINS_TAB_ADD: &str = "+ Add";
+
+/// The marks a strip too wide for the terminal shows where tabs are hidden
+/// (codex's): `‹` at its left, `›` at its right.
+pub(super) const PLUGINS_STRIP_MORE_LEFT: &str = "‹";
+pub(super) const PLUGINS_STRIP_MORE_RIGHT: &str = "›";
+
+/// Each tab's dim subtitle under the title. A marketplace's tab says its
+/// own description instead, when it has one.
+pub(super) const PLUGINS_ALL_SUBTITLE: &str = "Every plugin your marketplaces list";
+pub(super) const PLUGINS_INSTALLED_SUBTITLE: &str = "The plugins installed on this machine";
+pub(super) const PLUGINS_ADD_SUBTITLE: &str =
+    "Add a marketplace: owner/repo, a git URL, or a directory";
+pub(super) const PLUGINS_ADD_COUNT: &str = "Pick one below or type a source";
+
+/// The add tab's last row while nothing is typed — it opens the add page —
+/// and what it says the page's field takes.
+pub(super) const PLUGINS_ADD_ROW: &str = "Add a marketplace…";
+pub(super) const PLUGINS_ADD_ROW_DESCRIPTION: &str = "owner/repo, git URL or path";
+
+/// The add page: its title, what a marketplace is, and the field's dim
+/// placeholder.
+pub(super) const PLUGINS_ADD_TITLE: &str = "Add a marketplace";
+pub(super) const PLUGINS_ADD_BLURB: &str = "A git repository or a directory holding a plugin marketplace — or a single plugin, read as a marketplace of one.";
+pub(super) const PLUGINS_ADD_PLACEHOLDER: &str = "owner/repo";
+
+/// The status column's marks: the `/skills` rows' `✔`/`◯` for an installed
+/// plugin on or off here, `+` for one that can be installed, `–` for one
+/// whose source this app cannot fetch, and `/mcp`'s `✘` for an installed copy
+/// a session does not load. Only the `✔` is green and only the `✘` red: the
+/// eye hunts down the column for what is on and what is broken.
+pub(super) const PLUGINS_ENABLED_MARK: &str = LOGIN_CONFIGURED_MARK;
+pub(super) const PLUGINS_DISABLED_MARK: &str = LOGIN_UNCONFIGURED_MARK;
+pub(super) const PLUGINS_AVAILABLE_MARK: &str = "+";
+pub(super) const PLUGINS_UNAVAILABLE_MARK: &str = "–";
+pub(super) const PLUGINS_BROKEN_MARK: &str = "✘";
+
+/// The status column's words, beside those marks — and the add tab's for an
+/// official catalog already added.
+pub(super) const PLUGINS_ENABLED: &str = "enabled";
+pub(super) const PLUGINS_DISABLED: &str = "disabled";
+pub(super) const PLUGINS_AVAILABLE: &str = "available";
+pub(super) const PLUGINS_UNAVAILABLE: &str = "unavailable";
+pub(super) const PLUGINS_BROKEN: &str = "not loaded";
+pub(super) const PLUGINS_ADDED: &str = "added";
+
+/// The amber mark an installed plugin's description opens on when its
+/// marketplace has a newer copy: `▲ update · Easily create hooks…`.
+pub(super) const PLUGINS_UPDATE_MARK: &str = "▲";
+pub(super) const PLUGINS_UPDATE_WORD: &str = "update";
+
+/// The key hints' clauses, each with the order it gives way in on a narrow
+/// terminal — highest first, `0` never — so a hint drops whole clauses
+/// rather than ending on a cut word: the plugin tabs (a marketplace's tab
+/// leading on its own two keys, Ctrl+U only for a git one), the add tab.
+pub(super) const PLUGINS_HINT_UPDATE: (&str, u8) = ("Ctrl+U update", 2);
+pub(super) const PLUGINS_HINT_REMOVE: (&str, u8) = ("Ctrl+R remove", 1);
+pub(super) const PLUGINS_HINT_TABS: (&str, u8) = ("←/→ tabs", 4);
+pub(super) const PLUGINS_HINT_OPEN: (&str, u8) = ("Enter to open", 3);
+pub(super) const PLUGINS_HINT_TOGGLE: (&str, u8) = ("Space to toggle", 5);
+pub(super) const PLUGINS_HINT_CLOSE: (&str, u8) = ("Esc to close", 0);
+pub(super) const PLUGINS_HINT_TYPE: (&str, u8) = ("type a source", 5);
+pub(super) const PLUGINS_HINT_ADD: (&str, u8) = ("Enter to add", 0);
+
+/// A detail page's hint and the confirmation's, clause by clause in the
+/// order they give way (the list's rule): the way back is never left out.
+pub(super) const PLUGINS_PAGE_HINT: [(&str, u8); 3] = [
+    ("↑/↓ to navigate", 2),
+    ("Enter to select", 1),
+    ("Esc to go back", 0),
+];
+pub(super) const PLUGINS_CONFIRM_HINT: [(&str, u8); 2] =
+    [("Enter to confirm", 1), ("Esc to go back", 0)];
+pub(super) const PLUGINS_ADD_HINT: [(&str, u8); 2] = [("Enter to add", 1), ("Esc to go back", 0)];
+
+/// The list's placeholders: a search matching nothing, and the two empty
+/// tabs — each naming where to go next.
+pub(super) const PLUGINS_NO_MATCH: &str = "No matching plugins";
+pub(super) const PLUGINS_NONE_INSTALLED: &str =
+    "No plugins installed yet — find one under All, or add a marketplace under + Add.";
+pub(super) const PLUGINS_NONE_LISTED: &str =
+    "No plugins listed yet — add a marketplace under + Add.";
+
+/// The note under the count when the session loads no plugin
+/// (`ALTER_ZERO_PLUGINS=0`): the page still installs and toggles, red like
+/// the `/skills` and `/mcp` session-off notes.
+pub(super) const PLUGINS_SESSION_OFF: &str =
+    "Plugins are off for this session (ALTER_ZERO_PLUGINS) — nothing installed is loaded";
+
+/// What the add tab's typed row says.
+pub(super) const PLUGINS_ADD_TYPED: &str = "Press Enter to add it";
+/// How to pin a source — `@ref` on the shorthand, `#ref` on any git source
+/// (`plugins::source`) — said under the add tab's typed source and its row
+/// for any other, and on the add page.
+pub(super) const PLUGINS_ADD_PIN: &str =
+    "Pin a branch, tag or commit: owner/repo@ref, or #ref on a git URL";
+/// The line under the list for a plugin whose manifest describes nothing.
+pub(super) const PLUGINS_NO_DESCRIPTION: &str = "No description";
+
+/// A plugin page's warning for one not yet installed that brings something
+/// that runs — or whose contents are read only once it is installed — the
+/// risk in Claude Code's opening words, then this app's own guard
+/// (`docs/plugins.md` *Trust*).
+pub(super) const PLUGINS_TRUST_NOTE: &str = "Plugins can run code on your computer — install only plugins you trust. Any hooks or MCP servers it brings wait for your review before they run.";
+
+/// The job line's closing clause: `Installing deploy… (4s · esc to cancel)`.
+pub(super) const PLUGINS_JOB_CANCEL: &str = "esc to cancel";
 
 // --- Transcript timestamps (Ctrl+O view only). Only the *user* message shows
 // its wall-clock stamp: dim, right-aligned on its own line below the message
@@ -2400,7 +2668,7 @@ pub(super) fn status_retry_color() -> Color {
     palette().warning
 }
 
-/// Trailing ellipsis after the working verb (`Working…`).
+/// Trailing ellipsis after the working verb (`Hatching…`).
 pub(super) const STATUS_ELLIPSIS: &str = "…";
 
 /// Arrow for output tokens while the reply streams.
@@ -2485,7 +2753,7 @@ pub(super) const STATUS_GAP_ROWS: u16 = 1;
 // renderer pure (codex reads a process clock instead). ---
 
 /// The status verb's **resting** colour at display column `col` of its
-/// `total`-column text (`Working…`, a task's activeForm): the page titles'
+/// `total`-column text (`Hatching…`, a task's activeForm): the page titles'
 /// dress (`/mcp`, `/skills` — [`header_gradient_at`]), so the one word in
 /// motion on the line follows `/theme` the way the headlines do. Codex rests
 /// its verb on grey; the crest's sweep toward [`shimmer_highlight`] is
@@ -2692,18 +2960,25 @@ pub(super) const MENU_NO_MATCH: &str = "No matching commands";
 // the cursor — a port of codex's file-search popup. Each row is columned —
 // `→ name  parent/  …  File|Dir` — reusing the palette's `→` marker and its
 // cyan-selected / dim-unselected colours, additionally **bolding the
-// characters the query matched** (from `FileMatch.indices`). See
-// docs/file-search.md. ---
+// characters the query matched** (worked out for the rows drawn), over the
+// palette's dim `(n/total)` counter. See docs/file-search.md. ---
 
-/// The most file rows shown at once; longer match lists scroll to keep the
-/// selection visible (`menu_window`, which pins it to the edge it crossed).
-pub(super) const FILE_MENU_MAX_ROWS: u16 = 8;
+/// The most file rows shown at once — the `/` palette's five, as in the `$`
+/// picker; the rest of the matches (every one the search found) scroll under
+/// a highlight kept on the middle row (`centered_window`), and the
+/// `(n/total)` counter under them is a row of its own.
+pub(super) const FILE_MENU_MAX_ROWS: u16 = 5;
 
 /// The picker's single placeholder row while a search is in flight.
 pub(super) const FILE_MENU_SEARCHING: &str = "Searching…";
 
 /// The picker's single placeholder row when the query matched nothing.
 pub(super) const FILE_MENU_NO_MATCH: &str = "No matching files";
+
+/// Closes the `(n/total)` counter's total when the walk stopped at its cap
+/// — `(1/10000+)` — since the list it counts is then only part of the
+/// workspace, and the total a floor.
+pub(super) const FILE_MENU_PARTIAL_MARK: &str = "+";
 
 /// Gap between the name column and the parent-dir column (the name column is
 /// the widest visible name plus this).
@@ -2725,13 +3000,16 @@ pub(super) const FILE_MENU_FILE_LABEL: &str = "File";
 // --- The `$` skill picker. A fourth band in the same slot, opened while the
 // cursor sits in a usable `$mention`: one row per matching skill — the name
 // column (widest visible name + `FILE_MENU_GAP`, matched characters bolded)
-// then the skill's own description, `…`-cut at the width. It reuses the
-// palette's marker, inset and colours — the selection lights up cyan, the
-// rest dim. See docs/skill-mentions.md. ---
+// then the skill's own description, `…`-cut at the width — over the
+// palette's dim `(n/total)` counter. It reuses the palette's marker, inset
+// and colours — the selection lights up cyan, the rest dim. See
+// docs/skill-mentions.md. ---
 
-/// The most skill rows shown at once; longer lists scroll to keep the
-/// selection visible (`menu_window`), like the file picker.
-pub(super) const SKILL_MENU_MAX_ROWS: u16 = 8;
+/// The most skill rows shown at once — the `/` palette's five, a row each,
+/// since a description is `…`-cut rather than wrapped; longer lists scroll
+/// under a highlight kept on the middle row (`centered_window`, the palette's
+/// window), and the `(n/total)` counter under them is a row of its own.
+pub(super) const SKILL_MENU_MAX_ROWS: u16 = 5;
 
 /// The band's single placeholder row when the query matched no skill.
 pub(super) const SKILL_MENU_NO_MATCH: &str = "No matching skills";
@@ -3020,10 +3298,22 @@ pub(super) const SHELL_BULLET: &str = "! ";
 /// banner and every sentence the app speaks its name in can't drift apart.
 pub(super) const HEADER_NAME: &str = crate::APP_NAME;
 
-/// The command hint beside the mascot — bare `/token`s in the accent colour,
-/// three-space separated. Deliberately prose-free so it can't collide with
-/// the smoke suite's `for commands` / footer markers.
-pub(super) const HEADER_HINT: &[&str] = &["/login", "/model", "/resume"];
+/// The hint beside the mascot: the composer's three keys as `(key, label)`
+/// pairs — `/` opens the command palette, `@` the file picker, `?` the
+/// shortcuts band — drawn `/ commands  @ files  ? shortcuts`, each key in
+/// the accent one space from its label in the dim, the `?` band's dress for
+/// its own entries ([`shortcuts_key_color`], [`shortcuts_text_color`]), and
+/// the pairs [`HEADER_HINT_GAP`] columns apart. The labels drop the band's
+/// `for`, which keeps the row clear of the smoke suite's `for commands`
+/// marker.
+pub(super) const HEADER_HINT: &[(&str, &str)] =
+    &[("/", "commands"), ("@", "files"), ("?", "shortcuts")];
+
+/// Blank columns between the hint's pairs: the `?` band's own narrowest
+/// gutter ([`SHORTCUTS_MIN_GUTTER`]), so spacing alone groups each key with
+/// its label — one space inside a pair, two between pairs — and the keys
+/// stay the only symbols on the row.
+pub(super) const HEADER_HINT_GAP: usize = SHORTCUTS_MIN_GUTTER;
 
 /// Columns between the mascot art's right edge and the metadata column —
 /// two, per the user's spec (a wider gap read as detached).
@@ -3056,7 +3346,50 @@ pub(super) fn header_gradient_at(col: usize, total: usize) -> Color {
     lerp_color(header_gradient_start(), header_gradient_end(), t)
 }
 
-/// The version badge + hint-token colour — the cyan accent, so they pop.
+// --- The mascot's sweep of light (docs/mascot-animation.md): the status
+// verb's shimmer, sized for an art block nine columns wide. ---
+
+/// The sweep's half-width in columns: the band lights about five of the
+/// art's nine at its widest, so it reads as a glint crossing the mascot
+/// rather than the whole mascot flashing.
+pub(super) const MASCOT_SHINE_HALF_WIDTH: f32 = 2.5;
+
+/// How many columns further along the sweep each art row sits than the row
+/// above it — the band's lean. Half a column a row draws it as a slanted
+/// streak, the way light catches a surface.
+pub(super) const MASCOT_SHINE_LEAN: f32 = 0.5;
+
+/// A glint's half-width in columns: the band lights two or three cells of
+/// a row, a narrow catch of the light rather than the sweep's broad wash.
+pub(super) const MASCOT_GLINT_HALF_WIDTH: f32 = 1.5;
+
+/// A glint's lean — a column a row, steeper than the sweep's, so the quick
+/// streak reads as light glancing off the mascot.
+pub(super) const MASCOT_GLINT_LEAN: f32 = 1.0;
+
+/// The share of the art's cells a glitter sets twinkling at its thickest —
+/// about one in three, so it reads as scattered sparkles rather than the
+/// whole mascot flashing.
+pub(super) const MASCOT_GLITTER_DENSITY: f32 = 0.32;
+
+/// How much of a twinkle's light a cell keeps for the step after it — the
+/// afterglow that lets a twinkle fade instead of snapping off.
+pub(super) const MASCOT_GLITTER_AFTERGLOW: f32 = 0.35;
+
+/// The crest's blend toward [`mascot_shine_color`] — a little under the
+/// verb's ([`SHIMMER_MAX_BLEND`]), since a solid block of near-white reads
+/// far louder than a letter of it.
+pub(super) const MASCOT_SHINE_MAX_BLEND: f32 = 0.8;
+
+/// What a sweep lifts the art toward, and what a spark beside it is drawn
+/// in: the shimmer's own highlight, so the banner's light and the status
+/// line's are one light under every theme.
+pub(super) fn mascot_shine_color() -> Color {
+    shimmer_highlight()
+}
+
+/// The narrow badge's version, the hint's keys and a notice card's title —
+/// the cyan accent, so they pop.
 pub(super) fn header_accent_color() -> Color {
     inline_code_color()
 }
@@ -3267,6 +3600,20 @@ pub(super) const PERMISSION_NOTICE: &str = "This command requires approval";
 pub(super) fn permission_notice_color() -> Color {
     tool_dim_color()
 }
+
+/// The row that takes the standing notice's place when the prompt stands in
+/// for a verdict auto mode's classifier failed to reach
+/// (`permission::check_failure_notice`) — the caution amber: nothing is
+/// wrong with the call, but something is with the check that should have
+/// answered for it.
+pub(super) fn permission_check_failure_color() -> Color {
+    ask_warning_color()
+}
+
+/// The most rows that notice wraps to. A provider's own message is cut to a
+/// few hundred characters where it is read; a transport's is not, and an
+/// unbounded one would push the question and its options off the page.
+pub(super) const PERMISSION_CHECK_FAILURE_MAX_ROWS: usize = 6;
 
 /// The `❯ ` on the highlighted option row (the unselected rows indent by its
 /// width so the list stays aligned).

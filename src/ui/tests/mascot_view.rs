@@ -161,7 +161,7 @@ fn the_page_is_framed_with_search_rows_preview_and_hint() {
             "▙▄▙▄▟▄▟",
             "Alter Zero (v",
             "~/alter-zero",
-            "/login   /model",
+            "/ commands  @ files",
         ] {
             assert!(
                 texts.iter().any(|t| t.contains(expect)),
@@ -259,7 +259,7 @@ fn a_wide_terminal_lays_the_preview_beside_the_list() {
         .find(|t| t.trim_start().starts_with("(1/6)"))
         .expect("the counter");
     assert!(
-        counter.contains("/login   /model   /resume"),
+        counter.contains("/ commands  @ files  ? shortcuts"),
         "the banner's hint row beside the counter: {texts:#?}"
     );
 }
@@ -297,11 +297,13 @@ fn a_narrow_terminal_stacks_the_preview_under_the_list() {
 }
 
 #[test]
-fn the_layout_switches_once_and_beside_the_list_the_banner_keeps_its_art() {
+fn the_layout_switches_once_and_beside_the_list_the_banner_reads_whole() {
     // One breakpoint: every width from it up lays the preview beside the
     // list, every width under it stacks. At the breakpoint the banner still
-    // seats its art beside its title, and every caption reads whole, so the
-    // side-by-side page is one shape wherever it is laid out.
+    // seats its art beside its title, every row of it — the key hint, its
+    // widest, included — reads as the startup banner draws it, and every
+    // caption reads whole, so the side-by-side page is one shape wherever
+    // it is laid out.
     let mut app = open_app();
     let switch = (20u16..400)
         .find(|&w| is_beside(&app, w))
@@ -326,11 +328,38 @@ fn the_layout_switches_once_and_beside_the_list_the_banner_keeps_its_art() {
             texts.iter().any(|t| t.contains(mascot.art()[1])),
             "{mascot:?}'s banner keeps its art at {switch}: {texts:#?}"
         );
+        for row in crate::ui::header::header_lines_for(&app, *mascot, 400) {
+            let row = plain(&row);
+            assert!(
+                texts.iter().any(|t| t.contains(row.trim_end())),
+                "{mascot:?}'s banner row {row:?} is cut at {switch}: {texts:#?}"
+            );
+        }
         assert!(
             texts.iter().any(|t| t.contains(mascot.description())),
             "{mascot:?}'s caption reads whole at {switch}: {texts:#?}"
         );
     }
+}
+
+#[test]
+fn the_preview_column_is_as_wide_as_the_banner_needs_and_no_wider() {
+    // The narrowest column that shows every mascot's banner and caption
+    // whole: a column more is one the side-by-side page asks of the
+    // terminal for nothing, and a column less cuts the banner's widest row.
+    let app = with_session();
+    let need = Mascot::ALL
+        .iter()
+        .flat_map(|&mascot| {
+            crate::ui::header::header_lines_for(&app, mascot, 400)
+                .iter()
+                .map(|row| cols(plain(row).trim_end()))
+                .chain([cols(mascot.description())])
+                .collect::<Vec<_>>()
+        })
+        .max()
+        .expect("a catalog");
+    assert_eq!(crate::ui::theme::MASCOT_PREVIEW_MIN_COLS, need);
 }
 
 #[test]
@@ -743,4 +772,84 @@ fn a_tiny_terminal_keeps_the_mascot_search_line() {
         "No matching mascots",
         "Enter to choose",
     );
+}
+
+// --- the preview in motion (docs/mascot-animation.md) ---
+
+/// The picker open over mascots that animate, with the highlight on
+/// `selected` and that mascot's preview `at` milliseconds into its
+/// timeline — which starts with the frame that first shows it.
+fn moving_app(at: u64, selected: usize) -> App {
+    let mut app = open_app();
+    app.seed_mascot_motion(0x5EED);
+    select(&mut app, selected);
+    app.set_mascot_clock(Duration::ZERO);
+    app.set_mascot_clock(Duration::from_millis(at));
+    app
+}
+
+/// The first millisecond of the greeting at which `mascot`'s pose is off
+/// its rest art.
+fn moves_at(mascot: Mascot, wanted: impl Fn(&[&str]) -> bool) -> u64 {
+    (0..crate::app::MASCOT_GREETING_MS)
+        .find(|&at| wanted(&mascot.pose(0x5EED, Duration::from_millis(at)).art))
+        .expect("the greeting shows it")
+}
+
+#[test]
+fn the_preview_shows_the_highlighted_mascot_moving() {
+    // The picker is where a mascot is chosen, so it shows what each one
+    // does: the preview is the banner in the pose its animation is in now.
+    let shut = moves_at(Mascot::Bloom, |art| art[1] == "▀███████▀");
+    let mut app = moving_app(shut, 1);
+    for width in [WIDE, NARROW] {
+        let texts = texts(&app, width);
+        assert!(
+            texts.iter().any(|t| t.contains("▀███████▀")),
+            "bloom blinks in its preview: {texts:#?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("▀█▄███▄█▀")),
+            "…in place of its open eyes: {texts:#?}"
+        );
+    }
+    // With the motion off, the same instant previews it standing still.
+    app.settings_mut().animate_mascot = false;
+    let texts = texts(&app, WIDE);
+    assert!(texts.iter().any(|t| t.contains("▀█▄███▄█▀")), "{texts:#?}");
+}
+
+#[test]
+fn a_moving_preview_never_moves_the_page() {
+    // A frame changes cells inside the art block and nothing else: the page
+    // keeps its height, every row its width, and every row outside the art
+    // its text — so the picker holds still around a mascot that does not.
+    for (selected, mascot) in Mascot::ALL.into_iter().enumerate() {
+        for width in [WIDE, NARROW] {
+            let mut still = open_app();
+            select(&mut still, selected);
+            let rest = texts(&still, width);
+            for at in (0..crate::app::MASCOT_GREETING_MS).step_by(20) {
+                let page = texts(&moving_app(at, selected), width);
+                assert_eq!(page.len(), rest.len(), "{} at {at}ms", mascot.name());
+                let moved: Vec<usize> = (0..page.len()).filter(|&i| page[i] != rest[i]).collect();
+                assert!(
+                    moved.len() <= 1,
+                    "{} at {at}ms: rows {moved:?} moved",
+                    mascot.name()
+                );
+                for &i in &moved {
+                    // The art sits ahead of the banner's metadata, which
+                    // every row keeps whole and in place.
+                    let tail = |row: &str| {
+                        let cells: Vec<char> = row.chars().collect();
+                        cells[cells.len().saturating_sub(12)..]
+                            .iter()
+                            .collect::<String>()
+                    };
+                    assert_eq!(tail(&page[i]), tail(&rest[i]), "{}", mascot.name());
+                }
+            }
+        }
+    }
 }

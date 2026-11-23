@@ -38,12 +38,12 @@ pub fn menu_window(len: usize, selected: usize, max: usize) -> usize {
 /// **centered** in a window of `max` rows: the selection rides the middle row
 /// (`max/2`) while there is room on both sides, so the user always sees as much
 /// of the list *above and below* the highlight as fits — the "broad view" the
-/// `/model` and `/login` pickers want, and the slash-command palette too
-/// (row-budgeted by `centered_window_rows`, whose wrapped entries make each
-/// one a different height). Near the ends the window can't center
-/// (there aren't enough rows on one side), so it anchors: the top for the first
-/// `max/2` selections, the bottom (flush with the tail) for the last. Clamped to
-/// `[0, len - max]`.
+/// `/model` and `/login` pickers want, the `@` and `$` pickers below the box,
+/// and the slash-command palette too (row-budgeted by `centered_window_rows`,
+/// whose wrapped entries make each one a different height). Near the ends the
+/// window can't center (there aren't enough rows on one side), so it anchors:
+/// the top for the first `max/2` selections, the bottom (flush with the tail)
+/// for the last. Clamped to `[0, len - max]`.
 ///
 /// Unlike [`menu_window`] — which only scrolls once the selection would leave
 /// the window, pinning it to whichever edge it exited — this recenters on every
@@ -185,7 +185,12 @@ fn menu_row_lines(cmd: &SlashCommand, selected: bool, width: u16) -> Vec<Line<'s
 /// hold it whole, since a count cut at the edge would misread (`(1/2` for
 /// one of twenty-one).
 fn menu_counter_line(selected: usize, total: usize, width: u16) -> Option<Line<'static>> {
-    let counter = format!("({}/{total})", selected + 1);
+    counter_line(format!("({}/{total})", selected + 1), width)
+}
+
+/// A band's dim counter row: `counter` hanging at [`MENU_INDENT`] under the
+/// names, or `None` where the width cannot hold it whole.
+fn counter_line(counter: String, width: u16) -> Option<Line<'static>> {
     (cols(MENU_INDENT) + cols(&counter) <= usize::from(width)).then(|| {
         Line::from(vec![
             Span::raw(MENU_INDENT),
@@ -242,18 +247,17 @@ pub fn command_menu_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// How many rows the `@` file picker occupies for `app`: 0 when closed, one
-/// placeholder row while searching / when nothing matched, else the match count
-/// capped at `FILE_MENU_MAX_ROWS` (longer lists scroll, like the palette).
-/// [`live_height`] adds this to its band and [`render_live`] paints exactly this
-/// many rows — the two must agree. See `docs/file-search.md`.
+/// How many rows the `@` file picker occupies for `app` at `width`: **the
+/// built line count** of [`file_menu_lines`] — 0 when closed, one placeholder
+/// row while searching / when nothing matched, else the matches capped at
+/// `FILE_MENU_MAX_ROWS` (longer lists scroll) and the `(n/total)` counter
+/// under them, which a terminal too narrow to hold it whole goes without.
+/// Height-is-the-line-count is [`menu_rows`]' rule: [`live_height`] adds this
+/// via [`band_rows`] and [`render_live`] paints exactly this many rows, so the
+/// two agree by construction. See `docs/file-search.md`.
 #[must_use]
-pub fn file_menu_rows(app: &App) -> u16 {
-    match &app.file_search {
-        None => 0,
-        Some(fs) if fs.matches.is_empty() => 1,
-        Some(fs) => (fs.matches.len() as u16).min(FILE_MENU_MAX_ROWS),
-    }
+pub fn file_menu_rows(app: &App, width: u16) -> u16 {
+    u16::try_from(file_menu_lines(app, width).len()).unwrap_or(u16::MAX)
 }
 
 /// Append `text` to `spans`, bolding the characters the query matched: a
@@ -300,10 +304,18 @@ fn file_menu_highlight(
 /// the right edge (`width − FILE_MENU_TYPE_WIDTH`). `name_col` is the shared
 /// name-column width — the widest visible name plus [`FILE_MENU_GAP`], computed
 /// by [`file_menu_lines`] so the parent column aligns across rows. The selected
-/// row lights up cyan like the palette, the rest dim, and the query's matched
-/// characters ([`FileMatch::indices`]) stay bolded across the split columns.
-/// A width too narrow for the columns degrades to marker + name alone.
-fn file_menu_row(m: &FileMatch, selected: bool, name_col: usize, width: u16) -> Line<'static> {
+/// row lights up cyan like the palette, the rest dim, and the characters the
+/// query matched — `indices`, their byte offsets in the path, worked out by
+/// [`file_menu_lines`] for the rows it draws — stay bolded across the split
+/// columns. A width too narrow for the columns degrades to marker + name
+/// alone.
+fn file_menu_row(
+    m: &FileMatch,
+    indices: &[usize],
+    selected: bool,
+    name_col: usize,
+    width: u16,
+) -> Line<'static> {
     let color = if selected {
         menu_selected_color()
     } else {
@@ -317,11 +329,11 @@ fn file_menu_row(m: &FileMatch, selected: bool, name_col: usize, width: u16) -> 
     if avail < name_col + FILE_MENU_TYPE_WIDTH {
         // Too narrow for the parent/kind columns: just the (truncated) name.
         let name = truncate_cols(m.name(), avail);
-        file_menu_highlight(&mut spans, &name, m.name_start(), &m.indices, base, matched);
+        file_menu_highlight(&mut spans, &name, m.name_start(), indices, base, matched);
         return Line::from(spans);
     }
     let name = truncate_cols(m.name(), name_col);
-    file_menu_highlight(&mut spans, &name, m.name_start(), &m.indices, base, matched);
+    file_menu_highlight(&mut spans, &name, m.name_start(), indices, base, matched);
     spans.push(Span::styled(" ".repeat(name_col - cols(&name)), base));
     let dir_w = avail - name_col - FILE_MENU_TYPE_WIDTH;
     let parent = m.parent();
@@ -332,7 +344,7 @@ fn file_menu_row(m: &FileMatch, selected: bool, name_col: usize, width: u16) -> 
         spans.push(Span::styled(format!("{root}{pad}"), base));
     } else {
         let shown = truncate_cols(parent, dir_w);
-        file_menu_highlight(&mut spans, &shown, 0, &m.indices, base, matched);
+        file_menu_highlight(&mut spans, &shown, 0, indices, base, matched);
         spans.push(Span::styled(" ".repeat(dir_w - cols(&shown)), base));
     }
     let kind = if m.is_dir() {
@@ -345,9 +357,14 @@ fn file_menu_row(m: &FileMatch, selected: bool, name_col: usize, width: u16) -> 
 }
 
 /// The styled lines for the open file picker: a *Searching…* / *No matching
-/// files* placeholder while the band has no matches, else the file rows windowed
-/// (`menu_window`) to keep the selection visible and capped at
-/// `FILE_MENU_MAX_ROWS`. Empty when the picker is closed.
+/// files* placeholder while the band has no matches, else the file rows
+/// windowed by [`centered_window`] — the `/` palette's window, so the
+/// highlight rides the middle row and the files above *and* below it stay in
+/// view — and capped at `FILE_MENU_MAX_ROWS`, over the palette's dim
+/// `(n/total)` counter: which match is highlighted, of how many the search
+/// found (every match, `docs/file-search.md`) — the total closed by
+/// `FILE_MENU_PARTIAL_MARK` when the walk stopped at its cap, the list then
+/// being only part of the workspace. Empty when the picker is closed.
 #[must_use]
 pub fn file_menu_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let Some(fs) = &app.file_search else {
@@ -362,36 +379,49 @@ pub fn file_menu_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         return vec![placeholder_line(text)];
     }
     let max = FILE_MENU_MAX_ROWS as usize;
-    let offset = menu_window(fs.matches.len(), fs.selected, max);
+    let offset = centered_window(fs.matches.len(), fs.selected, max);
     let visible = &fs.matches[offset..(offset + max).min(fs.matches.len())];
     // The shared name-column width: the widest *visible* name + the gap, so
     // the parent column starts at the same place on every shown row.
     let name_col = visible.iter().map(|m| cols(m.name())).max().unwrap_or(0) + FILE_MENU_GAP;
-    visible
+    let mut lines: Vec<Line<'static>> = visible
         .iter()
         .enumerate()
-        .map(|(i, m)| file_menu_row(m, offset + i == fs.selected, name_col, width))
-        .collect()
+        .map(|(i, m)| {
+            // What to bold, worked out for this row alone: a match keeps no
+            // positions, since the list holds every match the walk found and
+            // only these few are ever drawn. A row the query no longer
+            // matches — the last search's, awaiting the next — bolds nothing.
+            let indices = crate::file_search::fuzzy_match(&fs.query, &m.path)
+                .map(|(_, indices)| indices)
+                .unwrap_or_default();
+            file_menu_row(m, &indices, offset + i == fs.selected, name_col, width)
+        })
+        .collect();
+    let selected = fs.selected.min(fs.matches.len() - 1);
+    let partial = if fs.truncated {
+        FILE_MENU_PARTIAL_MARK
+    } else {
+        ""
+    };
+    let counter = format!("({}/{}{partial})", selected + 1, fs.matches.len());
+    lines.extend(counter_line(counter, width));
+    lines
 }
 
-/// How many rows the `$` skill picker occupies for `app`: 0 when closed —
-/// which includes the cursor having *left* the mention, since the matches
-/// derive from the live token ([`App::skill_band_active`]) — one placeholder
-/// row when the query matches no skill, else the match count capped at
-/// `SKILL_MENU_MAX_ROWS` (longer lists scroll, like the palette).
-/// [`live_height`] adds this via [`band_rows`] and [`render_live`] paints
-/// exactly this many rows — the two must agree. See `docs/skill-mentions.md`.
+/// How many rows the `$` skill picker occupies for `app` at `width`: **the
+/// built line count** of [`skill_menu_lines`] — 0 when closed (which
+/// includes the cursor having *left* the mention, since the matches derive
+/// from the live token, [`App::skill_band_active`]), one placeholder row when
+/// the query matches no skill, else the matches capped at
+/// `SKILL_MENU_MAX_ROWS` (longer lists scroll) and the `(n/total)` counter
+/// under them, which a terminal too narrow to hold it whole goes without.
+/// Height-is-the-line-count is [`menu_rows`]' rule: [`live_height`] adds
+/// this via [`band_rows`] and [`render_live`] paints exactly this many rows,
+/// so the two agree by construction. See `docs/skill-mentions.md`.
 #[must_use]
-pub fn skill_menu_rows(app: &App) -> u16 {
-    if !app.skill_band_active() {
-        return 0;
-    }
-    let matches = app.skill_matches().len();
-    if matches == 0 {
-        1
-    } else {
-        (matches as u16).min(SKILL_MENU_MAX_ROWS)
-    }
+pub fn skill_menu_rows(app: &App, width: u16) -> u16 {
+    u16::try_from(skill_menu_lines(app, width).len()).unwrap_or(u16::MAX)
 }
 
 /// One skill-picker row: the marker (or its indent), the skill's name with
@@ -442,10 +472,13 @@ fn skill_menu_row(
 }
 
 /// The styled lines for the open skill picker: a *No matching skills*
-/// placeholder when the query misses, else the skill rows windowed
-/// (`menu_window`) to keep the selection visible and capped at
-/// `SKILL_MENU_MAX_ROWS`. Empty when the band is closed (or the cursor has
-/// left the mention). See `docs/skill-mentions.md`.
+/// placeholder when the query misses, else the skill rows windowed by
+/// [`centered_window`] — the `/` palette's window, so the highlight rides
+/// the middle row and the skills above *and* below it stay in view — and
+/// capped at `SKILL_MENU_MAX_ROWS`, over the palette's dim `(n/total)`
+/// counter: which match is highlighted, of how many the query matched.
+/// Empty when the band is closed (or the cursor has left the mention). See
+/// `docs/skill-mentions.md`.
 #[must_use]
 pub fn skill_menu_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     if !app.skill_band_active() {
@@ -460,16 +493,22 @@ pub fn skill_menu_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         .as_ref()
         .map_or(0, |picker| picker.selected);
     let max = SKILL_MENU_MAX_ROWS as usize;
-    let offset = menu_window(matches.len(), selected, max);
+    let offset = centered_window(matches.len(), selected, max);
     let visible = &matches[offset..(offset + max).min(matches.len())];
     // The shared name column: the widest visible name + the gap, so the
     // description column starts at the same place on every shown row.
     let name_col = visible.iter().map(|m| cols(&m.name)).max().unwrap_or(0) + FILE_MENU_GAP;
-    visible
+    let mut lines: Vec<Line<'static>> = visible
         .iter()
         .enumerate()
         .map(|(i, m)| skill_menu_row(m, offset + i == selected, name_col, width))
-        .collect()
+        .collect();
+    lines.extend(menu_counter_line(
+        selected.min(matches.len() - 1),
+        matches.len(),
+        width,
+    ));
+    lines
 }
 
 /// How many rows the `?` shortcuts band asks for, for `app` at `width`: 0
@@ -504,7 +543,10 @@ pub fn shortcuts_rows(app: &App, width: u16) -> u16 {
 /// and the boundary's `live_region_height`, so the three can never drift.
 #[must_use]
 pub fn band_rows(app: &App, width: u16) -> u16 {
-    menu_rows(app, width) + shortcuts_rows(app, width) + file_menu_rows(app) + skill_menu_rows(app)
+    menu_rows(app, width)
+        + shortcuts_rows(app, width)
+        + file_menu_rows(app, width)
+        + skill_menu_rows(app, width)
 }
 
 /// The text a `SHORTCUTS` entry shows in a context state. Only the `esc`

@@ -35,6 +35,7 @@ mod composer;
 mod config_review;
 mod context_usage;
 mod diff;
+mod discord;
 mod donate;
 mod drafts;
 mod export;
@@ -45,9 +46,11 @@ mod keys;
 mod login;
 mod look;
 mod mascot;
+mod mascot_motion;
 mod mcp_menu;
 mod model_picker;
 mod permission;
+mod plugins_menu;
 mod queue;
 mod reasoning;
 mod resume;
@@ -56,6 +59,7 @@ mod settings;
 mod skill_picker;
 mod skills_menu;
 mod spinner;
+mod sponsor;
 mod status;
 mod tasks;
 mod theme;
@@ -85,6 +89,7 @@ pub(crate) use self::compact::{estimate_messages_tokens, message_tokens};
 pub use self::composer::{SHELL_EMPTY_NOTICE, shell_query};
 pub use self::context_usage::{ContextUsagePage, ContextUsageRow};
 pub use self::diff::{DiffFilter, DiffFocus, DiffReview};
+pub use self::discord::{DISCORD_COPIED_NOTICE, DISCORD_INVITE, DiscordPage};
 pub use self::donate::{DONATION_ADDRESSES, DonatePicker, DonationAddress};
 pub use self::drafts::{ArgField, ArgsScanner, ToolDraft, ToolDrafts, previewed_display};
 pub use self::export::{EXPORT_EMPTY_NOTICE, ExportPicker, ExportTarget, export_file_name};
@@ -97,16 +102,26 @@ pub use self::login::{
 };
 pub use self::look::{Look, LookFile, MascotFile, SpinnerFile};
 pub use self::mascot::{Mascot, MascotPicker, MascotRow};
-pub use self::mcp_menu::{McpAuthView, McpMenu, McpPage, McpServerAction, server_actions};
-pub use self::model_picker::{ModelFetchError, ModelLoad, ModelPicker};
+pub use self::mascot_motion::{
+    Gaze, MASCOT_GLITTER_STEPS, MASCOT_GREETING_MS, MASCOT_LIDS, MASCOT_SHINE_FRAME,
+    MASCOT_WATCH_LINGER, MascotPose, MascotShine, ShineBand,
+};
+pub use self::mcp_menu::{
+    McpAuthView, McpClientField, McpClientForm, McpMenu, McpPage, McpServerAction, server_actions,
+};
+pub use self::model_picker::{ModelLoad, ModelPicker, ProviderList, ProviderLoad};
 pub use self::permission::PermissionPrompt;
 pub use self::queue::QueuedTurn;
-pub use self::reasoning::Reasoning;
+pub use self::reasoning::{LiveThought, Reasoning};
 // Crate-internal: `agents::AgentRun` runs the same reasoning-token snap over
 // its own transcript (`docs/agent-view-streaming.md`).
 pub use self::config_review::{
     ConfigReview, ItemChange, ReviewAnswer, ReviewChoice, ReviewItem, ReviewKey, ReviewKind,
     ReviewPage, ReviewSection,
+};
+pub use self::plugins_menu::{
+    AddRow, PLUGINS_JOB_DELAY, PluginAction, PluginDone, PluginJob, PluginOp, PluginsConfirm,
+    PluginsMenu, PluginsPage, PluginsTab, plugin_actions,
 };
 pub(crate) use self::reasoning::snap_reasoning_tokens;
 pub use self::resume::{ResumeControl, ResumeFilter, ResumePicker, ResumeSort};
@@ -115,6 +130,7 @@ pub use self::settings::{SettingRow, SettingsPicker};
 pub use self::skill_picker::SkillPicker;
 pub use self::skills_menu::{SkillMenuRow, SkillsMenu};
 pub use self::spinner::{Spinner, SpinnerPicker, SpinnerRow};
+pub use self::sponsor::{SPONSOR_LINKS, SponsorLink, SponsorPage};
 pub use self::status::{
     OfflineInfo, RetryInfo, ThinkingState, TokenArrow, TurnStatus, TurnSummary,
 };
@@ -126,8 +142,8 @@ pub use self::tool_group::{
     group_counts, group_kind, group_run, is_group_member, leading_group_calls, pending_edit_lines,
 };
 pub use self::tools::{
-    ERROR_TOOL_OUTPUT, INTERRUPT_TOOL_OUTPUT, LIVE_ACTIVE_SPAN, LiveTail, PathDisplay, ToolCall,
-    ToolStatus, apply_tool_screen,
+    ERROR_TOOL_OUTPUT, INTERRUPT_TOOL_OUTPUT, LIVE_ACTIVE_SPAN, LiveTail, PathDisplay,
+    SettledLines, ToolCall, ToolStatus, apply_tool_screen,
 };
 pub use self::turn::{
     CONNECTION_LOST_NOTICE, INTERRUPT_NOTICE, InterruptedTurn, SHELL_VERB, STATUS_VERBS,
@@ -135,7 +151,8 @@ pub use self::turn::{
 };
 pub(crate) use self::types::count_tokens;
 pub use self::types::{
-    DebugPage, EntryJump, HistoryItem, HookNote, Message, Role, SessionInfo, Toast, ToastKind, View,
+    DebugPage, EntryJump, HistoryItem, HookNote, Message, PagerMove, Role, SessionInfo, Toast,
+    ToastKind, View,
 };
 pub use self::usage::{
     USAGE_EMPTY_NOTICE, USAGE_REFRESH_SECS, UsagePage, UsageSection, UsageTarget,
@@ -243,7 +260,7 @@ pub struct App {
     /// committed `Thought for …` cell. `None` between phases — and always,
     /// when the display is off (`ALTER_ZERO_SHOW_THINKING=0`), because the
     /// boundary then never opens one. See `docs/thinking-stream.md`.
-    reasoning: Option<String>,
+    reasoning: Option<LiveThought>,
     /// Where this round's settled [`HistoryItem::Reasoning`] items landed in
     /// [`history`](Self::history) — the snap targets for the round's usage
     /// frame, which reports the *real* `reasoning_tokens` the cells were built
@@ -398,6 +415,16 @@ pub struct App {
     /// opens this way and re-streams keep the latest content in view, until you
     /// scroll up to read back (and re-engages when you scroll to the bottom).
     pub tool_follow: bool,
+    /// The Ctrl+O pager's moves waiting for the draw, oldest first: every
+    /// ←/→ step between the transcript's entries, and any scroll pressed
+    /// behind one — the draw replays them in order against the transcript
+    /// as built ([`resolve_tool_moves`](Self::resolve_tool_moves),
+    /// `docs/transcript-navigation.md`). Ctrl+D's
+    /// [`debug_moves`](Self::debug_moves), in the pager. A backtrack preview
+    /// keeps ←/→ for its own steps, and both a close and the start of a
+    /// preview drop the moves still waiting — resolved after the preview's
+    /// scroll to its highlight, a step would push the highlight off the page.
+    pub tool_moves: Vec<PagerMove>,
     /// The Ctrl+D context-debug view's vertical scroll offset, in lines from
     /// the top — its own state so flipping between overlays never clobbers the
     /// transcript pager's place. See `docs/context.md`.
@@ -417,12 +444,13 @@ pub struct App {
     /// exactly like [`tool_follow`](Self::tool_follow) — so a page left open
     /// while the agent works keeps the newest actions in sight as they land.
     pub classifier_follow: bool,
-    /// A ←/→ step between the showing Ctrl+D page's entries, waiting for the
-    /// draw to resolve it against the page as built
-    /// ([`resolve_debug_jump`](Self::resolve_debug_jump), `docs/context.md`).
-    /// Tab and a close drop it, so a step never lands on a page it was not
-    /// pressed on.
-    pub debug_jump: Option<EntryJump>,
+    /// The showing Ctrl+D page's moves waiting for the draw, oldest first:
+    /// every ←/→ step between its entries, and any scroll pressed behind one
+    /// — the draw replays them in order against the page as built
+    /// ([`resolve_debug_moves`](Self::resolve_debug_moves),
+    /// `docs/context.md`). Tab and a close drop them, so a move never lands
+    /// on a page it was not pressed on.
+    pub debug_moves: Vec<PagerMove>,
     /// The auto mode classifier's **rendered task context** — the block the
     /// next verdict will read, injected per draw at the boundary from the
     /// live backend log (`ReplySource::classifier_context`), the
@@ -554,6 +582,14 @@ pub struct App {
     /// (page walk, no search) over the boundary-injected server snapshot.
     /// See `docs/mcp.md`.
     pub mcp_menu: Option<McpMenu>,
+    /// The open `/plugins` page; `None` when closed. Composer-replacing like
+    /// `/mcp`, over the catalog the boundary read as it opened, its
+    /// operations run on a worker. Nothing about plugins is kept once it
+    /// closes. See `docs/plugins.md`.
+    pub plugins_menu: Option<PluginsMenu>,
+    /// The round the newest `/plugins` job was asked under — what an answer
+    /// must carry to be taken (`App::finish_plugin_job`).
+    plugin_rounds: u64,
     /// The open startup review; `None` when closed. The composer-replacing
     /// page that asks about hooks and project MCP servers before they run,
     /// the [`hooks_menu`](Self::hooks_menu)'s sibling (no text entry) over
@@ -568,6 +604,43 @@ pub struct App {
     /// default) — chosen in the `/mascot` picker, seeded at the boundary from
     /// `mascot.json` before the first frame. See `docs/mascot.md`.
     mascot: Mascot,
+    /// The seed of the mascot's idle animation — the boundary's entropy,
+    /// handed over once at bootstrap ([`seed_mascot_motion`]). `None` until
+    /// then, which is every unit test's `App` and a headless run's: a mascot
+    /// nobody seeded never moves. See `docs/mascot-animation.md`.
+    ///
+    /// [`seed_mascot_motion`]: App::seed_mascot_motion
+    mascot_motion: Option<u64>,
+    /// How far into its timeline the mascot's animation is — time since a
+    /// fresh banner reached the screen, injected before every draw
+    /// ([`set_mascot_clock`](App::set_mascot_clock), the
+    /// [`set_pulse`](App::set_pulse) pattern).
+    mascot_clock: Duration,
+    /// The mascot the open `/mascot` picker is previewing and the
+    /// [`mascot_clock`](Self::mascot_clock) reading of the first frame that
+    /// showed it — the epoch of the preview's own timeline, so a mascot
+    /// greets as the highlight lands on it. Kept by
+    /// [`set_mascot_clock`](App::set_mascot_clock) from whichever mascot is
+    /// highlighted; `None` with no picker open. See
+    /// `docs/mascot-animation.md`.
+    mascot_preview: Option<(Mascot, Duration)>,
+    /// What the banner mascot has seen of the user — the run of typing it
+    /// is watching, when someone was last at the keyboard, and when they
+    /// last woke it — kept by
+    /// [`set_mascot_clock`](App::set_mascot_clock) from what each frame
+    /// finds. See `docs/mascot-animation.md`.
+    mascot_company: mascot_motion::Company,
+    /// The composer's draft, its caret and [`keys_taken`](Self::keys_taken)
+    /// as the last frame saw them, hashed: what tells
+    /// [`set_mascot_clock`](App::set_mascot_clock) the user did something.
+    /// `None` until the first frame has looked.
+    mascot_seen: Option<u64>,
+    /// How many key presses and pastes this app has taken
+    /// ([`on_key`](App::on_key), [`on_paste`](App::on_paste)), wrapping —
+    /// a count, never what they were. It is how the banner mascot knows
+    /// someone is at the keyboard when a key changes nothing it could see
+    /// (`docs/mascot-animation.md` *The nap*).
+    keys_taken: u64,
     /// The open inline `/spinner` picker; `None` when closed. The ninth
     /// composer-replacing picker, the [`mascot_picker`](Self::mascot_picker)'s
     /// twin over the spinner-style catalog — a **live** page whose every row
@@ -592,6 +665,14 @@ pub struct App {
     /// sibling (no text entry) over the const donation-address catalog.
     /// See `docs/donate.md`.
     pub donate_picker: Option<DonatePicker>,
+    /// The open `/sponsor` page; `None` when closed. The `/donate` page's
+    /// twin (no text entry) over the const sponsor catalog — the
+    /// developer's sponsor page and contact address. See `docs/sponsor.md`.
+    pub sponsor_page: Option<SponsorPage>,
+    /// The open `/discord` page; `None` when closed. The `/sponsor` page's
+    /// twin (no text entry) over one const row — the invite to the Alter
+    /// Zero Discord server. See `docs/discord.md`.
+    pub discord_page: Option<DiscordPage>,
     /// The open `/export` page; `None` when closed. The `/donate` page's
     /// sibling (no text entry) over the two export targets — the clipboard
     /// or a `conversation-….txt` file in the cwd. See `docs/export.md`.
@@ -665,15 +746,27 @@ pub struct App {
     /// [`begin_stream`]: App::begin_stream
     /// Private: read through [`status`](App::status).
     status: Option<TurnStatus>,
-    /// The [`STATUS_VERBS`] index the next turn's status line opens on — one
-    /// past the last verb a line wore, so the walk never repeats the verb the
-    /// previous summary just named. Advanced by [`begin_stream`] and by every
-    /// verb rotation ([`set_status_times`]); a fixed-verb turn (`!` shell,
-    /// `/compact`) leaves it alone.
+    /// The [`STATUS_VERBS`] index the next turn's status line opens on — the
+    /// session's random first verb until a turn opens ([`first_verb`]), then
+    /// one past the last verb a line wore, so the walk never repeats the verb
+    /// the previous summary just named. Advanced by [`begin_stream`] and by
+    /// every verb rotation ([`set_status_times`]); a fixed-verb turn (`!`
+    /// shell, `/compact`) leaves it alone.
+    ///
+    /// [`first_verb`]: App::first_status_verb
     ///
     /// [`begin_stream`]: App::begin_stream
     /// [`set_status_times`]: App::set_status_times
     verb_cursor: usize,
+    /// The [`STATUS_VERBS`] index this session's walk opens on — the
+    /// boundary's random pick ([`seed_status_verbs`]), `0` until it is made
+    /// (every unit test). A session's first turn, every agent's first turn
+    /// and the `/spinner` preview all open on it, so none of them always
+    /// reads the table's first word (`docs/status-indicator.md` *The verb
+    /// catalog*).
+    ///
+    /// [`seed_status_verbs`]: App::seed_status_verbs
+    first_verb: usize,
     /// The spinner tip walk's position — the [`crate::tips::TIPS`] index the
     /// next tip shown opens on — or `None` while the boundary has not seeded
     /// one ([`seed_tips`](App::seed_tips), from `tips.json`), which is the

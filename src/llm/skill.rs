@@ -14,7 +14,7 @@ use super::tools::{ToolCallRequest, ToolOutcome};
 use super::{ChatMessage, MessageContent};
 use crate::skills::{
     SKILL_FILE_NAME, SKILL_LOADED_DISPLAY, SkillError, SkillMetadata, SkillRegistry, parse_skill,
-    render_skill_body,
+    render_skill,
 };
 
 /// The built-in skills the binary carries, as `<name>/SKILL.md` → its bytes.
@@ -22,15 +22,19 @@ use crate::skills::{
 /// `skill-creator` teaches this runtime's own skill format; `jina-reader`
 /// teaches public webpage and PDF retrieval; `web-search` searches the web
 /// with its own scripts; `yt-dlp` teaches media downloads and `flaredantic`
-/// teaches public localhost sharing through external CLIs (`docs/skills.md`).
+/// teaches public localhost sharing through external CLIs (`docs/skills.md`);
+/// `imagegen`, OpenAI Codex's system skill, makes images with the `imagegen`
+/// tool and is listed only while that tool is offered (`docs/imagegen.md`).
 /// A skill is a *directory*, so extra files
 /// are seeded too.
 ///
-/// [`seed_builtin_skills`] writes exactly these, so what a session discovers
+/// [`sync_builtin_skills`] writes exactly these, so what a session discovers
 /// on a fresh install is what is authored in `prompts/skills/` — beside every
 /// other `include_str!`'d markdown this crate embeds, and editable on disk
-/// once it is there.
-const BUILTIN_SKILL_FILES: [(&str, &str); 12] = [
+/// once it is there. Every version of each is listed in
+/// `prompts/shipped.sha256`, which is how a later release knows an unedited
+/// copy from an edit (`docs/builtin-updates.md`).
+const BUILTIN_SKILL_FILES: [(&str, &str); 20] = [
     (
         "flaredantic/SKILL.md",
         include_str!("../../prompts/skills/flaredantic/SKILL.md"),
@@ -38,6 +42,42 @@ const BUILTIN_SKILL_FILES: [(&str, &str); 12] = [
     (
         "flaredantic/reference.md",
         include_str!("../../prompts/skills/flaredantic/reference.md"),
+    ),
+    (
+        "imagegen/SKILL.md",
+        include_str!("../../prompts/skills/imagegen/SKILL.md"),
+    ),
+    // Codex's licence for the skill (Apache-2.0, like this repository): its
+    // scripts are Codex's own, and its prose adapted from Codex's.
+    (
+        "imagegen/LICENSE.txt",
+        include_str!("../../prompts/skills/imagegen/LICENSE.txt"),
+    ),
+    // The references its body points at, read on demand.
+    (
+        "imagegen/references/cli.md",
+        include_str!("../../prompts/skills/imagegen/references/cli.md"),
+    ),
+    (
+        "imagegen/references/image-api.md",
+        include_str!("../../prompts/skills/imagegen/references/image-api.md"),
+    ),
+    (
+        "imagegen/references/prompting.md",
+        include_str!("../../prompts/skills/imagegen/references/prompting.md"),
+    ),
+    (
+        "imagegen/references/sample-prompts.md",
+        include_str!("../../prompts/skills/imagegen/references/sample-prompts.md"),
+    ),
+    // The fallback CLI, run through `python3` like web-search's scripts.
+    (
+        "imagegen/scripts/image_gen.py",
+        include_str!("../../prompts/skills/imagegen/scripts/image_gen.py"),
+    ),
+    (
+        "imagegen/scripts/remove_chroma_key.py",
+        include_str!("../../prompts/skills/imagegen/scripts/remove_chroma_key.py"),
     ),
     (
         "jina-reader/SKILL.md",
@@ -96,18 +136,26 @@ const BUILTIN_SKILL_FILES: [(&str, &str); 12] = [
 /// shape that gives a test run a hermetic set, since a merely-prepended root
 /// would still leave the developer's own `~/.claude/skills` in every session.
 ///
-/// `project_root` (the nearest `.git`, from
-/// [`crate::project_doc::find_project_root`]) is searched **after** the cwd
-/// and skipped when it *is* the cwd: launching in `repo/src` must still find
-/// the repo's own skills — the same walk-up `AGENTS.md` discovery does — while
-/// the more specific directory keeps precedence over the more general one.
+/// The project rows are **every directory from the cwd up to `project_root`**
+/// (the nearest `.git`, from [`crate::project_doc::find_project_root`]),
+/// nearest first — the directories `AGENTS.md` discovery reads
+/// ([`crate::project_doc::doc_chain`]), and the ones Codex reads
+/// `.agents/skills` from. Launching in `repo/packages/web/src` must still find
+/// the package's skills and the repo's, while the more specific directory
+/// keeps precedence over the more general one. Without a project root the cwd
+/// alone is read.
 ///
 /// The personal `.alter-zero/skills` hangs off `config_home` rather than
 /// `$HOME` directly, so it follows `ALTER_ZERO_CONFIG_DIR` like `hooks.json`,
-/// `permissions.json` and `settings.json` do. The `.claude/skills` rows are
+/// `permissions.json` and `settings.json` do. The `.agents/skills` rows are
+/// the directory every agent shares, so they sit after our own and ahead of
+/// Claude Code's (`docs/agents-dir.md`). The `.claude/skills` rows are
 /// deliberate: a skill is portable markdown with no tool-specific behaviour in
 /// it, the ecosystem writes them there, and reading the directory costs one
 /// `read_dir` that usually returns `NotFound`. See `docs/skills.md`.
+///
+/// A path is listed once, where it first appears: launched in `~`, the cwd's
+/// rows *are* the personal ones.
 #[must_use]
 pub fn skill_roots(
     cwd: &Path,
@@ -119,28 +167,34 @@ pub fn skill_roots(
     if let Some(dir) = override_dir {
         return vec![dir.to_path_buf()];
     }
-    let mut roots = project_dirs(cwd);
-    if let Some(root) = project_root.filter(|root| *root != cwd) {
-        roots.extend(project_dirs(root));
-    }
+    let mut roots: Vec<PathBuf> = crate::project_doc::doc_chain(project_root, cwd)
+        .iter()
+        .rev()
+        .flat_map(|dir| project_dirs(dir))
+        .collect();
     if let Some(config_home) = config_home {
         roots.push(config_home.join("skills"));
     }
     if let Some(home) = home {
+        roots.push(home.join(".agents").join("skills"));
         roots.push(home.join(".claude").join("skills"));
     }
+    let mut seen = BTreeSet::new();
+    roots.retain(|root| seen.insert(root.clone()));
     roots
 }
 
-/// The two per-directory skill roots, in precedence order.
-fn project_dirs(dir: &Path) -> Vec<PathBuf> {
-    vec![
+/// The three per-directory skill roots, in precedence order: our own, the
+/// one every agent shares, Claude Code's.
+fn project_dirs(dir: &Path) -> [PathBuf; 3] {
+    [
         dir.join(".alter-zero").join("skills"),
+        dir.join(".agents").join("skills"),
         dir.join(".claude").join("skills"),
     ]
 }
 
-/// The root [`seed_builtin_skills`] writes into: `{config_home}/skills`, the
+/// The root [`sync_builtin_skills`] writes into: `{config_home}/skills`, the
 /// personal root the walk reads at row 5 — and **`None`** whenever
 /// `ALTER_ZERO_SKILLS_DIR` replaced the root list.
 ///
@@ -171,42 +225,55 @@ pub fn resolved_builtin_skills_dir(config_home: Option<&Path>) -> Option<PathBuf
     builtin_skills_dir(config_home, override_dir().as_deref())
 }
 
-/// Write the built-in skills into `root`, **skipping any whose `SKILL.md` is
-/// already there** — so a fresh install finds them on disk and can edit them,
-/// a later launch never discards those edits, and a deleted one comes back.
+/// Bring the built-in skills in `root` to this release's — writing what is
+/// missing, replacing an unedited copy an older release wrote, and keeping a
+/// copy the user edited, with this release's version beside it as
+/// `<file>.new` when the release changed that file (`docs/builtin-updates.md`).
 ///
-/// The agent definitions' rule, for the same reason (`docs/subagents.md` —
-/// a seed that overwrote would silently replace the user's own copy on every
-/// restart). Turning a built-in skill *off* is `/skills`, which persists;
-/// deleting the folder only lasts until the next launch.
+/// So a fresh install finds them on disk and can edit them, an edit is never
+/// discarded, a deleted file comes back, and a release that improves one
+/// reaches every install that left it alone. Turning a built-in skill *off*
+/// is `/skills`, which persists; deleting the folder only lasts until the
+/// next launch.
 ///
-/// Failures are collected, never thrown: a read-only config home costs the
-/// built-in skill, not the session.
-pub fn seed_builtin_skills(root: &Path) -> Vec<SkillError> {
-    let mut errors = Vec::new();
-    for (relative, contents) in BUILTIN_SKILL_FILES {
-        let path = root.join(relative);
-        if path.exists() {
-            continue;
-        }
-        let Some(dir) = path.parent() else {
-            continue;
-        };
-        if let Err(err) = std::fs::create_dir_all(dir) {
-            errors.push(SkillError {
-                path: dir.to_path_buf(),
-                message: err.to_string(),
-            });
-            continue;
-        }
-        if let Err(err) = std::fs::write(&path, contents) {
-            errors.push(SkillError {
-                path,
-                message: err.to_string(),
-            });
-        }
+/// `offer` is off in a headless run: the offer beside an edit is made once,
+/// so it waits for a launch with a screen to show it on.
+///
+/// Failures are in the report, never thrown: a read-only config home costs
+/// the built-in skill, not the session.
+#[must_use]
+pub fn sync_builtin_skills(root: &Path, offer: bool) -> crate::builtins::SyncReport {
+    crate::builtins::sync(
+        root,
+        crate::builtins::BuiltinKind::Skills,
+        &BUILTIN_SKILL_FILES,
+        crate::builtins::Reach::Follow { offer },
+    )
+}
+
+/// The built-in skill that is only for a session offering the `imagegen`
+/// tool (`docs/imagegen.md`): its whole default path is that tool.
+pub const IMAGEGEN_SKILL: &str = "imagegen";
+
+/// The seeded skill folders discovery passes over: the `imagegen` built-in
+/// under `builtin_root` while the tool is not offered. Recognised by
+/// **where** it is — the folder the built-in sync writes — so a project's,
+/// a `~/.claude/skills` or a plugin's skill of the same name is never
+/// withheld, and an `ALTER_ZERO_SKILLS_DIR` override, which seeds no
+/// built-ins (`builtin_root` is `None`), has nothing to withhold.
+///
+/// It is always seeded, signed in or not: a sync that left it out would
+/// retire it as no longer shipped, and seed it again on the next sign-in
+/// (`docs/builtin-updates.md`).
+#[must_use]
+pub fn withheld_builtin_skills(
+    builtin_root: Option<&Path>,
+    imagegen_offered: bool,
+) -> Vec<PathBuf> {
+    match builtin_root {
+        Some(root) if !imagegen_offered => vec![root.join(IMAGEGEN_SKILL)],
+        _ => Vec::new(),
     }
-    errors
 }
 
 /// Walk `roots` for `<root>/<name>/SKILL.md`, parsing each one's frontmatter.
@@ -216,6 +283,17 @@ pub fn seed_builtin_skills(root: &Path) -> Vec<SkillError> {
 /// — going quiet is what makes "my skill isn't being used" unanswerable.
 #[must_use]
 pub fn discover_skills(roots: &[PathBuf]) -> (Vec<SkillMetadata>, Vec<SkillError>) {
+    discover_skills_except(roots, &[])
+}
+
+/// [`discover_skills`], passing over the skill folders in `withheld`
+/// ([`withheld_builtin_skills`]) as though they were not there — so a
+/// lower root's skill of the same name can still be found.
+#[must_use]
+pub fn discover_skills_except(
+    roots: &[PathBuf],
+    withheld: &[PathBuf],
+) -> (Vec<SkillMetadata>, Vec<SkillError>) {
     let mut skills: Vec<SkillMetadata> = Vec::new();
     let mut errors = Vec::new();
     for root in roots {
@@ -231,6 +309,9 @@ pub fn discover_skills(roots: &[PathBuf]) -> (Vec<SkillMetadata>, Vec<SkillError
             .collect();
         dirs.sort();
         for dir in dirs {
+            if withheld.contains(&dir) {
+                continue;
+            }
             let path = dir.join(SKILL_FILE_NAME);
             if !path.is_file() {
                 continue;
@@ -262,6 +343,7 @@ pub fn discover_skills(roots: &[PathBuf]) -> (Vec<SkillMetadata>, Vec<SkillError
                         description: parsed.description,
                         dir,
                         path,
+                        plugin: None,
                     });
                 }
                 Err(err) => errors.push(SkillError {
@@ -279,12 +361,21 @@ pub fn discover_skills(roots: &[PathBuf]) -> (Vec<SkillMetadata>, Vec<SkillError
 /// config home's, and `$HOME`'s. `config_home` is passed in rather than read
 /// here so the override that moves it (`ALTER_ZERO_CONFIG_DIR`) resolves once,
 /// at the boundary, the way `llm::hooks::hooks_file_path` takes it.
+///
+/// `imagegen_offered` is whether the session offers the `imagegen` tool: the
+/// seeded `imagegen` skill is withheld while it does not
+/// ([`withheld_builtin_skills`], `docs/imagegen.md`).
 #[must_use]
 pub fn load_skills(
     cwd: &Path,
     config_home: Option<&Path>,
+    imagegen_offered: bool,
 ) -> (Vec<SkillMetadata>, Vec<SkillError>) {
-    discover_skills(&resolved_skill_roots(cwd, config_home))
+    let withheld = withheld_builtin_skills(
+        resolved_builtin_skills_dir(config_home).as_deref(),
+        imagegen_offered,
+    );
+    discover_skills_except(&resolved_skill_roots(cwd, config_home), &withheld)
 }
 
 /// The roots this environment resolves to — [`skill_roots`] with the two
@@ -334,7 +425,10 @@ struct SkillArgs {
 /// have independent contexts, and compaction or a rewind can remove a body.
 #[derive(Debug, Default)]
 pub struct LoadedSkills {
-    directories: BTreeSet<PathBuf>,
+    /// The file each loaded body was read from — a `SKILL.md`, or a plugin
+    /// command's own markdown. The file rather than its directory, since a
+    /// plugin's commands share one (`docs/plugins.md`).
+    files: BTreeSet<PathBuf>,
 }
 
 impl LoadedSkills {
@@ -352,9 +446,9 @@ impl LoadedSkills {
             .snapshot()
             .into_iter()
             .map(|skill| {
-                let header = render_skill_body(&skill.dir, "");
+                let header = render_skill(&skill, "");
                 let redacted = secrets.map(|secrets| secrets.redact(&header));
-                (skill.dir, header, redacted)
+                (skill.path, header, redacted)
             })
             .collect();
         let mut loaded = Self::default();
@@ -374,7 +468,7 @@ impl LoadedSkills {
                 && pending.remove(id)
                 && let MessageContent::Text(text) = &message.content
             {
-                for (dir, header, redacted) in &headers {
+                for (file, header, redacted) in &headers {
                     // The executor masks results before recording them. Keep
                     // the raw form too, for loads predating a secret's addition.
                     if text.starts_with(header)
@@ -382,7 +476,7 @@ impl LoadedSkills {
                             .as_ref()
                             .is_some_and(|header| text.starts_with(header))
                     {
-                        loaded.directories.insert(dir.clone());
+                        loaded.files.insert(file.clone());
                     }
                 }
             }
@@ -415,7 +509,7 @@ pub fn run_skill_tool(
     let Some(skill) = registry.find(&args.skill) else {
         return ToolOutcome::error(unknown_skill_message(&args.skill, &registry.names()));
     };
-    if loaded.directories.contains(&skill.dir) {
+    if loaded.files.contains(&skill.path) {
         return ToolOutcome::ok(format!(
             "Skill {} is already loaded. Follow its instructions; do not load it again.",
             skill.name
@@ -432,14 +526,24 @@ pub fn run_skill_tool(
     };
     // Read fresh on the first load into this context. A failed read or parse
     // must remain retryable; only a successfully rendered body marks a load.
-    let body = match parse_skill(&contents, &skill.name) {
-        Ok(parsed) => parsed.body,
-        Err(err) => {
-            return ToolOutcome::error(format!("Skill {} could not be loaded: {err}", skill.name));
+    let body = if skill.plugin.is_some() {
+        // A plugin's skill was validated by its own, looser rules when it
+        // was discovered (a command file may carry no frontmatter at all),
+        // so only its body is taken here (`docs/plugins.md`).
+        crate::plugins::skill_body(&contents)
+    } else {
+        match parse_skill(&contents, &skill.name) {
+            Ok(parsed) => parsed.body,
+            Err(err) => {
+                return ToolOutcome::error(format!(
+                    "Skill {} could not be loaded: {err}",
+                    skill.name
+                ));
+            }
         }
     };
-    let rendered = render_skill_body(&skill.dir, &body);
-    loaded.directories.insert(skill.dir);
+    let rendered = render_skill(&skill, &body);
+    loaded.files.insert(skill.path);
     ToolOutcome::ok(SKILL_LOADED_DISPLAY).with_context(rendered)
 }
 
@@ -457,6 +561,7 @@ fn unknown_skill_message(wanted: &str, available: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::render_skill_body;
 
     fn write_skill(root: &Path, name: &str, contents: &str) {
         let dir = root.join(name);
@@ -481,6 +586,9 @@ mod tests {
         // The personal `.alter-zero/skills` hangs off the **config home**, not
         // raw $HOME, so it follows ALTER_ZERO_CONFIG_DIR like every other
         // per-user file here (hooks.json, permissions.json, settings.json).
+        // Each place reads `.agents/skills` between our own directory and
+        // Claude Code's: the directory every agent shares outranks another
+        // product's own (docs/agents-dir.md).
         let roots = skill_roots(
             Path::new("/work"),
             None,
@@ -492,8 +600,10 @@ mod tests {
             roots,
             vec![
                 PathBuf::from("/work/.alter-zero/skills"),
+                PathBuf::from("/work/.agents/skills"),
                 PathBuf::from("/work/.claude/skills"),
                 PathBuf::from("/cfg/.alter-zero/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
                 PathBuf::from("/home/u/.claude/skills"),
             ]
         );
@@ -518,7 +628,7 @@ mod tests {
     #[test]
     fn a_homeless_environment_still_has_project_roots() {
         let roots = skill_roots(Path::new("/work"), None, None, None, None);
-        assert_eq!(roots.len(), 2, "{roots:?}");
+        assert_eq!(roots.len(), 3, "{roots:?}");
     }
 
     #[test]
@@ -539,17 +649,48 @@ mod tests {
             roots,
             vec![
                 PathBuf::from("/work/repo/src/.alter-zero/skills"),
+                PathBuf::from("/work/repo/src/.agents/skills"),
                 PathBuf::from("/work/repo/src/.claude/skills"),
                 PathBuf::from("/work/repo/.alter-zero/skills"),
+                PathBuf::from("/work/repo/.agents/skills"),
                 PathBuf::from("/work/repo/.claude/skills"),
             ]
         );
     }
 
     #[test]
+    fn every_directory_up_to_the_project_root_is_searched_nearest_first() {
+        // Codex reads `<dir>/.agents/skills` for every directory from the
+        // project root down to the cwd — the `AGENTS.md` walk — so a monorepo
+        // package's skills are found from anywhere inside the package, and
+        // the nearer directory still shadows the farther one.
+        let roots = skill_roots(
+            Path::new("/work/repo/packages/web/src"),
+            Some(Path::new("/work/repo")),
+            None,
+            None,
+            None,
+        );
+        let dirs = [
+            "/work/repo/packages/web/src",
+            "/work/repo/packages/web",
+            "/work/repo/packages",
+            "/work/repo",
+        ];
+        let expected: Vec<PathBuf> = dirs
+            .iter()
+            .flat_map(|dir| {
+                [".alter-zero", ".agents", ".claude"]
+                    .map(|name| Path::new(dir).join(name).join("skills"))
+            })
+            .collect();
+        assert_eq!(roots, expected);
+    }
+
+    #[test]
     fn a_project_root_that_is_the_cwd_adds_no_second_pass() {
-        // The common case — launched at the repo root — must read the same
-        // two directories it always did, not each of them twice.
+        // The common case — launched at the repo root — must read each of
+        // the directory's roots once, not twice.
         let roots = skill_roots(
             Path::new("/work"),
             Some(Path::new("/work")),
@@ -561,7 +702,88 @@ mod tests {
             roots,
             vec![
                 PathBuf::from("/work/.alter-zero/skills"),
+                PathBuf::from("/work/.agents/skills"),
                 PathBuf::from("/work/.claude/skills"),
+            ]
+        );
+    }
+
+    #[test]
+    fn launched_in_the_home_directory_each_directory_is_named_once() {
+        // In `~` the cwd's three roots *are* the personal three. Discovery
+        // was never affected (a name is only claimed once), but the `/skills`
+        // menu named every directory twice. The first occurrence is kept,
+        // Codex's `dedupe_skill_roots_by_path`.
+        let roots = skill_roots(
+            Path::new("/home/u"),
+            None,
+            Some(Path::new("/home/u/.alter-zero")),
+            Some(Path::new("/home/u")),
+            None,
+        );
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/home/u/.alter-zero/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
+                PathBuf::from("/home/u/.claude/skills"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nearer_directory_wins_a_name_whatever_its_directory_is_called() {
+        // Launched in `repo/pkg/src`: the package's `.agents/skills` shadows
+        // the repo's `.alter-zero/skills` (nearer wins first), the repo's
+        // `.agents/skills` shadows its `.claude/skills` (then the directory
+        // order), and a `.agents/skills` *above* the repository is no part of
+        // the project at all — Codex's
+        // `repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("pkg").join("src");
+        std::fs::create_dir_all(&cwd).expect("mkdir");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+        let skills = |dir: &Path, name: &str| dir.join(name).join("skills");
+        write_skill(
+            &skills(&repo.join("pkg"), ".agents"),
+            "lint",
+            &skill_md("The package's lint.", "P"),
+        );
+        write_skill(
+            &skills(&repo, ".alter-zero"),
+            "lint",
+            &skill_md("The repo's lint.", "R"),
+        );
+        write_skill(
+            &skills(&repo, ".agents"),
+            "review",
+            &skill_md("The shared review.", "S"),
+        );
+        write_skill(
+            &skills(&repo, ".claude"),
+            "review",
+            &skill_md("Claude Code's review.", "C"),
+        );
+        write_skill(
+            &skills(tmp.path(), ".agents"),
+            "outer",
+            &skill_md("Outside the repository.", "O"),
+        );
+
+        let project_root = crate::project_doc::find_project_root(&cwd);
+        let roots = skill_roots(&cwd, project_root.as_deref(), None, None, None);
+        let (found, errors) = discover_skills(&roots);
+        assert!(errors.is_empty(), "{errors:?}");
+        let described: Vec<(&str, &str)> = found
+            .iter()
+            .map(|skill| (skill.name.as_str(), skill.description.as_str()))
+            .collect();
+        assert_eq!(
+            described,
+            [
+                ("lint", "The package's lint."),
+                ("review", "The shared review.")
             ]
         );
     }
@@ -1074,7 +1296,7 @@ mod tests {
     fn seeded_flaredantic_is_listed_and_loads_on_demand() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(std::slice::from_ref(&root));
         assert!(errors.is_empty(), "{errors:?}");
         let registry = SkillRegistry::new(skills);
@@ -1112,7 +1334,7 @@ mod tests {
     fn flaredantic_seed_preserves_edits_and_restores_each_deleted_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let dir = root.join("flaredantic");
         let skill = dir.join(SKILL_FILE_NAME);
         let reference = dir.join("reference.md");
@@ -1125,7 +1347,7 @@ mod tests {
             &skill_md("Mine.", "custom tunnel workflow"),
         );
         std::fs::write(&reference, "custom reference").expect("edit reference");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         assert!(
             std::fs::read_to_string(&skill)
                 .expect("read")
@@ -1136,7 +1358,7 @@ mod tests {
             "custom reference"
         );
         std::fs::remove_file(&reference).expect("delete reference");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         assert_eq!(
             std::fs::read_to_string(&reference).expect("restored"),
             original_reference
@@ -1147,7 +1369,7 @@ mod tests {
                 .contains("custom tunnel workflow")
         );
         std::fs::remove_file(&skill).expect("delete skill");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         assert_eq!(
             std::fs::read_to_string(&skill).expect("restored"),
             original_skill
@@ -1158,7 +1380,7 @@ mod tests {
     fn seeded_jina_reader_is_listed_and_loads_on_demand() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(std::slice::from_ref(&root));
         assert!(errors.is_empty(), "{errors:?}");
         let registry = SkillRegistry::new(skills);
@@ -1188,7 +1410,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
         write_skill(&root, "jina-reader", &skill_md("Mine.", "custom reader"));
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let path = root.join("jina-reader").join(SKILL_FILE_NAME);
         assert!(
             std::fs::read_to_string(&path)
@@ -1196,7 +1418,7 @@ mod tests {
                 .contains("custom reader")
         );
         std::fs::remove_file(&path).expect("delete");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(&[root]);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(skills.iter().any(|skill| skill.name == "jina-reader"));
@@ -1206,7 +1428,7 @@ mod tests {
     fn seeded_yt_dlp_is_listed_and_loads_on_demand() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(std::slice::from_ref(&root));
         assert!(errors.is_empty(), "{errors:?}");
         let registry = SkillRegistry::new(skills);
@@ -1234,7 +1456,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
         write_skill(&root, "yt-dlp", &skill_md("Mine.", "custom media workflow"));
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let path = root.join("yt-dlp").join(SKILL_FILE_NAME);
         assert!(
             std::fs::read_to_string(&path)
@@ -1242,7 +1464,7 @@ mod tests {
                 .contains("custom media workflow")
         );
         std::fs::remove_file(&path).expect("delete");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(&[root]);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(skills.iter().any(|skill| skill.name == "yt-dlp"));
@@ -1277,7 +1499,7 @@ mod tests {
     fn seeded_web_search_is_listed_and_loads_on_demand() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let (skills, errors) = discover_skills(std::slice::from_ref(&root));
         assert!(errors.is_empty(), "{errors:?}");
         let registry = SkillRegistry::new(skills);
@@ -1322,7 +1544,7 @@ mod tests {
         // one would ship a skill whose commands fail.
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let dir = root.join("web-search");
         for (script, embedded) in WEB_SEARCH_SCRIPTS {
             let seeded = std::fs::read_to_string(dir.join(script))
@@ -1340,6 +1562,123 @@ mod tests {
         assert!(names.iter().all(|name| !name.starts_with("test_")));
     }
 
+    /// The files the `imagegen` skill seeds beside its `SKILL.md`
+    /// (`docs/imagegen.md`): Codex's references, adapted, and its two
+    /// scripts and licence, as they are.
+    const IMAGEGEN_FILES: [(&str, &str); 7] = [
+        (
+            "LICENSE.txt",
+            include_str!("../../prompts/skills/imagegen/LICENSE.txt"),
+        ),
+        (
+            "references/cli.md",
+            include_str!("../../prompts/skills/imagegen/references/cli.md"),
+        ),
+        (
+            "references/image-api.md",
+            include_str!("../../prompts/skills/imagegen/references/image-api.md"),
+        ),
+        (
+            "references/prompting.md",
+            include_str!("../../prompts/skills/imagegen/references/prompting.md"),
+        ),
+        (
+            "references/sample-prompts.md",
+            include_str!("../../prompts/skills/imagegen/references/sample-prompts.md"),
+        ),
+        (
+            "scripts/image_gen.py",
+            include_str!("../../prompts/skills/imagegen/scripts/image_gen.py"),
+        ),
+        (
+            "scripts/remove_chroma_key.py",
+            include_str!("../../prompts/skills/imagegen/scripts/remove_chroma_key.py"),
+        ),
+    ];
+
+    #[test]
+    fn imagegen_seeds_its_references_scripts_and_licence_beside_the_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("skills");
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
+        let dir = root.join("imagegen");
+        for (file, embedded) in IMAGEGEN_FILES {
+            let seeded = std::fs::read_to_string(dir.join(file))
+                .unwrap_or_else(|err| panic!("{file} is seeded: {err}"));
+            assert_eq!(seeded, embedded, "{file} is seeded byte for byte");
+        }
+        // Codex's UI metadata and icons are not ported (docs/imagegen.md).
+        assert!(!dir.join("agents").exists());
+        assert!(!dir.join("assets").exists());
+    }
+
+    #[test]
+    fn imagegen_names_this_apps_tool_and_never_codexs_paths() {
+        let body = include_str!("../../prompts/skills/imagegen/SKILL.md");
+        assert!(body.contains("`imagegen`"), "the tool it drives");
+        assert!(
+            body.contains("`referenced_image_paths`"),
+            "how an edit names its images"
+        );
+        for (file, text) in std::iter::once(("SKILL.md", body)).chain(IMAGEGEN_FILES) {
+            if !file.ends_with(".md") {
+                continue;
+            }
+            for codex in ["CODEX_HOME", "view_image", "skills/.system", "`image_gen`"] {
+                assert!(!text.contains(codex), "{file} still says {codex}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_seeded_imagegen_is_withheld_while_its_tool_is_not_offered() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("skills");
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
+        let names = |offered: bool| -> Vec<String> {
+            let withheld = withheld_builtin_skills(Some(&root), offered);
+            discover_skills_except(std::slice::from_ref(&root), &withheld)
+                .0
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect()
+        };
+        let signed_out = names(false);
+        assert!(
+            !signed_out.contains(&"imagegen".to_string()),
+            "{signed_out:?}"
+        );
+        assert!(
+            signed_out.contains(&"web-search".to_string()),
+            "{signed_out:?}"
+        );
+        assert!(names(true).contains(&"imagegen".to_string()));
+    }
+
+    #[test]
+    fn a_skill_named_imagegen_anywhere_else_is_never_withheld() {
+        // The gate is *our* seeded folder, found by where it is: a project's
+        // skill of the same name is the user's own (docs/imagegen.md).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project-skills");
+        let builtin = tmp.path().join("home-skills");
+        write_skill(&project, "imagegen", &skill_md("the user's own", "body"));
+        write_skill(&builtin, "commit", &skill_md("commit", "body"));
+        let withheld = withheld_builtin_skills(Some(&builtin), false);
+        let (skills, _) = discover_skills_except(&[project.clone(), builtin], &withheld);
+        let found: Vec<(String, PathBuf)> = skills
+            .into_iter()
+            .map(|skill| (skill.name, skill.dir))
+            .collect();
+        assert!(
+            found.contains(&("imagegen".to_string(), project.join("imagegen"))),
+            "{found:?}"
+        );
+        // No built-in root (an `ALTER_ZERO_SKILLS_DIR` override seeds none):
+        // nothing to withhold.
+        assert!(withheld_builtin_skills(None, false).is_empty());
+    }
+
     #[test]
     fn web_search_seed_preserves_edits_and_restores_deleted_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1352,7 +1691,7 @@ mod tests {
         std::fs::create_dir_all(script.parent().expect("parent")).expect("mkdir");
         std::fs::write(&script, "print('my own search')\n").expect("write");
 
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         let path = root.join("web-search").join(SKILL_FILE_NAME);
         assert!(
             std::fs::read_to_string(&path)
@@ -1366,7 +1705,7 @@ mod tests {
         );
 
         std::fs::remove_file(&script).expect("delete");
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
         assert!(script.is_file(), "a deleted script comes back");
         let (skills, errors) = discover_skills(&[root]);
         assert!(errors.is_empty(), "{errors:?}");
@@ -1528,7 +1867,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("skills");
 
-        assert!(seed_builtin_skills(&root).is_empty(), "seeding succeeds");
+        assert!(
+            sync_builtin_skills(&root, true).errors.is_empty(),
+            "seeding succeeds"
+        );
 
         let (skills, errors) = discover_skills(std::slice::from_ref(&root));
         assert!(errors.is_empty(), "{errors:?}");
@@ -1548,6 +1890,54 @@ mod tests {
     }
 
     #[test]
+    fn every_built_in_file_is_in_the_shipped_history() {
+        // An install an older release made is recognised — and so updated —
+        // only while the version it holds is listed, so a change to a
+        // built-in records its new version before it can ship
+        // (docs/builtin-updates.md).
+        // Every unrecorded file in one failure, so a change to several (a
+        // skill's prompt and its scripts) is one command to record.
+        let history = crate::builtins::ShippedHistory::embedded();
+        let unrecorded: Vec<String> = BUILTIN_SKILL_FILES
+            .iter()
+            .map(|(relative, contents)| {
+                let key = crate::builtins::BuiltinKind::Skills.history_key(relative);
+                (key, crate::builtins::sha256_hex(contents.as_bytes()))
+            })
+            .filter(|(key, hash)| !history.knows(key, hash))
+            .map(|(key, _)| key)
+            .collect();
+        assert!(
+            unrecorded.is_empty(),
+            "built-in files changed; record their new versions with\n\n    sha256sum {} >> prompts/shipped.sha256\n",
+            unrecorded.join(" ")
+        );
+    }
+
+    #[test]
+    fn syncing_records_the_version_each_built_in_file_is_based_on() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("skills");
+        let report = sync_builtin_skills(&root, true);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let record = crate::builtins::Manifest::parse(
+            &std::fs::read_to_string(root.join(crate::builtins::MANIFEST_FILE_NAME))
+                .expect("the record"),
+        );
+        for (relative, contents) in BUILTIN_SKILL_FILES {
+            assert_eq!(
+                record.base(relative),
+                Some(crate::builtins::sha256_hex(contents.as_bytes()).as_str()),
+                "{relative}"
+            );
+        }
+        // The walk never mistakes the record for a skill.
+        let (skills, errors) = discover_skills(std::slice::from_ref(&root));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(skills.len(), 6, "{skills:?}");
+    }
+
+    #[test]
     fn seeding_never_clobbers_a_skill_the_user_edited() {
         // A seed that overwrote would silently discard the user's own edits on
         // every restart — the agent definitions' rule (docs/subagents.md).
@@ -1555,7 +1945,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         write_skill(&root, "skill-creator", &skill_md("Mine.", "my own body"));
 
-        assert!(seed_builtin_skills(&root).is_empty());
+        assert!(sync_builtin_skills(&root, true).errors.is_empty());
 
         let kept = std::fs::read_to_string(root.join("skill-creator").join(SKILL_FILE_NAME))
             .expect("read");

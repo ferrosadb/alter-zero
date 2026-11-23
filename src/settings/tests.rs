@@ -354,6 +354,7 @@ fn an_unavailable_checkpoint_row_shows_its_effective_value_not_the_stored_one() 
             hooks: true,
             skills: true,
             mcp: true,
+            imagegen: true,
             images: true,
             telemetry: true,
             update_check: true,
@@ -378,6 +379,7 @@ fn an_unavailable_setting_says_so_and_refuses_to_cycle() {
             hooks: true,
             skills: true,
             mcp: true,
+            imagegen: true,
             images: true,
             telemetry: true,
             update_check: true,
@@ -507,6 +509,7 @@ fn availability_is_never_persisted() {
             hooks: true,
             skills: true,
             mcp: true,
+            imagegen: true,
             images: true,
             telemetry: true,
             update_check: true,
@@ -534,6 +537,7 @@ fn skills_are_not_offered_with_tools_off() {
             hooks: true,
             skills: true,
             mcp: true,
+            imagegen: true,
             images: true,
             telemetry: true,
             update_check: true,
@@ -923,4 +927,170 @@ fn the_ask_timeout_row_follows_max_tool_calls() {
         .expect("listed");
     assert_eq!(all[at - 1], SettingKey::MaxToolCalls);
     assert_eq!(all[at + 1], SettingKey::Tips);
+}
+
+// ===== the Animate mascot row (docs/mascot-animation.md) =====
+
+#[test]
+fn the_mascot_animates_until_a_directory_turns_it_off() {
+    // The banner mascot blinks and moves while the conversation is empty.
+    // Motion on an idle screen is not for everyone, so it is a row: on until
+    // turned off, needing nothing from the host, and — like every default —
+    // off the wire until it changes.
+    let s = SessionSettings::default();
+    assert!(s.animate_mascot, "on by default");
+    assert_eq!(SettingKey::AnimateMascot.label(), "Animate mascot");
+    assert_eq!(s.value_text(SettingKey::AnimateMascot, MANUAL), "true");
+    assert!(s.is_available(SettingKey::AnimateMascot, MANUAL));
+    assert!(
+        s.is_available(SettingKey::AnimateMascot, None),
+        "with no gate too"
+    );
+    assert_eq!(s.to_json().trim(), "{}");
+    let mut off = s;
+    assert!(off.cycle(SettingKey::AnimateMascot));
+    assert!(!off.animate_mascot);
+    assert_eq!(off.value_text(SettingKey::AnimateMascot, MANUAL), "false");
+    let json = off.to_json();
+    assert!(json.contains("\"animate_mascot\": false"), "{json}");
+    assert_eq!(SessionSettings::parse(&json), off);
+    assert!(off.cycle(SettingKey::AnimateMascot));
+    assert!(off.animate_mascot, "a boolean: back on");
+}
+
+#[test]
+fn the_animate_mascot_row_closes_the_rows_about_what_is_drawn() {
+    // Thinking, tool cells, pictures, then the banner: the rows that decide
+    // what the screen shows read together, ahead of the ones about requests.
+    let at = |key| SettingKey::ALL.iter().position(|k| *k == key).unwrap();
+    assert_eq!(
+        at(SettingKey::AnimateMascot),
+        at(SettingKey::AutoResizeImages) + 1
+    );
+    assert_eq!(
+        at(SettingKey::ErrorRetry),
+        at(SettingKey::AnimateMascot) + 1
+    );
+}
+
+#[test]
+fn the_animate_mascot_description_says_when_it_moves() {
+    // The search matches descriptions, so the row is found by what it does —
+    // and its description stays clear of the words other rows are found by.
+    let description = SettingKey::AnimateMascot.description().to_lowercase();
+    for word in ["banner", "blink", "nap", "empty"] {
+        assert!(description.contains(word), "{word:?} in {description:?}");
+    }
+    for taken in [
+        "image", "retry", "hook", "telem", "update", "tip", "mcp", "tool", "skill",
+    ] {
+        assert!(!description.contains(taken), "{taken:?} in {description:?}");
+    }
+}
+
+#[test]
+fn a_cycled_animate_mascot_row_is_what_the_directory_records() {
+    let mut file = SettingsFile::default();
+    let live = SessionSettings {
+        animate_mascot: false,
+        ..SessionSettings::default()
+    };
+    file.record_value("/a", SettingKey::AnimateMascot, &live);
+    assert!(
+        !file.settings_for("/a").animate_mascot,
+        "the cycled key is saved"
+    );
+    assert!(
+        file.settings_for("/b").animate_mascot,
+        "another directory keeps the default"
+    );
+}
+
+// ===== image generation (docs/imagegen.md) =====
+
+#[test]
+fn image_generation_is_on_until_a_directory_turns_it_off() {
+    // With a ChatGPT sign-in the tool is offered by default; turning it off
+    // is what the directory's entry records.
+    let s = SessionSettings::default();
+    assert!(s.imagegen, "on by default");
+    assert!(s.imagegen_active());
+    assert_eq!(s.value_text(SettingKey::ImageGen, MANUAL), "true");
+    assert_eq!(s.to_json().trim(), "{}", "the default writes nothing");
+    let mut off = s;
+    assert!(off.cycle(SettingKey::ImageGen));
+    assert!(!off.imagegen_active());
+    let json = off.to_json();
+    assert!(json.contains("\"imagegen\": false"), "{json}");
+    assert_eq!(SessionSettings::parse(&json), off);
+}
+
+#[test]
+fn the_image_generation_row_follows_mcp_and_names_the_sign_in() {
+    let at = |key| SettingKey::ALL.iter().position(|k| *k == key).unwrap();
+    assert_eq!(at(SettingKey::ImageGen), at(SettingKey::Mcp) + 1);
+    assert_eq!(SettingKey::ImageGen.label(), "Image generation");
+    let description = SettingKey::ImageGen.description();
+    assert!(description.contains("ChatGPT"), "{description}");
+}
+
+#[test]
+fn image_generation_without_a_chatgpt_sign_in_is_unavailable_and_keeps_its_preference() {
+    // No sign-in: no tool to offer, so the row says so and refuses, and the
+    // stored preference survives for a session that has one.
+    let mut s = SessionSettings::default();
+    s.availability.imagegen = false;
+    assert!(!s.is_available(SettingKey::ImageGen, MANUAL));
+    assert!(!s.imagegen_active());
+    assert_eq!(
+        s.value_text(SettingKey::ImageGen, MANUAL),
+        format!("false{UNAVAILABLE_SUFFIX}")
+    );
+    assert!(!s.cycle(SettingKey::ImageGen));
+    assert!(s.imagegen);
+}
+
+#[test]
+fn only_the_image_generation_row_names_how_to_make_it_available() {
+    let reason = SettingKey::ImageGen.unavailable_reason().expect("a reason");
+    assert!(
+        reason.contains("ChatGPT") && reason.contains("/login"),
+        "{reason}"
+    );
+    for key in SettingKey::ALL {
+        if *key != SettingKey::ImageGen {
+            assert_eq!(key.unavailable_reason(), None, "{key:?}");
+        }
+    }
+}
+
+#[test]
+fn image_generation_rides_the_tools_switch() {
+    // The `skills_offered` rule: the tool rides the tool set, so Tools off
+    // withdraws it without rewriting the row's own value.
+    let s = SessionSettings {
+        tools: false,
+        ..SessionSettings::default()
+    };
+    assert!(s.imagegen_active());
+    assert!(!s.imagegen_offered());
+    assert!(SessionSettings::default().imagegen_offered());
+}
+
+#[test]
+fn a_cycled_image_generation_row_is_what_the_directory_records() {
+    let live = SessionSettings {
+        imagegen: false,
+        error_retry: 10,
+        ..SessionSettings::default()
+    };
+    let mut file = SettingsFile::default();
+    file.record_value("/a", SettingKey::ErrorRetry, &live);
+    assert!(
+        file.settings_for("/a").imagegen,
+        "a run's override never sticks"
+    );
+    file.record_value("/a", SettingKey::ImageGen, &live);
+    assert!(!file.settings_for("/a").imagegen, "the cycled key is saved");
+    assert!(file.settings_for("/b").imagegen);
 }

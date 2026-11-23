@@ -25,9 +25,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, BackgroundShell, BackgroundView, DeviceLogin, DeviceStatus, HistoryItem, HistorySearch,
-    KeyOnboarding, KeyStep, LiveTail, ModelLoad, ModelPicker, PathDisplay, QueuedTurn,
-    ResumeControl, ResumeFilter, ResumePicker, ResumeSort, Role, SearchState, SigninKind,
-    SlashCommand, ToastKind, TokenArrow, ToolCall, ToolStatus, TurnStatus, TurnSummary,
+    KeyOnboarding, KeyStep, LiveTail, ModelLoad, ModelPicker, PathDisplay, ProviderList,
+    QueuedTurn, ResumeControl, ResumeFilter, ResumePicker, ResumeSort, Role, SearchState,
+    SigninKind, SlashCommand, ToastKind, TokenArrow, ToolCall, ToolStatus, TurnStatus, TurnSummary,
     command_query, matching_commands,
 };
 use crate::file_search::FileMatch;
@@ -47,10 +47,12 @@ mod context_usage_view;
 mod context_view;
 mod conversation;
 mod diff_view;
+mod discord_view;
 mod donate_view;
 mod export_view;
 mod file_cell;
 mod footer;
+mod frame_memo;
 mod header;
 mod hook_cell;
 mod hooks_view;
@@ -68,12 +70,14 @@ mod model_view;
 mod offline;
 mod palette;
 mod permission_view;
+mod plugins_view;
 mod reasoning;
 mod resume_view;
 mod secrets_view;
 mod settings_view;
 mod skills_view;
 mod spinner_view;
+mod sponsor_view;
 mod status;
 mod stream_render;
 mod table;
@@ -108,6 +112,7 @@ pub use self::conversation::{
     banner_tail, committed_history, conversation_lines, repaint_lines, repaint_tail,
 };
 pub use self::diff_view::{diff_body_rows, render_diff_view};
+pub use self::discord_view::{discord_page_height, discord_view_lines, render_discord_page};
 pub use self::donate_view::{donate_picker_height, donate_view_lines, render_donate_picker};
 pub use self::export_view::{
     export_picker_height, export_text, export_view_lines, render_export_picker,
@@ -116,9 +121,10 @@ pub use self::footer::{
     backtrack_hint_line, display_cwd, footer_line, footer_rows, queued_lines, queued_rows,
     search_line, shell_mode_line, toast_line, toast_rows,
 };
+pub use self::frame_memo::frame;
 pub use self::header::{
-    header_lines, notice_card_lines, startup_notice_lines, startup_paragraph_lines,
-    telemetry_notice_lines, update_notice_lines,
+    banner_block_lines, banner_frame_lines, banner_shows_art, header_lines, notice_card_lines,
+    startup_notice_lines, startup_paragraph_lines, telemetry_notice_lines, update_notice_lines,
 };
 pub use self::hook_cell::hook_report_lines;
 pub use self::hooks_view::{hooks_menu_height, hooks_view_lines, render_hooks_menu};
@@ -142,27 +148,30 @@ pub use self::model_view::render_model_picker;
 pub use self::offline::{offline_lines, offline_rows};
 pub use self::palette::{activate_theme, active_theme, with_theme};
 pub use self::permission_view::{permission_lines, permission_remember_label, render_permission};
+pub use self::plugins_view::{plugins_menu_height, plugins_view_lines, render_plugins_menu};
 pub use self::reasoning::reasoning_lines;
 pub use self::resume_view::render_resume_picker;
 pub use self::secrets_view::{render_secrets_picker, secrets_picker_height, secrets_view_lines};
 pub use self::settings_view::{render_settings, settings_height};
 pub use self::skills_view::{render_skills_menu, skills_menu_height};
 pub use self::spinner_view::{render_spinner_picker, spinner_picker_height};
+pub use self::sponsor_view::{render_sponsor_page, sponsor_page_height, sponsor_view_lines};
 pub use self::status::{
     background_notice_lines, format_elapsed, format_timeout, format_token_count, status_line,
     status_line_with_verb, styled_status_line, summary_lines,
 };
 pub use self::stream_render::StreamRender;
 pub use self::tasks::{checklist_lines, idle_task_lines, task_rows};
-pub use self::theme::{COMPACTED_NOTICE, LIVE_MIN_HEIGHT};
+pub use self::theme::{COMPACTED_NOTICE, LIVE_MIN_HEIGHT, REVIEW_PLUGIN_SCOPE};
 pub use self::theme_view::{render_theme_picker, theme_picker_height};
 pub use self::tips::{tip_lines, tip_rows};
 pub use self::tool::{held_run_len, resolved_tools_commit_lines, tool_commit_lines, tool_lines};
 pub use self::tool_group::tool_group_lines;
 pub use self::transcript::{
-    TranscriptCache, agent_transcript_lines, backtrack_scroll, backtrack_scroll_for,
-    render_tool_view, tool_view_body_rows, tool_view_max_scroll, tool_view_max_scroll_for,
-    transcript_lines, transcript_selection,
+    RenderedTranscriptItem, TRANSCRIPT_WARM_WINDOW, TranscriptCache, TranscriptEntry,
+    TranscriptJob, TranscriptPage, agent_transcript, agent_transcript_lines, backtrack_scroll,
+    backtrack_scroll_for, render_tool_view, tool_view_body_rows, tool_view_max_scroll,
+    tool_view_max_scroll_for, transcript_lines, transcript_page, transcript_selection,
 };
 pub use self::usage_view::{render_usage_page, usage_page_height, usage_view_lines};
 pub use self::view_flow::{ViewFlow, view_body_skip, view_flow, view_flow_signature};

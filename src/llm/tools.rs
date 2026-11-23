@@ -73,6 +73,11 @@ pub struct ToolOutcome {
     /// small human/model-readable text (byte-capped, cell-displayed,
     /// token-counted, session-recorded). See `docs/tools.md`.
     pub image: Option<crate::images::AttachmentUrl>,
+    /// The call made a picture the model cannot see — an `imagegen` call on a
+    /// known non-vision model (`docs/imagegen.md`): no [`Self::image`], and
+    /// the agent loop sends the note the context replay degrades the
+    /// attachment to, so every later turn's request starts as this one did.
+    pub image_withheld: bool,
     /// `Some(snapshot)` when the call was a **task tool** op
     /// (`docs/task-tools.md`): the post-call state of the shared task list,
     /// which `run_agent` surfaces as `StreamEvent::TaskCall` — the single
@@ -95,6 +100,16 @@ pub struct ToolOutcome {
     /// ([`crate::app::ToolCall::context_output`]). `None` for every ordinary
     /// outcome, whose display *is* what the model reads.
     pub context: Option<String>,
+    /// The command's exit status, when it exited during the call — what the
+    /// rollout's `tool` line records as `exit_code`
+    /// (`docs/rollout-records.md`). Set wherever the executor learns one:
+    /// the pipe runner, the terminal runner, a session call that saw the
+    /// exit. `None` for every other outcome.
+    pub exit_code: Option<i32>,
+    /// Why the call failed, when the executor knows more than that it did —
+    /// a command stopped at its time limit. A failed outcome that names none
+    /// is the tool's own failure ([`ToolOutcome::run`]).
+    pub error_kind: Option<crate::stream::ToolErrorKind>,
 }
 
 impl ToolOutcome {
@@ -107,8 +122,11 @@ impl ToolOutcome {
             truncated: false,
             background: None,
             image: None,
+            image_withheld: false,
             tasks: None,
             context: None,
+            exit_code: None,
+            error_kind: None,
         }
     }
 
@@ -122,8 +140,11 @@ impl ToolOutcome {
             truncated: false,
             background: None,
             image: None,
+            image_withheld: false,
             tasks: None,
             context: None,
+            exit_code: None,
+            error_kind: None,
         }
     }
 
@@ -138,8 +159,11 @@ impl ToolOutcome {
             truncated: false,
             background: Some(id.into()),
             image: None,
+            image_withheld: false,
             tasks: None,
             context: None,
+            exit_code: None,
+            error_kind: None,
         }
     }
 
@@ -154,6 +178,14 @@ impl ToolOutcome {
     #[must_use]
     pub fn with_image(mut self, url: impl Into<crate::images::AttachmentUrl>) -> Self {
         self.image = Some(url.into());
+        self
+    }
+
+    /// Mark a picture kept back from a model that cannot see one (the
+    /// `image_withheld` field doc).
+    #[must_use]
+    pub const fn with_image_withheld(mut self) -> Self {
+        self.image_withheld = true;
         self
     }
 
@@ -179,6 +211,36 @@ impl ToolOutcome {
     #[must_use]
     pub fn context_text(&self) -> &str {
         self.context.as_deref().unwrap_or(&self.output)
+    }
+
+    /// Record the command's exit status (the `exit_code` field doc).
+    #[must_use]
+    pub const fn with_exit_code(mut self, code: i32) -> Self {
+        self.exit_code = Some(code);
+        self
+    }
+
+    /// Name why the call failed (the `error_kind` field doc).
+    #[must_use]
+    pub const fn with_error_kind(mut self, kind: crate::stream::ToolErrorKind) -> Self {
+        self.error_kind = Some(kind);
+        self
+    }
+
+    /// How the call ran, for a call that ran for `elapsed`
+    /// (`docs/rollout-records.md`): its exit code, the duration, and — for a
+    /// failure — its kind, the tool's own failure when the executor named
+    /// none. A success names no failure.
+    #[must_use]
+    pub fn run(&self, elapsed: std::time::Duration) -> crate::stream::ToolRun {
+        crate::stream::ToolRun {
+            exit_code: self.exit_code,
+            duration_ms: Some(crate::stream::ToolRun::millis(elapsed)),
+            error_kind: (!self.ok).then(|| {
+                self.error_kind
+                    .unwrap_or(crate::stream::ToolErrorKind::ToolError)
+            }),
+        }
     }
 }
 
@@ -1499,6 +1561,9 @@ pub fn display_name(name: &str) -> String {
         AGENT_TOOL_NAME => "Agent".to_string(),
         ASK_TOOL_NAME => ASK_TOOL_DISPLAY.to_string(),
         crate::skills::SKILL_TOOL_NAME => crate::skills::SKILL_TOOL_DISPLAY.to_string(),
+        crate::llm::imagegen::IMAGEGEN_TOOL_NAME => {
+            crate::llm::imagegen::IMAGEGEN_TOOL_DISPLAY.to_string()
+        }
         BASH_SEND_TOOL => BASH_SEND_DISPLAY.to_string(),
         BASH_WAIT_TOOL => BASH_WAIT_DISPLAY.to_string(),
         BASH_KILL_TOOL => BASH_KILL_DISPLAY.to_string(),
@@ -1595,6 +1660,9 @@ pub fn summarize_call(name: &str, arguments: &str) -> String {
         // optional `args` stay out of it: they are prose, and the cell has
         // one line (`docs/skills.md`).
         crate::skills::SKILL_TOOL_NAME => field("skill"),
+        // `● ImageGen(a red fox at dawn)` — the prompt, on one line
+        // (`docs/imagegen.md`).
+        crate::llm::imagegen::IMAGEGEN_TOOL_NAME => field("prompt"),
         // The task tools' headers (Ctrl+O only — inline they render nothing,
         // docs/task-tools.md): a create shows its subject, a get/update the
         // `#id` (an update's status change appended — `#1 → completed`), a
@@ -2178,13 +2246,56 @@ pub fn is_image_read_output(output: &str) -> bool {
 /// the live agent loop and the context replay so both turns' wire shapes match.
 #[must_use]
 pub fn image_attachment_note(path: &str) -> String {
+    tool_attachment_note("read", path)
+}
+
+/// The note an image rides under for the **live** call that put it there —
+/// an image `read` names its own path argument ([`image_attachment_note`],
+/// unchanged since it shipped), a generated image the file its fact line
+/// names (`docs/imagegen.md`), and any other call (an MCP screenshot) its
+/// header summary, as it always did. Built from what the call recorded, so
+/// [`recorded_attachment`] rebuilds the very same bytes on every later turn
+/// — which the prompt cache depends on (`docs/prompt-caching.md`).
+#[must_use]
+pub fn attachment_note(name: &str, arguments: &str, output: &str) -> String {
+    if crate::llm::imagegen::is_imagegen_tool(name)
+        && let Some((path, _)) = crate::llm::imagegen::generated_image(output)
+    {
+        return tool_attachment_note(crate::llm::imagegen::IMAGEGEN_TOOL_NAME, &path);
+    }
+    image_attachment_note(&summarize_call(name, arguments))
+}
+
+/// A **recorded** cell's attachment, `(note, path)` — what the replay sends
+/// after its result on every later turn (`crate::context`): an image `read`
+/// (its header summary is the path) or a generated image (its fact line's
+/// file), keyed on the display name the cell was recorded under. `None` for
+/// a cell that showed no picture, whatever its output says — a `bash` that
+/// printed either head is text.
+#[must_use]
+pub fn recorded_attachment(name: &str, args: &str, output: &str) -> Option<(String, String)> {
+    if name == "Read" && is_image_read_output(output) {
+        return Some((image_attachment_note(args), args.to_string()));
+    }
+    if name == crate::llm::imagegen::IMAGEGEN_TOOL_DISPLAY {
+        let (path, _) = crate::llm::imagegen::generated_image(output)?;
+        let note = tool_attachment_note(crate::llm::imagegen::IMAGEGEN_TOOL_NAME, &path);
+        return Some((note, path));
+    }
+    None
+}
+
+/// `[image] The image file {path} from the {tool} tool call above is
+/// attached to this message.` — bracket-prefixed like the other injected
+/// notes, naming the call so the model pairs the pixels to it.
+fn tool_attachment_note(tool: &str, path: &str) -> String {
     format!(
-        "[image] The image file {path} from the read tool call above is attached to this message."
+        "[image] The image file {path} from the {tool} tool call above is attached to this message."
     )
 }
 
 /// `512 B` / `240 KB` / `2.5 MB` — the size clause of [`format_read_image`].
-fn human_size(bytes: usize) -> String {
+pub(crate) fn human_size(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = 1024 * 1024;
     if bytes >= MB {
@@ -3360,6 +3471,25 @@ mod tests {
     }
 
     #[test]
+    fn the_imagegen_header_names_the_tool_and_its_prompt() {
+        // `● ImageGen(a red fox at dawn)`, and the display name lowercases
+        // back to the wire name (`context::wire_tool_name`).
+        let name = crate::llm::imagegen::IMAGEGEN_TOOL_NAME;
+        assert_eq!(
+            display_name(name),
+            crate::llm::imagegen::IMAGEGEN_TOOL_DISPLAY
+        );
+        assert_eq!(display_name(name).to_ascii_lowercase(), name);
+        assert_eq!(
+            summarize_call(
+                name,
+                r#"{"prompt": "a red fox\nat dawn", "transparent_background": true}"#
+            ),
+            "a red fox at dawn"
+        );
+    }
+
+    #[test]
     fn summarize_call_shows_the_command_or_path() {
         assert_eq!(
             summarize_call("bash", r#"{"command":"cargo test"}"#),
@@ -4188,6 +4318,60 @@ mod tests {
     }
 
     #[test]
+    fn a_generated_images_note_names_its_saved_file_and_the_imagegen_call() {
+        let fact = crate::llm::imagegen::format_generated("PNG", (8, 8), 70, "/g/s/1.png");
+        let note = attachment_note(
+            crate::llm::imagegen::IMAGEGEN_TOOL_NAME,
+            r#"{"prompt": "a fox"}"#,
+            &fact,
+        );
+        assert_eq!(
+            note,
+            "[image] The image file /g/s/1.png from the imagegen tool call above is attached to this message."
+        );
+    }
+
+    #[test]
+    fn a_read_and_any_other_call_keep_their_note_as_it_was() {
+        // The live note an image `read` has always sent, byte for byte — a
+        // changed note would break every cached prefix that carries one.
+        assert_eq!(
+            attachment_note(
+                "read",
+                r#"{"path": "assets/logo.png"}"#,
+                "Read image (PNG, 1x1, 68 B)"
+            ),
+            image_attachment_note("assets/logo.png")
+        );
+        assert_eq!(
+            attachment_note("mcp__shots__take", r#"{"url": "x"}"#, "ok"),
+            image_attachment_note(&summarize_call("mcp__shots__take", r#"{"url": "x"}"#))
+        );
+    }
+
+    #[test]
+    fn the_attached_image_of_a_recorded_cell_is_found_by_its_tool() {
+        let fact = crate::llm::imagegen::format_generated("PNG", (8, 8), 70, "/g/s/1.png");
+        assert_eq!(
+            recorded_attachment("ImageGen", "a fox", &fact),
+            Some(attachment_note("imagegen", r#"{"prompt": "a fox"}"#, &fact))
+                .map(|note| (note, "/g/s/1.png".to_string()))
+        );
+        assert_eq!(
+            recorded_attachment("Read", "shot.png", "Read image (PNG, 1x1, 68 B)"),
+            Some((image_attachment_note("shot.png"), "shot.png".to_string()))
+        );
+        // Only the tool that makes a picture can carry one: a bash cell
+        // echoing either head is text.
+        assert_eq!(recorded_attachment("Bash", "cat log", &fact), None);
+        assert_eq!(recorded_attachment("Read", "a.rs", "1 fn main() {}"), None);
+        assert_eq!(
+            recorded_attachment("ImageGen", "a fox", "image generation failed: HTTP 500"),
+            None
+        );
+    }
+
+    #[test]
     fn image_attachment_note_names_the_path_and_the_tool() {
         let note = image_attachment_note("assets/logo.png");
         assert!(
@@ -4209,6 +4393,45 @@ mod tests {
             desc.contains("image") && desc.contains("attached"),
             "the model is told image files come back attached: {desc}"
         );
+    }
+
+    // ===== how a call ran (docs/rollout-records.md) =====
+
+    #[test]
+    fn an_outcome_states_how_its_call_ran() {
+        use crate::stream::{ToolErrorKind, ToolRun};
+        let elapsed = std::time::Duration::from_millis(1_250);
+        // A success names no failure, whatever its exit code.
+        assert_eq!(
+            ToolOutcome::ok("Exit code: 0")
+                .with_exit_code(0)
+                .run(elapsed),
+            ToolRun {
+                exit_code: Some(0),
+                duration_ms: Some(1_250),
+                error_kind: None,
+            }
+        );
+        // A failure nothing more specific explains is the tool's own…
+        assert_eq!(
+            ToolOutcome::error("no such file").run(elapsed),
+            ToolRun {
+                exit_code: None,
+                duration_ms: Some(1_250),
+                error_kind: Some(ToolErrorKind::ToolError),
+            }
+        );
+        // …and one the executor named keeps its name.
+        assert_eq!(
+            ToolOutcome::error("command timed out")
+                .with_error_kind(ToolErrorKind::TimedOut)
+                .run(elapsed)
+                .error_kind,
+            Some(ToolErrorKind::TimedOut)
+        );
+        // A plain outcome carries neither.
+        let plain = ToolOutcome::ok("fine");
+        assert_eq!((plain.exit_code, plain.error_kind), (None, None));
     }
 
     #[test]

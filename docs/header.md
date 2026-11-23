@@ -2,16 +2,20 @@
 
 A Claude-Code-style **header** committed to scrollback at launch: the
 session's block-character **mascot** (see `docs/mascot.md`) beside the
-product name + version, the working directory, and a one-line command hint.
-It is the first thing the user sees, and it scrolls up into history naturally
-as the conversation grows — exactly like Claude Code's welcome banner.
+product name + version, the working directory, and a one-line hint naming
+the composer's keys. It is the first thing the user sees, and it scrolls up
+into history naturally as the conversation grows — exactly like Claude
+Code's welcome banner. Until then — while no cell has been committed under
+it — its mascot **moves**: it blinks, glances and plays its own move,
+watches what is typed, naps when it is left alone and starts awake at a
+key, the committed rows repainted in place (`docs/mascot-animation.md`).
 
 ## What it shows
 
 ```
  ▙▄▙▄▟▄▟   Alter Zero (v0.1.0)
 ▝▜▄███▄▛▘  ~/inline-tui
-  ▘▘ ▝▝    /login   /model   /resume
+  ▘▘ ▝▝    / commands  @ files  ? shortcuts
 ```
 
 - **Mascot** — the selected mascot's art (crest by default, switched with
@@ -28,8 +32,13 @@ as the conversation grows — exactly like Claude Code's welcome banner.
   (`header_cwd_color()` is `footer_cwd_color()`, `docs/footer.md`), so the
   path is one colour at both ends of the screen. Skipped when no session info
   is injected.
-- **Hint** — bare command tokens (`/login`, `/model`, `/resume`) in the cyan
-  accent, three-space separated (dim separators).
+- **Hint** — the composer's three keys, `/ commands  @ files  ? shortcuts`:
+  each key in the cyan accent one space from its label in the dim — the
+  `?` band's own dress for its entries (`docs/shortcuts.md`), under every
+  theme — and the pairs two spaces apart, the band's own narrowest gutter
+  (`HEADER_HINT_GAP` is `SHORTCUTS_MIN_GUTTER`). Each key does from a fresh
+  composer what its label names: `/` opens the command palette, `@` the
+  file picker, `?` the shortcuts band (*Why the hint names keys* below).
 
 The metadata rows sit in one aligned column at `art width + 2`, and the
 block is **vertically centered** in a mascot taller than it, ties resolving
@@ -41,13 +50,41 @@ is exactly the metadata's height *with* a session; the live case is the
 ```
  ▙▄▙▄▟▄▟
 ▝▜▄███▄▛▘  Alter Zero (v0.1.0)
-  ▘▘ ▝▝    /login   /model   /resume
+  ▘▘ ▝▝    / commands  @ files  ? shortcuts
 ```
 
 Art rows without a metadata neighbour render alone (no trailing pad), and
 metadata rows past the art (nothing in today's catalog) would keep their
 column. Every row is clamped to the width with a trailing `…`, exactly like
 `footer_line`.
+
+## Why the hint names keys, not commands
+
+The hint used to list three commands, `/login   /model   /resume`: sign in,
+pick a model, pick a conversation back up. Each of them is one row of the
+`/` palette, which lists every command with what it does, and the first run
+already points at the first two: every user-facing offline demo reply closes
+on the `/login` then `/model` hand-off (`docs/dummy-backend.md`). What
+nothing else on screen teaches is the composer itself, so the banner's one
+row of advice names the three keys that open everything else: `/` reaches
+every command (those three included), `@` puts a file's path in the
+message, and `?` lists the rest of the keys.
+
+The row is three of the `?` band's own entries, and it reads like them —
+keys in the accent, labels in the dim — in the terse wording the band takes
+on a narrow pane (`/ commands`, never `/ for commands`), with `file paths`
+shortened to `files`. Dropping the `for` also keeps the banner clear of
+`for commands`, the string the smoke suite reads as the band being open
+(Phase 11). One space joins a key to its label and two separate the
+pairs, the band's own narrowest gutter, so spacing alone groups each key
+with its label and the three keys stay the only symbols on the row. The
+footer's ` · ` was tried between the pairs and taken back out: it added a
+fourth symbol beside three keys that are symbols already, and the cyan
+keys already mark where each pair starts, so only a copy with no colour
+(an `/export` file) read any better for it. A test presses each key on a
+fresh composer and checks that it opens what its label names
+(`header_hint_keys_open_what_they_name`), so the banner cannot go on
+advertising a key that stopped working.
 
 ## Responsive fallback
 
@@ -89,6 +126,15 @@ header is not part of. So it is re-emitted at the I/O boundary:
    Claude Code's `/clear`), and a `/mascot` switch redraws it with the new
    mascot at once (`docs/mascot.md`).
 
+Both commit the banner **standing still** — `header_lines` is the rest pose
+whatever the mascot's animation is doing — and, when the banner is all they
+wrote (an empty conversation), both leave it **anchored**: the viewport may
+repaint those rows in place until the first cell lands under them, so the
+mascot can move (`InlineViewport::anchor_above`, `docs/mascot-animation.md`).
+The first cell, a scroll that would carry the banner off the screen and the
+quit each put it back to the rows written here first, so what scrollback
+holds is always this banner.
+
 An **overlay return** (Ctrl+O / `/resume` / Ctrl+D) needs no re-emission at
 all: it never rewrites the screen — everything that committed while the
 overlay was up flushes from the viewport's pending queue *beneath* whatever is
@@ -120,16 +166,25 @@ kept clear of the strings other phases key on (`for commands`,
 ## API (all pure, in `ui/header.rs`)
 
 - `header_lines(app: &App, width: u16) -> Vec<Line<'static>>` — the whole
-  banner as scrollback rows for the session's mascot, sized to `width`. No
-  trailing spacer; the caller adds one (the `insert_before(msg);
-  insert_before(blank)` pattern).
-- `header_lines_for(app, mascot, width)` (`pub(super)`) — the same banner for
-  an explicit mascot: the `/mascot` picker's live preview, so the preview and
-  the banner share one builder (`docs/mascot.md`).
+  banner as scrollback rows for the session's mascot, sized to `width`,
+  **at rest**. No trailing spacer; the caller adds one (the
+  `insert_before(msg); insert_before(blank)` pattern).
+- `header_lines_posed(app, mascot, pose, width)` (`pub(super)`) — the one
+  builder behind every banner: an explicit mascot in an explicit
+  `MascotPose` (its art's rows and how far a sweep of light has crossed
+  them). `header_lines_for(app, mascot, width)` is it at rest; the `/mascot`
+  picker's preview is it in the highlighted mascot's current pose
+  (`docs/mascot.md`).
+- `banner_block_lines(app, width)` / `banner_frame_lines(app, width)` — the
+  banner over its spacer as committed, and as it should look *now*: what the
+  boundary anchors and what it repaints the anchor with
+  (`docs/mascot-animation.md`). Equal whenever nothing is moving.
+- `banner_shows_art(app, width)` — whether this width draws the mascot at
+  all (the text badge has nothing to animate).
 - `banner_tail(banner, tail) -> Vec<Line<'static>>` — the banner + a blank
   spacer over a purge rebuild's repaint tail (see *Surviving every rebuild*).
-- `HEADER_NAME` / `HEADER_HINT` / `HEADER_ART_GAP` — the title word, the hint
-  tokens, and the art→metadata gap.
+- `HEADER_NAME` / `HEADER_HINT` / `HEADER_ART_GAP` — the title word, the
+  hint's `(key, label)` pairs, and the art→metadata gap.
 - `header_gradient_start()` / `header_gradient_end()` — the mascot gradient's
   endpoints; `gradient_spans` lerps per display column and coalesces
   equal-colour runs into spans.
@@ -142,7 +197,11 @@ kept clear of the strings other phases key on (`for commands`,
   trailing pad on meta-less rows); the metadata block seats lower beside a
   taller mascot (every mascot's session-less banner puts its two rows at
   1–2, art alone above); it follows `App::mascot`; the title is bold-name + dim-version,
-  the cwd in the footer's path colour, the hint in the accent; the art carries the accent → link gradient; a
+  the cwd in the footer's path colour, the hint's keys in the accent beside
+  dim labels — the `?` band's dress — under every theme, the pairs the
+  band's narrowest gutter apart, and each key it shows opens what its
+  label names from a fresh composer
+  (`header_hint_keys_open_what_they_name`); the art carries the accent → link gradient; a
   very narrow width falls back to the text badge and never exceeds the
   width; a session-less `App` still renders art + version (no cwd row); the
   banner contains none of the smoke-reserved strings at any width for any
@@ -153,6 +212,9 @@ kept clear of the strings other phases key on (`for commands`,
   the banner + a spacer before the history walk.
 - `ui/tests/wrap.rs`: the mascot tier still fits at the smoke suite's 50-col
   resize width, and no width in a broad sweep overflows.
+- `ui/tests/header.rs` unit tests for the live banner — the committed one
+  always at rest, a pose never moving the metadata, the sweep's light
+  (`docs/mascot-animation.md` lists them).
 - `scripts/smoke.sh` Phase 45: the header shows at startup (the `Alter Zero`
   marker), survives a resize (still present after 80×24 → 50×24 → 80×24),
   re-shows after `/clear`, tops the Ctrl+O transcript (empty and with a real

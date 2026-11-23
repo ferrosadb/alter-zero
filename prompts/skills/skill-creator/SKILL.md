@@ -36,19 +36,28 @@ executes on load.
 
 ## 2. Pick the directory
 
-`<root>/<name>/SKILL.md`. The roots, first match winning the name:
+`<root>/<name>/SKILL.md`. The roots, first match winning the name. Every
+directory from the cwd up to the project root (the nearest `.git`) has three,
+nearest directory first:
 
 | Root | Use it for |
 |---|---|
-| `<cwd>/.alter-zero/skills` | this project (preferred for project skills) |
-| `<cwd>/.claude/skills` | this project, shared with Claude Code |
-| `<project root>/.alter-zero/skills` | the repo, when the cwd is a subdirectory |
+| `<dir>/.alter-zero/skills` | this project (preferred for project skills) |
+| `<dir>/.agents/skills` | this project, shared with Codex and other agents |
+| `<dir>/.claude/skills` | this project, shared with Claude Code |
+
+Then the personal ones:
+
+| Root | Use it for |
+|---|---|
 | `<config home>/skills` | personal, every project (usually `~/.alter-zero/skills`) |
+| `~/.agents/skills` | personal, shared with Codex and other agents |
 | `~/.claude/skills` | personal, shared with Claude Code |
 
-Default to the **project** root when the skill is about this codebase, and to
-the **personal** root when it is about how the user works everywhere. Ask which
-one only when it is genuinely ambiguous.
+Default to the **project root's** `.alter-zero/skills` when the skill is about
+this codebase, and to the **personal** root when it is about how the user works
+everywhere. Use `.agents/skills` when the user wants the skill shared with
+other agents. Ask which one only when it is genuinely ambiguous.
 
 The personal root is this skill's own parent directory — the `Base directory`
 line above names `<personal root>/skill-creator`. Write the resolved absolute
@@ -154,7 +163,12 @@ is loadable on the very next message — no restart:
    which root it came from, and never create a second copy in a different root:
    the first root wins and the other becomes dead weight nobody edits.
 2. **Read the whole file** before changing anything. It may be the user's own
-   work, or a seeded default they have edited.
+   work, or one of the built-in skills this runtime ships — seeded into its own
+   skills folder, whose `.alter-zero-builtins.json` lists their files. A
+   built-in takes each release's version only while nobody has edited it:
+   once you change it, later releases leave it alone and save their version
+   beside each edited file as `<file>.new`. Tell the user that when you edit
+   one.
 3. **Edit, do not rewrite.** Change the lines the request is about and leave
    the rest — including the `name`, which is how the model, the listing and
    `skills.json` all refer to it. Renaming means a new folder and a stale

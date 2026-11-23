@@ -203,6 +203,41 @@ exactly like a streaming tool does (`docs/tool-view-performance.md`). The
 bullet renders at rest there — the transcript's signature is deliberately
 clock-free.
 
+### What the splitter recognises
+
+`ThinkingSplitter` normalises two provider conventions into one
+`(response, reasoning)` pair per fed chunk:
+
+- **Native reasoning** — the delta arrives on its own `reasoning` /
+  `reasoning_content` field (DeepSeek, OpenRouter, and any server that parses
+  the model's channels itself). Passed straight through.
+- **Inline tags** — ` thinking…</think>` or `<reasoning>…</reasoning>` wrapped
+  in ordinary content. Recognised only at the reply's **start**: mid-reply
+  detection was chunk-boundary-dependent, and a chunk that happened to begin
+  with ` thinking` — a model writing *about* the tag — silently swallowed real
+  reply text.
+- **Channels** — a reply framed as a sequence of channel messages, which is
+  what Inkling 2 (`inkling2_loop`) emits:
+
+  ```text
+  <|message_model|><|content_thinking|>plan<|end_message|>
+  <|message_model|><|content_text|>answer<|end_message|>
+  ```
+
+  This differs from the tag pair in the one way that matters: a channel reply
+  **re-opens**. The thinking channel closes and the text channel begins
+  mid-reply, so markers are structure at *any* offset, not only at the start.
+  `<|end_message|>` closes the current channel and returns to a neutral state;
+  the role markers (`<|message_model|>`, `<|message_user|>`, …) are dropped
+  outright. A tool channel (`<|content_invoke_tool_json|>`) is parsed into
+  `tool_calls` by the server before the splitter sees it, so only thinking and
+  text carry content here.
+
+  Because SSE frames arrive per token, every marker straddles a boundary: the
+  splitter holds a tail that could still grow into a marker, and a reply enters
+  the convention only once a real marker (not a partial one) has arrived — so a
+  reply that merely *mentions* these tokens stays plain text.
+
 ### The token count
 
 The status tally counts reasoning with the app-side estimate

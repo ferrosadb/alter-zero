@@ -25,6 +25,38 @@ pub struct ChatStreamResult {
 /// The reasoning tag pairs recognised in the inline convention.
 const PAIRS: &[(&str, &str)] = &[("<think>", "</think>"), ("<reasoning>", "</reasoning>")];
 
+/// Every marker of the **channel convention** (Inkling 2 and its relatives),
+/// which frames a reply as a sequence of channel messages rather than one tag
+/// pair:
+///
+/// ```text
+/// <|message_model|><|content_thinking|>plan<|end_message|>
+/// <|message_model|><|content_text|>answer<|end_message|>
+/// ```
+///
+/// The role markers (`<|message_model|>`, `<|message_user|>`, ...) and
+/// `<|end_message|>` are structure: they delimit channels, never content, and
+/// must not reach the reply. A tool channel
+/// (`<|content_invoke_tool_json|>`) is parsed into `tool_calls` by the server
+/// before the splitter sees it, so only thinking and text carry content here.
+const CHANNEL_THINKING: &str = "<|content_thinking|>";
+const CHANNEL_TEXT: &str = "<|content_text|>";
+const CHANNEL_END: &str = "<|end_message|>";
+const CHANNEL_ROLE_MARKERS: &[&str] = &[
+    "<|message_model|>",
+    "<|message_user|>",
+    "<|message_system|>",
+    "<|message_tool|>",
+    "<|content_model_end_sampling|>",
+];
+
+/// Every channel marker, for the earliest-hit and partial-tail scans.
+fn channel_markers() -> impl Iterator<Item = &'static str> {
+    [CHANNEL_THINKING, CHANNEL_TEXT, CHANNEL_END]
+        .into_iter()
+        .chain(CHANNEL_ROLE_MARKERS.iter().copied())
+}
+
 /// Peels `<think>`/`<reasoning>` tags (or native reasoning deltas) out of a
 /// streamed response, exposing the reasoning separately so the TUI can drive its
 /// thinking status without ever rendering the chain-of-thought.
@@ -38,6 +70,11 @@ pub struct ThinkingSplitter {
     pending: String,
     native: bool,
     first_chunk: bool,
+    /// Set once the reply has opened a channel with `<|content_thinking|>` or
+    /// `<|content_text|>`. From then on the stream is read by the channel
+    /// grammar — markers are structure wherever they appear, because a channel
+    /// closes and another opens mid-reply.
+    channel_grammar: bool,
 }
 
 impl ThinkingSplitter {
@@ -92,10 +129,125 @@ impl ThinkingSplitter {
         (resp_out, reason_out)
     }
 
+    /// Peel the channel convention (`<|message_model|><|content_thinking|>…`).
+    ///
+    ///
+    /// Unlike the single-tag pair, a channel reply *re-opens*: the thinking
+    /// channel closes and the text channel begins, so markers are structure at
+    /// any offset — not only at the reply's start.
+    fn process_channels(&mut self, delta: &str) -> (String, String) {
+        let mut buf = std::mem::take(&mut self.pending);
+        buf.push_str(delta);
+
+        self.channel_grammar = true;
+
+        let mut out_response = String::new();
+        let mut out_reasoning = String::new();
+        loop {
+            // Find the earliest marker in the buffer.
+            let mut hit: Option<(usize, &'static str)> = None;
+            for m in channel_markers() {
+                if let Some(pos) = buf.find(m) {
+                    hit = Some(match hit {
+                        Some((best, best_m)) if best <= pos => (best, best_m),
+                        _ => (pos, m),
+                    });
+                }
+            }
+            let Some((pos, marker)) = hit else {
+                // No complete marker: emit all but a possible partial tail.
+                let keep = self.partial_channel_tail(&buf);
+                let emit = buf[..buf.len() - keep].to_string();
+                if !emit.is_empty() {
+                    if self.thinking {
+                        out_reasoning.push_str(&emit);
+                    } else {
+                        out_response.push_str(&emit);
+                    }
+                }
+                buf = buf[buf.len() - keep..].to_string();
+                break;
+            };
+
+            // Text before the marker belongs to the channel it was in.
+            if pos > 0 {
+                let text = buf[..pos].to_string();
+                if self.thinking {
+                    out_reasoning.push_str(&text);
+                } else {
+                    out_response.push_str(&text);
+                }
+            }
+            buf = buf[pos + marker.len()..].to_string();
+
+            match marker {
+                CHANNEL_THINKING => self.thinking = true,
+                CHANNEL_TEXT | CHANNEL_END => self.thinking = false,
+                _ => {}
+            }
+        }
+
+        self.pending = buf;
+        (out_response, out_reasoning)
+    }
+
+    /// The length of a tail of `buf` that could still grow into a channel
+    /// marker — held back so a marker split across frames still matches.
+    fn partial_channel_tail(&self, buf: &str) -> usize {
+        let mut keep = 0;
+        for m in channel_markers() {
+            let max = buf.len().min(m.len() - 1);
+            for n in 1..=max {
+                if buf.ends_with(&m[..n]) {
+                    keep = keep.max(n);
+                }
+            }
+        }
+        keep
+    }
+
     fn process_thinking(&mut self, response_delta: &str) -> (String, String) {
+        // Detect the channel convention on what this frame holds *together with*
+        // the pending carry-over, but leave `pending` for whichever reader runs
+        // — both take it themselves.
+        if self.is_channel_reply(response_delta) {
+            return self.process_channels(response_delta);
+        }
+        self.process_tags(response_delta)
+    }
+
+    /// Whether the reply is framed by the channel convention.
+    ///
+    /// A reply *enters* it when a channel tag arrives (`<|content_text|>` opens
+    /// every channel-framed message), or — as `process_channels` handles — when
+    /// a partial marker straddles the frame. Otherwise it is left to the
+    /// single-tag reader, so text that merely mentions the words is untouched.
+    fn is_channel_reply(&self, response_delta: &str) -> bool {
+        if self.channel_grammar {
+            return true;
+        }
+        // A marker arrives one token at a time, so its beginning may already be
+        // sitting in `pending` — decide on what the frame holds together.
+        let mut probe = self.pending.clone();
+        probe.push_str(response_delta);
+        channel_markers().any(|m| probe.contains(m))
+    }
+
+    fn process_tags(&mut self, response_delta: &str) -> (String, String) {
         let mut response = std::mem::take(&mut self.pending);
         response.push_str(response_delta);
         let mut reasoning = String::new();
+
+        // Nothing has surfaced yet, so a leading run that could still grow into
+        // a channel marker must be held, not emitted: markers arrive one token
+        // at a time and `<|m` is a prefix of `<|message_model|>`.
+        if self.first_chunk
+            && !self.thinking
+            && channel_markers().any(|m| response.len() < m.len() && m.starts_with(&response))
+        {
+            self.pending = response;
+            return (String::new(), String::new());
+        }
 
         if self.thinking {
             if let Some(idx) = response.find(self.closing_tag) {
@@ -392,5 +544,130 @@ mod tests {
         let (r, t) = s.feed("<think>is markup</think>", "");
         assert_eq!(r, "<think>is markup</think>");
         assert!(t.is_empty());
+    }
+
+    // ---- Inkling 2 (and the channel convention generally) ----
+    //
+    // Inkling 2 emits a sequence of channel messages rather than one tag pair:
+    //
+    //   <|message_model|><|content_thinking|>plan<|end_message|>
+    //   <|message_model|><|content_text|>answer<|end_message|>
+    //
+    // Its tool channel (`<|content_invoke_tool_json|>`) carries a call the
+    // server parses into `tool_calls`, so the splitter only sees thinking and
+    // text as content — plus the role markers, which are structure and must
+    // never reach the reply.
+
+    #[test]
+    fn inkling_channels_are_split_into_reasoning_and_response() {
+        let mut s = ThinkingSplitter::new();
+        let (r, t) = s.feed("<|message_model|><|content_thinking|>plan", "");
+        assert_eq!(r, "", "the role marker and channel tag are structure");
+        assert_eq!(t, "plan");
+        let (r, t) = s.feed("<|end_message|><|message_model|><|content_text|>answer", "");
+        assert_eq!(r, "answer");
+        assert_eq!(t, "", "closing the thinking channel ends the reasoning");
+        let res = s.finish();
+        assert_eq!(res.reasoning, "plan");
+        assert_eq!(res.response, "answer");
+    }
+
+    #[test]
+    fn inkling_markers_never_leak_into_the_response() {
+        let mut s = ThinkingSplitter::new();
+        s.feed(
+            "<|message_model|><|content_thinking|>why<|end_message|>\
+             <|message_model|><|content_text|>because<|end_message|>",
+            "",
+        );
+        let res = s.finish();
+        assert!(
+            !res.response.contains("<|"),
+            "response carried a marker: {:?}",
+            res.response
+        );
+        assert_eq!(res.response, "because");
+        assert_eq!(res.reasoning, "why");
+    }
+
+    #[test]
+    fn inkling_text_channel_without_a_thinking_channel_is_all_response() {
+        // A model that answers directly opens with the text channel.
+        let mut s = ThinkingSplitter::new();
+        let (r, t) = s.feed("<|message_model|><|content_text|>just the answer", "");
+        assert_eq!(r, "just the answer");
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn inkling_markers_split_across_chunks_still_match() {
+        // SSE frames arrive per token, so every marker straddles a boundary.
+        // Nothing may surface early and nothing may leak.
+        let mut s = ThinkingSplitter::new();
+        let whole = "<|message_model|><|content_thinking|>think<|end_message|>\
+                     <|message_model|><|content_text|>reply";
+        let mut out_r = String::new();
+        let mut out_t = String::new();
+        for ch in whole.chars() {
+            let (r, t) = s.feed(&ch.to_string(), "");
+            out_r.push_str(&r);
+            out_t.push_str(&t);
+        }
+        let res = s.finish();
+        assert_eq!(out_r, "reply", "streamed response deltas");
+        assert_eq!(out_t, "think", "streamed reasoning deltas");
+        assert_eq!(res.reasoning, "think");
+        assert_eq!(res.response, "reply");
+    }
+
+    #[test]
+    fn a_lone_role_marker_is_structure_not_response() {
+        // `<|message_model|>` opens every assistant message; on its own it is
+        // punctuation, and surfacing it would put it in the transcript.
+        let mut s = ThinkingSplitter::new();
+        let (r, _t) = s.feed("<|message_model|>", "");
+        assert_eq!(r, "");
+    }
+
+    #[test]
+    fn inkling_output_captured_from_the_model_splits_clean() {
+        // Captured verbatim from thinkingmachines/Inkling-2-Mini (MLX 8-bit)
+        // for the prompt "Say hello in exactly one word." The model truncates
+        // mid-sentence at the token cap, so an unclosed channel must still
+        // yield its text with no marker leakage.
+        let raw = "<|message_model|><|content_thinking|>The user asks: \"Say hello in \
+exactly one word.\" Need answer exactly one word. Need ensure final contains exactly \
+one word. Could say \"Hello\". That's one word and says hello. Need no punctuation? \
+Punctuation attached maybe still one word. Final should be just Hello. Need not \
+explain. Ensure exactly one word in final. No extra words. Done";
+        let mut s = ThinkingSplitter::new();
+        let mut resp = String::new();
+        let mut reason = String::new();
+        // Fed per character, as SSE frames arrive.
+        for ch in raw.chars() {
+            let (r, t) = s.feed(&ch.to_string(), "");
+            resp.push_str(&r);
+            reason.push_str(&t);
+        }
+        let res = s.finish();
+        assert!(
+            !res.response.contains("<|"),
+            "marker leaked: {:?}",
+            res.response
+        );
+        assert!(
+            !res.reasoning.contains("<|"),
+            "marker leaked: {:?}",
+            res.reasoning
+        );
+        // The capture never reached the text channel — it hit the token cap
+        // mid-thought — so every character is reasoning and the reply is empty.
+        assert!(res.response.is_empty(), "{:?}", res.response);
+        assert!(
+            res.reasoning.starts_with("The user asks:"),
+            "{:?}",
+            res.reasoning
+        );
+        assert!(res.reasoning.ends_with("Done"), "{:?}", res.reasoning);
     }
 }

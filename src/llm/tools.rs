@@ -2663,7 +2663,6 @@ pub fn truncate_output(s: String, max_bytes: usize) -> (String, bool) {
     (s[..cut].to_string(), true)
 }
 
-
 /// Append a routing hint to a tool result when the call went to the shell for
 /// something a purpose-built tool covers.
 ///
@@ -2694,7 +2693,10 @@ fn routing_hint(tool: &str, arguments: &str, offered: &[&str]) -> Option<String>
     let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return None;
     };
-    let command = args.get("command").and_then(|c| c.as_str()).unwrap_or_default();
+    let command = args
+        .get("command")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default();
 
     if available("mcp__forge__find_definition") && is_code_search(command) {
         return Some(
@@ -4972,7 +4974,12 @@ mod tests {
     #[test]
     fn a_non_shell_tool_result_is_never_hinted() {
         // `read` answered a read; it has nothing to be nudged about.
-        let output = with_tool_hint("read", r#"{"path":"a.rs"}"#, "content", &["mcp__forge__find_definition"]);
+        let output = with_tool_hint(
+            "read",
+            r#"{"path":"a.rs"}"#,
+            "content",
+            &["mcp__forge__find_definition"],
+        );
         assert_eq!(output, "content");
     }
 }

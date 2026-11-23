@@ -14,6 +14,17 @@ release heading when a version is cut.
 
 ### Added
 
+- **A shell call that a purpose-built tool covers earns a routing hint.**
+  Measured over 7,468 recorded tool calls, 80% were `bash`, and a "where is
+  this defined" question answered itself with `grep` while the forge MCP server
+  was configured and unused. When a `bash` call is a code search and the forge
+  server is actually offered, the result now ends with a line naming
+  `mcp__forge__find_definition`; a `git log`/`blame`/`diff` over source names
+  `mcp__ferrosa-memory__search` instead. The hint rides on what the **model**
+  reads, so the cell above keeps showing what actually ran, and it is derived
+  from the offered tool list — it can never name a tool the model cannot see. A
+  build, a test run or any non-shell tool gets nothing: a hint that fires
+  everywhere is a hint that stops being read.
 - **The reasoning splitter understands channel-framed replies.** A model that
   frames its answer as a sequence of channel messages — Inkling 2
   (`inkling2_loop`), and others with the same tokenizer convention — now has

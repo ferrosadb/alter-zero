@@ -2663,6 +2663,80 @@ pub fn truncate_output(s: String, max_bytes: usize) -> (String, bool) {
     (s[..cut].to_string(), true)
 }
 
+/// Append a routing hint to a tool result when the call went to the shell for
+/// something a purpose-built tool covers.
+///
+/// The hint rides on the **result**, not on the request: the model reads it on
+/// the next round, and a transcript keeps showing what was actually run. Naming
+/// a tool the harness did not offer would be worse than saying nothing, so
+/// `servers` decides whether a hint is eligible at all.
+#[must_use]
+pub fn with_tool_hint(tool: &str, arguments: &str, output: &str, offered: &[&str]) -> String {
+    let Some(hint) = routing_hint(tool, arguments, offered) else {
+        return output.to_string();
+    };
+    format!("{output}\n\n{hint}")
+}
+
+/// The hint `(tool, arguments)` earns, when a purpose-built tool covers what it
+/// asked the shell to do — `None` for the shell calls a shell is for (a build, a
+/// test run, git), and for any call whose tool is not actually available.
+fn routing_hint(tool: &str, arguments: &str, offered: &[&str]) -> Option<String> {
+    // Only the shell is nudged: every other tool already did the specific
+    // thing, and a result from `read` has nothing to be redirected toward.
+    if tool != "bash" {
+        return None;
+    }
+    // The wire name the model would have to call, derived from the same spec
+    // list it was offered — so the hint can never name a tool it cannot see.
+    let available = |wire: &str| offered.contains(&wire);
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return None;
+    };
+    let command = args
+        .get("command")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default();
+
+    if available("mcp__forge__find_definition") && is_code_search(command) {
+        return Some(
+            "Hint: `mcp__forge__find_definition` locates a symbol's definition directly \
+             (and `mcp__forge__module_outline` lists what a module exports) — cheaper and \
+             more precise than a grep for a declaration."
+                .to_string(),
+        );
+    }
+    if available("mcp__ferrosa-memory__search") && is_memory_question(command) {
+        return Some(
+            "Hint: `mcp__ferrosa-memory__search` answers \"what do we already know about \
+             this?\" from prior context. Try it before searching the tree."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Whether a shell command is a **code search** — the class forge answers better.
+///
+/// Deliberately narrow: a recursive grep/rg/ag/fd for a declaration is the shape
+/// that has a purpose-built replacement. `grep` over a build log is not, and a
+/// hint there would train the model to ignore hints.
+fn is_code_search(command: &str) -> bool {
+    let searches = ["grep", "rg ", "ag ", "ack ", "fd ", "find "];
+    if !searches.iter().any(|s| command.contains(s)) {
+        return false;
+    }
+    // A recursive or path-scoped search over source, not a pipe filter
+    // (`cargo test 2>&1 | grep FAILED`) and not a build artefact.
+    command.contains("src/") || command.contains(" -r") || command.starts_with("rg ")
+}
+
+/// Whether a shell command is really asking memory a question.
+fn is_memory_question(command: &str) -> bool {
+    let asked = ["git log", "git blame", "git diff"];
+    asked.iter().any(|s| command.contains(s)) && command.contains("src/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4841,5 +4915,71 @@ mod tests {
         );
         // Unparseable arguments degrade to the flattened text.
         assert_eq!(summarize_call("mcp__s__t", "not json"), "not json");
+    }
+
+    // ---- routing hints: a shell call that a purpose-built tool covers ----
+    //
+    // Measured 2026-11-23 over 7,468 recorded tool calls: 80% were `bash`,
+    // and a "where is X defined" question answered itself with `grep` while
+    // the forge MCP server was wired and unused. A hint rides back on the tool
+    // result — the model reads it on the very next round, and the transcript
+    // shows what was actually run (docs/tools.md).
+
+    #[test]
+    fn a_shell_code_search_hints_at_the_forge_definition_tool() {
+        // RED as written: no hint exists yet, so the tool result is the bare
+        // output. This fails on the behaviour, not on a missing symbol.
+        let output = with_tool_hint(
+            "bash",
+            r#"{"command":"grep -rn \"struct ThinkingSplitter\" src/"}"#,
+            "src/llm/thinking.rs:31:pub struct ThinkingSplitter {",
+            &["mcp__forge__find_definition"],
+        );
+        assert!(
+            output.contains("mcp__forge__find_definition"),
+            "the hint must name the tool: {output:?}"
+        );
+        assert!(
+            output.contains("src/llm/thinking.rs:31:pub struct ThinkingSplitter {"),
+            "the real output must survive verbatim: {output:?}"
+        );
+    }
+
+    #[test]
+    fn a_shell_call_no_tool_covers_gets_no_hint() {
+        // Negative control: a build or a git command is what a shell is for.
+        // A hint here would be noise, and noise is how a hint stops being read.
+        let output = with_tool_hint(
+            "bash",
+            r#"{"command":"cargo test --lib"}"#,
+            "test result: ok. 7027 passed",
+            &["mcp__forge__find_definition"],
+        );
+        assert_eq!(output, "test result: ok. 7027 passed");
+    }
+
+    #[test]
+    fn a_hint_is_absent_when_its_tool_is_not_available() {
+        // The hint must never name a tool the harness did not offer: a model
+        // told to call what it cannot see is worse than one left to grep.
+        let output = with_tool_hint(
+            "bash",
+            r#"{"command":"grep -rn foo src/"}"#,
+            "hit",
+            &["mcp__ferrosa-memory__search"],
+        );
+        assert_eq!(output, "hit", "no forge server, so no forge hint");
+    }
+
+    #[test]
+    fn a_non_shell_tool_result_is_never_hinted() {
+        // `read` answered a read; it has nothing to be nudged about.
+        let output = with_tool_hint(
+            "read",
+            r#"{"path":"a.rs"}"#,
+            "content",
+            &["mcp__forge__find_definition"],
+        );
+        assert_eq!(output, "content");
     }
 }

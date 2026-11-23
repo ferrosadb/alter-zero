@@ -6,8 +6,6 @@
 //! (`docs/status-indicator.md`), the bands (`docs/shortcuts.md`,
 //! `docs/file-search.md`) and the footer (`docs/footer.md`).
 
-use super::agent::agent_preview_rows;
-use super::live::preview_tool_lines;
 use super::theme::*;
 use super::wrap::cols;
 use super::*;
@@ -74,41 +72,13 @@ pub(super) const fn strip_rows(has_status: bool, preview_rows: u16, hang_rows: u
 /// its own trim (they share this walk, so they agree by construction).
 #[must_use]
 pub fn preview_rows(app: &App, width: u16) -> u16 {
-    // An agent session view previews the *viewed agent's* stream — its live
-    // tool cells, its thinking block, or its reply's uncommitted frontier
-    // (docs/agent-tool.md, docs/agent-view-streaming.md). The branch mirrors
-    // the main one below, so `agent_preview_rows` owns it.
-    if let Some(run) = app.viewed_agent() {
-        return agent_preview_rows(app, run, width);
-    }
-    // A live agent group previews its whole tree cell (over the tool queue's
-    // cells when a mixed round runs both — docs/agent-tool.md); a live tool
-    // queue previews every call's cell (a **parallel batch** shows the
-    // running one + each `⎿ Waiting…` sibling, blank-separated); a `!` shell
-    // run its single `⎿ Running… (Ns)` row. Sized from the same walk the strip
-    // draws ([`preview_tool_lines`]) so the count and the paint agree.
-    if app.agent_group().is_some() || !app.tool_queue().is_empty() {
-        return u16::try_from(preview_tool_lines(app, width).len()).unwrap_or(u16::MAX);
-    }
-    // A `write` still being generated previews its streaming cell
-    // (docs/write-streaming.md), sized from the walk the strip draws.
-    if app.tool_drafts().previews().next().is_some() {
-        let lines = super::live::drafting_lines(app, width);
-        return u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    }
-    // The open read/search group's cell holds the slot alone — between
-    // rounds, and through a thought, which opens no block while the group is
-    // up (docs/tool-groups.md *Thoughts*); else an open thinking phase
-    // previews its live block, the `● Thinking…` header plus the tail it
-    // shows (docs/thinking-stream.md). Sized from the same walks the strip
-    // draws, so the two agree by construction.
-    let group = super::live::open_group_lines(app, width).len();
-    if group > 0 {
-        return u16::try_from(group).unwrap_or(u16::MAX);
-    }
-    if let Some(text) = app.reasoning() {
-        let block = super::reasoning::live_reasoning_lines(text, app.pulse(), width);
-        return u16::try_from(block.len()).unwrap_or(u16::MAX);
+    // Live cells — a running or queued call, a live agent group, a `write`
+    // still being generated, the open read/search group, an open thinking
+    // phase, in the main conversation or the viewed agent's — preview whole:
+    // sized from the very rows the strip draws ([`live_cell_lines`], built
+    // once a frame), so the count and the paint agree by construction.
+    if let Some(cells) = super::live::live_cell_lines(app, width) {
+        return u16::try_from(cells.len()).unwrap_or(u16::MAX);
     }
     // A streaming reply previews the rows scrollback does not hold yet — its
     // last row for ordinary prose, every wrapped row of a withheld source
@@ -122,8 +92,14 @@ pub fn preview_rows(app: &App, width: u16) -> u16 {
     // here would reserve a row [`preview_lines`] does not draw, tripping its
     // `debug_assert`. 1 until a draw injects one (`App::begin_stream`'s
     // default), which is also what the `None` render fallback draws. The
-    // pre-stream pause / idle reserve none.
-    if app.streaming_text().is_some_and(|t| !t.is_empty()) {
+    // pre-stream pause / idle reserve none. An agent session view previews
+    // the *viewed agent's* reply the same way, through the render its
+    // commits go through (docs/agent-view-streaming.md).
+    let streaming = match app.viewed_agent() {
+        Some(run) => run.streaming.as_deref(),
+        None => app.streaming_text(),
+    };
+    if streaming.is_some_and(|text| !text.is_empty()) {
         app.stream_preview_rows()
     } else {
         0
@@ -281,6 +257,20 @@ pub fn hang_rows(app: &App, width: u16) -> u16 {
 /// caret's own column ([`text_field_width`]).
 fn field_width(width: u16) -> u16 {
     text_field_width(width.saturating_sub(BULLET_WIDTH))
+}
+
+/// Which way the banner mascot looks to see the caret at `width` — what its
+/// eyes do while the user types the first message
+/// (`docs/mascot-animation.md` *Watching the user type*). The caret's
+/// screen column on its own wrapped row — the composer's inset plus its
+/// column in the field — read from where the mascot stands: the banner's
+/// art sits at the screen's left edge, over the composer's first columns,
+/// so nearly every caret is to its right and a row that wraps brings its
+/// eyes back ahead with it.
+pub(super) fn caret_gaze(app: &App, width: u16) -> crate::app::Gaze {
+    let (_, col) = app.input.cursor_row_col(field_width(width));
+    let caret = usize::from(BULLET_WIDTH) + col;
+    crate::app::Gaze::toward(caret, 0..app.mascot().art_width())
 }
 
 /// The text width of a field painted into `cells` columns: one less, kept for
@@ -894,6 +884,8 @@ pub fn cursor_visible(app: &App) -> bool {
     if app.hooks_menu.is_some()
         || app.config_review.is_some()
         || app.donate_picker.is_some()
+        || app.sponsor_page.is_some()
+        || app.discord_page.is_some()
         || app.export_picker.is_some()
         || app.context_usage.is_some()
         || app.usage_page.is_some()
@@ -922,8 +914,23 @@ pub fn cursor_visible(app: &App) -> bool {
     {
         return false;
     }
+    // The auth page's fields are typed into — its `URL >` paste field, its
+    // client form — unless the sign-in failed, when the page is a reason to
+    // read, or the form's authorization server is still being looked up:
+    // nothing to type on either.
     if let Some(menu) = &app.mcp_menu {
-        return menu.page == crate::app::McpPage::Auth;
+        return menu.page == crate::app::McpPage::Auth
+            && menu.auth.failed.is_none()
+            && !menu.auth.lookup;
+    }
+    // The `/plugins` list's search line — the add tab's field too — and its
+    // add page's field are typed into; its other pages are menus
+    // (`docs/plugins.md`).
+    if let Some(menu) = &app.plugins_menu {
+        return matches!(
+            menu.page,
+            crate::app::PluginsPage::List | crate::app::PluginsPage::Add
+        );
     }
     // The `/secrets` list is a menu; its form is typed into
     // (`docs/secrets.md`).
@@ -1194,6 +1201,16 @@ pub fn cursor_position(area: Rect, app: &App) -> (u16, u16) {
         let lines = super::donate_view::donate_view_lines(app, area.width, area.height);
         return menu_marker_seat(&lines, area);
     }
+    // …and the read-only `/sponsor` page, its twin (docs/sponsor.md).
+    if app.sponsor_page.is_some() {
+        let lines = super::sponsor_view::sponsor_view_lines(app, area.width, area.height);
+        return menu_marker_seat(&lines, area);
+    }
+    // …and the read-only `/discord` page, on its one row (docs/discord.md).
+    if app.discord_page.is_some() {
+        let lines = super::discord_view::discord_view_lines(app, area.width, area.height);
+        return menu_marker_seat(&lines, area);
+    }
     // …and the read-only `/export` page, its sibling (docs/export.md).
     if app.export_picker.is_some() {
         let lines = super::export_view::export_view_lines(app, area.width);
@@ -1227,29 +1244,53 @@ pub fn cursor_position(area: Rect, app: &App) -> (u16, u16) {
         return (x, view_cursor_y(area, body, row));
     }
     // The `/mcp` manager seats on its `❯` too — except its auth page,
-    // whose `URL >` paste field seats the caret at the typed text's end, on
-    // the field's row **found** in the page the paint builds
-    // (`view_prompt_row`'s rule): the notes under the field wrap with the
-    // width, so a row counted up from the region's bottom landed under the
-    // field on a narrow terminal. See `docs/mcp.md`.
+    // whose field — the `URL >` paste field, or the client form's focused
+    // one — seats the caret at the typed text's end, on the field's row
+    // **found** in the page the paint builds (`view_prompt_row`'s rule): the
+    // notes around the field wrap with the width, so a row counted up from
+    // the region's bottom landed under the field on a narrow terminal. See
+    // `docs/mcp.md`.
     if let Some(menu) = &app.mcp_menu {
         let lines = super::mcp_view::mcp_view_lines(app, area.width);
-        if menu.page == crate::app::McpPage::Auth {
-            let x =
-                cols(MODEL_INDENT)
-                    + cols(super::theme::MCP_AUTH_PROMPT)
-                    + cols(&menu.auth.input).min(usize::from(area.width).saturating_sub(
-                        cols(MODEL_INDENT) + cols(super::theme::MCP_AUTH_PROMPT) + 1,
-                    ));
+        // A failed sign-in's page has no field, nor has a lookup's: the
+        // hidden cursor seats as on any page without a marker.
+        if menu.page == crate::app::McpPage::Auth && menu.auth.failed.is_none() && !menu.auth.lookup
+        {
+            // The field taking keys: the client form's focused one, at the
+            // column its builder reports, else the `URL >` paste field.
+            let (prompt, x) = match &menu.auth.client {
+                Some(form) => super::mcp_view::client_caret(form, area.width),
+                None => (
+                    super::theme::MCP_AUTH_PROMPT,
+                    cols(MODEL_INDENT)
+                        + cols(super::theme::MCP_AUTH_PROMPT)
+                        + cols(&menu.auth.input).min(usize::from(area.width).saturating_sub(
+                            cols(MODEL_INDENT) + cols(super::theme::MCP_AUTH_PROMPT) + 1,
+                        )),
+                ),
+            };
             let x = area.x + (x.min(usize::from(area.width.saturating_sub(1))) as u16);
             let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
             let [_, body] = view_split(area, rows);
-            let field =
-                super::model_view::view_row_of(&lines, super::theme::MCP_AUTH_PROMPT).unwrap_or(0);
+            let field = super::model_view::view_row_of(&lines, prompt).unwrap_or(0);
             let row = anchored_view_row(rows, body, field);
             return (x, view_cursor_y(area, body, row));
         }
         return menu_marker_seat(&lines, area);
+    }
+    // The `/plugins` page: the caret at the end of its search line or in its
+    // add page's field, at the seat the builder reports; on a detail page,
+    // the hidden cursor on the highlighted `❯` (docs/plugins.md).
+    if app.plugins_menu.is_some() {
+        let build = super::plugins_view::plugins_build(app, area.width, area.height);
+        let Some((col, row)) = build.cursor else {
+            return menu_marker_seat(&build.lines, area);
+        };
+        let rows = u16::try_from(build.lines.len()).unwrap_or(u16::MAX);
+        let [_, body] = view_split(area, rows);
+        let x = area.x + col.min(area.width.saturating_sub(1));
+        let row = anchored_view_row(rows, body, u16::try_from(row).unwrap_or(u16::MAX));
+        return (x, view_cursor_y(area, body, row));
     }
     // The ↓ background manager band has no text entry at all — park the
     // (shown-once-per-frame) cursor in the band's far corner where it reads

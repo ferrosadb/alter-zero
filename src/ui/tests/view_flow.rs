@@ -28,6 +28,7 @@ fn tall_mcp_app() -> App {
         auth: None,
         identity: None,
         excluded: Vec::new(),
+        kept_client: None,
         tools: vec![McpToolInfo {
             name: "ask_question".to_string(),
             description: "describe ".repeat(300),
@@ -53,11 +54,13 @@ fn tall_mcp_server_app(first_arg: &str) -> App {
             command: "npx".to_string(),
             args,
             env: Default::default(),
+            cwd: None,
         },
         status: McpServerStatus::Connected,
         auth: None,
         identity: None,
         excluded: Vec::new(),
+        kept_client: None,
         tools: Vec::new(),
     }]);
     app.mcp_menu.as_mut().unwrap().page = McpPage::Server;
@@ -118,6 +121,7 @@ fn a_covering_modal_suppresses_the_flow() {
         detail: None,
         agent: None,
         agent_id: None,
+        check_failure: None,
     });
     assert!(
         view_flow(&app, 60, 20, NO_CAP).is_none(),
@@ -219,6 +223,7 @@ fn a_screen_tall_permission_prompt_flows_its_top() {
         detail: None,
         agent: None,
         agent_id: None,
+        check_failure: None,
     });
     let (width, height) = (70u16, 24u16);
     let flow = view_flow(&app, width, height, NO_CAP).expect("the prompt overflows");
@@ -246,6 +251,7 @@ fn a_screen_tall_permission_prompt_flows_its_top() {
         detail: None,
         agent: None,
         agent_id: None,
+        check_failure: None,
     });
     assert!(view_flow(&small, width, height, NO_CAP).is_none());
 }

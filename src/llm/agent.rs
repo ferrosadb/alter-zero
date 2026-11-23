@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::exec::ToolProgress;
 use super::hooks::{HookSink, allowed_note, block_texts as hook_block_texts};
 use super::tools::{
-    ToolCallRequest, ToolOutcome, display_name, image_attachment_note, summarize_call,
+    ToolCallRequest, ToolOutcome, attachment_note, display_name, summarize_call,
     summarize_call_naming,
 };
 use super::{ChatMessage, ContentPart, LlmError};
@@ -39,6 +39,79 @@ use crate::stream::{CancelToken, RoundCall, StreamEvent, ToolCallSummary};
 ///
 /// [`LlmBackend::with_max_tool_calls`]: super::LlmBackend::with_max_tool_calls
 pub const MAX_TOOL_ITERATIONS: usize = 20;
+
+/// The run-wide budget of **model replies** `--max-turns` sets
+/// (`docs/headless.md`): every request the lead agent sends takes one, over
+/// the prompt's turn and every follow-up turn the run starts alike — the
+/// clones share it. Subagents' requests and a compaction's are not counted:
+/// their backends never carry it. Checked in the backend's round closure,
+/// before a request goes out, so a reply past the limit is never sent.
+#[derive(Debug, Clone, Default)]
+pub struct RoundBudget {
+    inner: std::sync::Arc<RoundBudgetInner>,
+}
+
+#[derive(Debug, Default)]
+struct RoundBudgetInner {
+    limit: Option<usize>,
+    used: std::sync::atomic::AtomicUsize,
+    refused: std::sync::atomic::AtomicBool,
+}
+
+impl RoundBudget {
+    /// A budget of `limit` replies — `None`, uncounted only in the limit's
+    /// sense: [`used`](Self::used) still counts, for the run's report.
+    #[must_use]
+    pub fn new(limit: Option<std::num::NonZeroUsize>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(RoundBudgetInner {
+                limit: limit.map(std::num::NonZeroUsize::get),
+                ..RoundBudgetInner::default()
+            }),
+        }
+    }
+
+    /// Take one reply from the budget — `false`, taking nothing, once it is
+    /// spent.
+    #[must_use]
+    pub fn take(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let limit = self.inner.limit.unwrap_or(usize::MAX);
+        let taken = self
+            .inner
+            .used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                (used < limit).then_some(used + 1)
+            })
+            .is_ok();
+        if !taken {
+            self.inner.refused.store(true, Ordering::SeqCst);
+        }
+        taken
+    }
+
+    /// The replies taken so far.
+    #[must_use]
+    pub fn used(&self) -> usize {
+        self.inner.used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether the budget refused a reply — the run stopped on its limit.
+    #[must_use]
+    pub fn spent(&self) -> bool {
+        self.inner.refused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The error a refused reply ends its turn on.
+    #[must_use]
+    pub fn limit_message(&self) -> String {
+        let limit = self.inner.limit.unwrap_or_default();
+        format!(
+            "Stopped after {limit} model repl{} — the run's --max-turns limit",
+            if limit == 1 { "y" } else { "ies" }
+        )
+    }
+}
 
 /// What a call refused by the **Max tool calls** ceiling resolves with — the
 /// cell's line and the tool result alike. One sentence, stating the fact.
@@ -241,6 +314,10 @@ pub enum RoundOutcome {
     Cancelled,
     /// The request failed.
     Failed(LlmError),
+    /// The request was never sent: a limit the run set was reached — the
+    /// `--max-turns` budget ([`RoundBudget`]). The turn ends on this
+    /// message, the way the tool-call ceiling ends one.
+    Limit(String),
 }
 
 /// One thing waiting to be folded into the next round's context, taken at
@@ -460,6 +537,14 @@ pub fn run_agent(
                 return;
             }
             RoundOutcome::Cancelled => return,
+            // A request the run's budget refused: the turn ends on the
+            // limit's own message, the tool-call ceiling's shape — and its
+            // `StopFailure` kind, the reference's catch-all for a local limit.
+            RoundOutcome::Limit(message) => {
+                send_hook_report(tx, hooks.stop_failure("unknown", &message, cancel));
+                let _ = tx.send(StreamEvent::Error(message));
+                return;
+            }
             RoundOutcome::Failed(err) => {
                 // `StopFailure` (docs/hooks.md): the turn ends on an error.
                 // Fired BEFORE the Error goes out, as Stop is before
@@ -720,7 +805,12 @@ pub fn run_agent(
                     } else {
                         approve(call, hook.force_ask)
                     };
-                    if let Approval::Reject { display, result } = approval {
+                    if let Approval::Reject {
+                        display,
+                        result,
+                        kind,
+                    } = approval
+                    {
                         let _ = tx.send(tool_start_event(call, session_command));
                         // ToolRejected, not ToolEnd: it carries BOTH texts, so
                         // the recorded call keeps the model-facing `result`
@@ -731,6 +821,9 @@ pub fn run_agent(
                             result: result.clone(),
                             // A refusal: nothing ran, so no capped output.
                             truncated: false,
+                            // …and no duration: only who refused it
+                            // (docs/rollout-records.md).
+                            run: crate::stream::ToolRun::refused(kind),
                         });
                         results.push((call.id.clone(), result));
                         continue;
@@ -773,7 +866,12 @@ pub fn run_agent(
                         };
                         let _ = tx.send(event);
                     };
+                    // Timed around the executor alone, as codex times the spawn
+                    // and the wait: the permission prompt and the hooks are not
+                    // the call's runtime (docs/rollout-records.md).
+                    let started = std::time::Instant::now();
                     let mut outcome = execute(call, &mut on_output);
+                    let ran = outcome.run(started.elapsed());
                     // `PostToolUse` (docs/hooks.md): the call ran, so there is
                     // nothing left to refuse — only things to say. Whatever a
                     // hook adds goes onto the **model-facing** text via the
@@ -824,6 +922,7 @@ pub fn run_agent(
                                 // included — since the record keeps this and
                                 // the cell shows its fixed row either way.
                                 output: outcome.context_text().to_string(),
+                                run: ran,
                             });
                         }
                         (None, Some(context)) if outcome.ok => {
@@ -834,6 +933,7 @@ pub fn run_agent(
                                 // output hit the byte cap still needs its `…`
                                 // marker (docs/hooks.md).
                                 truncated: outcome.truncated,
+                                run: ran,
                             });
                         }
                         (None, Some(context)) => {
@@ -841,6 +941,7 @@ pub fn run_agent(
                                 display: outcome.output.clone(),
                                 result: context.clone(),
                                 truncated: outcome.truncated,
+                                run: ran,
                             });
                         }
                         (None, None) => {
@@ -848,6 +949,7 @@ pub fn run_agent(
                                 output: outcome.output.clone(),
                                 ok: outcome.ok,
                                 truncated: outcome.truncated,
+                                run: ran,
                             });
                         }
                     }
@@ -855,14 +957,26 @@ pub fn run_agent(
                     // the two (it equals the display for every ordinary call).
                     results.push((call.id.clone(), outcome.context_text().to_string()));
                     if let Some(url) = outcome.image {
-                        let path = summarize_call(&call.name, &call.arguments);
+                        // The note names the picture's file: a `read`'s
+                        // path, a generated image's saved file
+                        // (`docs/imagegen.md`) — the bytes the replay
+                        // rebuilds on every later turn.
+                        let note = attachment_note(&call.name, &call.arguments, &outcome.output);
                         attachments.push(ChatMessage::with_parts(
                             "user",
-                            vec![
-                                ContentPart::text(image_attachment_note(&path)),
-                                ContentPart::image(url),
-                            ],
+                            vec![ContentPart::text(note), ContentPart::image(url)],
                         ));
+                    } else if outcome.image_withheld
+                        && let Some((path, _)) =
+                            crate::llm::imagegen::generated_image(&outcome.output)
+                    {
+                        // A picture kept back from a model that cannot see
+                        // one: the note degraded exactly as the replay
+                        // degrades it, so the next turn's request starts as
+                        // this one did (docs/imagegen.md).
+                        let note = attachment_note(&call.name, &call.arguments, &outcome.output);
+                        let line = super::backend::omitted_image_line(std::path::Path::new(&path));
+                        attachments.push(ChatMessage::user(format!("{note}{line}")));
                     }
                 }
                 // The calls the ceiling refused: each shows as its own red
@@ -878,6 +992,9 @@ pub fn run_agent(
                         output: TOOL_LIMIT_OUTPUT.to_string(),
                         ok: false,
                         truncated: false,
+                        run: crate::stream::ToolRun::refused(
+                            crate::stream::ToolErrorKind::ToolCallLimit,
+                        ),
                     });
                 }
                 // A refused `agent` call never launched, so it has no cell —
@@ -948,6 +1065,7 @@ fn refuse_by_hook(
         result: result.clone(),
         // A refusal: nothing ran, so no capped output.
         truncated: false,
+        run: crate::stream::ToolRun::refused(crate::stream::ToolErrorKind::HookBlocked),
     });
     result
 }
@@ -1010,6 +1128,26 @@ mod tests {
         out
     }
 
+    /// `events` with the resolving events' measured durations taken out — a
+    /// clock reading no exact comparison can predict. What a call's run says
+    /// otherwise (its exit code, its failure kind) is still compared
+    /// (`docs/rollout-records.md`).
+    fn unclocked(events: Vec<StreamEvent>) -> Vec<StreamEvent> {
+        events
+            .into_iter()
+            .map(|mut event| {
+                if let StreamEvent::ToolEnd { run, .. }
+                | StreamEvent::ToolAnswered { run, .. }
+                | StreamEvent::ToolRejected { run, .. }
+                | StreamEvent::ToolBackgrounded { run, .. } = &mut event
+                {
+                    run.duration_ms = None;
+                }
+                event
+            })
+            .collect()
+    }
+
     /// The round a fake model ends its turn with: a real, if short, answer.
     /// An *empty* `Complete` is a round the loop continues rather than an
     /// answer (docs/unfinished-replies.md), so a fixture that means "the
@@ -1033,6 +1171,284 @@ mod tests {
         let (skills, errors) = super::super::skill::discover_skills(&[root.to_path_buf()]);
         assert!(errors.is_empty(), "{errors:?}");
         crate::skills::SkillRegistry::new(skills)
+    }
+
+    // ===== how a call ran (docs/rollout-records.md) =====
+
+    /// One round of `calls` against `execute` and `approve`, under a
+    /// `max_tool_calls` ceiling, then the model's answer: the events it sent.
+    fn ran(
+        calls: Vec<ToolCallRequest>,
+        max_tool_calls: usize,
+        execute: impl FnMut(&ToolCallRequest, &mut dyn FnMut(ToolProgress<'_>)) -> ToolOutcome,
+        approve: impl FnMut(&ToolCallRequest, bool) -> Approval,
+    ) -> Vec<StreamEvent> {
+        let (tx, mut rx) = unbounded_channel();
+        let mut messages = vec![ChatMessage::user("go")];
+        let mut rounds = vec![calls].into_iter();
+        run_agent(
+            &tx,
+            &CancelToken::new(),
+            max_tool_calls,
+            &mut messages,
+            |_| match rounds.next() {
+                Some(calls) => RoundOutcome::ToolCalls {
+                    assistant: assistant_with(&calls),
+                    calls,
+                },
+                None => answered(),
+            },
+            execute,
+            Vec::new,
+            |_| Vec::new(),
+            approve,
+            &NoHooks,
+            &no_sessions,
+        );
+        drain(&mut rx)
+    }
+
+    /// The `run` every resolving event carried, in order.
+    fn runs(events: &[StreamEvent]) -> Vec<crate::stream::ToolRun> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolEnd { run, .. }
+                | StreamEvent::ToolAnswered { run, .. }
+                | StreamEvent::ToolRejected { run, .. }
+                | StreamEvent::ToolBackgrounded { run, .. } => Some(*run),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_call_that_ran_carries_its_exit_code_and_how_long_it_ran() {
+        let events = ran(
+            vec![call("a", "bash", r#"{"command":"cargo test"}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                ToolOutcome::error("Exit code: 101\nFAILED").with_exit_code(101)
+            },
+            |_, _| Approval::Allow,
+        );
+        let [run] = runs(&events)[..] else {
+            panic!("one resolution: {events:?}");
+        };
+        assert_eq!(run.exit_code, Some(101));
+        // A failure nothing more specific explains is the tool's own.
+        assert_eq!(
+            run.error_kind,
+            Some(crate::stream::ToolErrorKind::ToolError)
+        );
+        assert!(run.duration_ms.is_some_and(|ms| ms >= 30), "{run:?}");
+    }
+
+    #[test]
+    fn a_call_that_succeeded_names_no_failure() {
+        let events = ran(
+            vec![call("a", "bash", r#"{"command":"true"}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| ToolOutcome::ok("Exit code: 0").with_exit_code(0),
+            |_, _| Approval::Allow,
+        );
+        let [run] = runs(&events)[..] else {
+            panic!("one resolution: {events:?}");
+        };
+        assert_eq!(run.exit_code, Some(0));
+        assert_eq!(run.error_kind, None);
+        assert!(run.duration_ms.is_some(), "it ran: {run:?}");
+    }
+
+    #[test]
+    fn an_outcome_that_names_its_failure_keeps_it() {
+        // The executor knows a timeout from any other failure.
+        let events = ran(
+            vec![call("a", "bash", r#"{"command":"sleep 9"}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| {
+                ToolOutcome::error("command timed out")
+                    .with_error_kind(crate::stream::ToolErrorKind::TimedOut)
+            },
+            |_, _| Approval::Allow,
+        );
+        assert_eq!(
+            runs(&events)[0].error_kind,
+            Some(crate::stream::ToolErrorKind::TimedOut)
+        );
+    }
+
+    #[test]
+    fn a_call_whose_two_texts_differ_still_says_how_it_ran() {
+        // A `write`'s numbered cell and the model's one-line ack resolve as
+        // `ToolAnswered`; the facts ride it the same way.
+        let events = ran(
+            vec![call("a", "write", r#"{"path":"a.py","content":"x"}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| ToolOutcome::ok("Wrote 1 line to a.py").with_context("File created"),
+            |_, _| Approval::Allow,
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolAnswered { .. })),
+            "{events:?}"
+        );
+        let [run] = runs(&events)[..] else {
+            panic!("one resolution: {events:?}");
+        };
+        assert_eq!((run.exit_code, run.error_kind), (None, None));
+        assert!(run.duration_ms.is_some(), "{run:?}");
+    }
+
+    #[test]
+    fn a_call_handed_to_the_background_is_timed_to_the_handoff() {
+        let events = ran(
+            vec![call("a", "bash", r#"{"command":"npm run dev","wait":0}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| ToolOutcome::backgrounded("b1", "Running in the background"),
+            |_, _| Approval::Allow,
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ToolBackgrounded { .. })),
+            "{events:?}"
+        );
+        let [run] = runs(&events)[..] else {
+            panic!("one resolution: {events:?}");
+        };
+        assert_eq!(run.exit_code, None, "still running");
+        assert_eq!(run.error_kind, None);
+        assert!(run.duration_ms.is_some(), "{run:?}");
+    }
+
+    #[test]
+    fn a_refused_call_says_who_refused_it_and_never_ran() {
+        let executed = RefCell::new(false);
+        let events = ran(
+            vec![call("a", "bash", r#"{"command":"rm -rf build"}"#)],
+            MAX_TOOL_ITERATIONS,
+            |_, _| {
+                *executed.borrow_mut() = true;
+                ToolOutcome::ok("")
+            },
+            |_, _| Approval::Reject {
+                display: "Denied by auto mode classifier".into(),
+                result: "denied".into(),
+                kind: crate::stream::ToolErrorKind::ClassifierDenied,
+            },
+        );
+        assert!(!*executed.borrow(), "a refused call never runs");
+        assert_eq!(
+            runs(&events),
+            vec![crate::stream::ToolRun::refused(
+                crate::stream::ToolErrorKind::ClassifierDenied
+            )]
+        );
+    }
+
+    #[test]
+    fn a_call_over_the_ceiling_is_refused_by_the_limit() {
+        let events = ran(
+            vec![
+                call("a", "bash", r#"{"command":"one"}"#),
+                call("b", "bash", r#"{"command":"two"}"#),
+            ],
+            1,
+            |_, _| ToolOutcome::ok("Exit code: 0").with_exit_code(0),
+            |_, _| Approval::Allow,
+        );
+        let runs = runs(&events);
+        assert_eq!(runs.len(), 2, "{events:?}");
+        assert_eq!(runs[0].exit_code, Some(0), "the first one ran");
+        assert_eq!(
+            runs[1],
+            crate::stream::ToolRun::refused(crate::stream::ToolErrorKind::ToolCallLimit)
+        );
+    }
+
+    #[test]
+    fn a_hook_block_says_a_hook_refused_the_call() {
+        let hooks = FakeHooks {
+            pre: PreToolVerdict {
+                blocked: Some(crate::hooks::HookBlock {
+                    reason: "no destructive deletes".into(),
+                    hook: Some("./guard.sh".into()),
+                }),
+                ..PreToolVerdict::default()
+            },
+            ..FakeHooks::default()
+        };
+        let (events, _) = round_with_hooks(&hooks);
+        assert_eq!(
+            runs(&events),
+            vec![crate::stream::ToolRun::refused(
+                crate::stream::ToolErrorKind::HookBlocked
+            )]
+        );
+    }
+
+    // ===== the run's reply budget: --max-turns (docs/headless.md) =====
+
+    #[test]
+    fn a_budget_without_a_limit_never_refuses() {
+        let budget = RoundBudget::new(None);
+        for _ in 0..1_000 {
+            assert!(budget.take());
+        }
+        assert_eq!(budget.used(), 1_000);
+        assert!(!budget.spent());
+    }
+
+    #[test]
+    fn a_budget_refuses_the_reply_past_its_limit_and_says_so_once_spent() {
+        let budget = RoundBudget::new(std::num::NonZeroUsize::new(2));
+        assert!(budget.take());
+        // Clones share it: the prompt's turn and every follow-up count
+        // against one budget.
+        assert!(budget.clone().take());
+        assert!(
+            !budget.spent(),
+            "the limit was reached, nothing refused yet"
+        );
+        assert!(!budget.take());
+        assert!(budget.spent());
+        assert_eq!(budget.used(), 2, "a refused reply is never counted");
+        assert_eq!(
+            budget.limit_message(),
+            "Stopped after 2 model replies — the run's --max-turns limit"
+        );
+    }
+
+    #[test]
+    fn a_round_the_budget_refuses_ends_the_turn_on_its_message() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut messages = vec![ChatMessage::user("go")];
+        let mut asked = 0;
+        run_agent(
+            &tx,
+            &CancelToken::new(),
+            MAX_TOOL_ITERATIONS,
+            &mut messages,
+            |_| {
+                asked += 1;
+                RoundOutcome::Limit("Stopped after 1 model reply".to_string())
+            },
+            |_, _| ToolOutcome::ok(String::new()),
+            Vec::new,
+            |_| Vec::new(),
+            |_, _| Approval::Allow,
+            &NoHooks,
+            &no_sessions,
+        );
+        assert_eq!(asked, 1);
+        let events = drain(&mut rx);
+        assert!(
+            matches!(events.as_slice(), [StreamEvent::Error(message)] if message == "Stopped after 1 model reply"),
+            "{events:?}"
+        );
     }
 
     fn skill_rounds(
@@ -2750,7 +3166,7 @@ mod tests {
             &NoHooks,
             &no_sessions,
         );
-        let events = drain(&mut rx);
+        let events = unclocked(drain(&mut rx));
         assert_eq!(
             events,
             vec![
@@ -2780,6 +3196,7 @@ mod tests {
                     output: "ran bash".to_string(),
                     ok: true,
                     truncated: false,
+                    run: crate::stream::ToolRun::default(),
                 },
                 StreamEvent::StreamDone,
             ]
@@ -2804,6 +3221,7 @@ mod tests {
                     display: "User answered Alter Zero's questions:\n· Q → A".to_string(),
                     result: r#"{"answers":{"Q":"A"}}"#.to_string(),
                     truncated: false,
+                    run: crate::stream::ToolRun::default(),
                 },
             ),
             (
@@ -2812,6 +3230,11 @@ mod tests {
                     display: "User answered Alter Zero's questions:\n· Q → A".to_string(),
                     result: r#"{"answers":{"Q":"A"}}"#.to_string(),
                     truncated: false,
+                    // It ran and failed: the tool's own failure.
+                    run: crate::stream::ToolRun {
+                        error_kind: Some(crate::stream::ToolErrorKind::ToolError),
+                        ..crate::stream::ToolRun::default()
+                    },
                 },
             ),
         ] {
@@ -2844,8 +3267,11 @@ mod tests {
                         truncated: false,
                         background: None,
                         image: None,
+                        image_withheld: false,
                         tasks: None,
                         context: None,
+                        exit_code: None,
+                        error_kind: None,
                     };
                     outcome.with_context(r#"{"answers":{"Q":"A"}}"#)
                 },
@@ -2855,7 +3281,7 @@ mod tests {
                 &NoHooks,
                 &no_sessions,
             );
-            let events = drain(&mut rx);
+            let events = unclocked(drain(&mut rx));
             assert!(
                 events.contains(&expected),
                 "ok={ok}: expected {expected:?} in {events:?}"
@@ -3958,6 +4384,84 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_withheld_from_a_blind_model_sends_the_note_the_replay_sends() {
+        // docs/imagegen.md: the executor keeps the pixels from a model that
+        // can't see them, and the round carries the note degraded exactly as
+        // every later turn's replay degrades it — so the next request starts
+        // as this one did and the prompt cache holds.
+        use crate::llm::MessageContent;
+        let path = "/c/generated_images/s1/1.png";
+        let fact = crate::llm::imagegen::format_generated("PNG", (8, 8), 90, path);
+        let (tx, mut rx) = unbounded_channel();
+        let cancel = CancelToken::new();
+        let rounds = RefCell::new(0);
+        let calls = vec![call("c1", "imagegen", r#"{"prompt":"a fox"}"#)];
+        let seen_round2: RefCell<Vec<ChatMessage>> = RefCell::new(Vec::new());
+        run_agent(
+            &tx,
+            &cancel,
+            MAX_TOOL_ITERATIONS,
+            &mut vec![ChatMessage::user("draw a fox")],
+            |msgs| {
+                let mut n = rounds.borrow_mut();
+                *n += 1;
+                if *n == 1 {
+                    RoundOutcome::ToolCalls {
+                        assistant: assistant_with(&calls),
+                        calls: calls.clone(),
+                    }
+                } else {
+                    *seen_round2.borrow_mut() = msgs.to_vec();
+                    answered()
+                }
+            },
+            |_c, _sink| {
+                ToolOutcome::ok(fact.clone())
+                    .with_context(format!("{fact}\nThis model cannot see images."))
+                    .with_image_withheld()
+            },
+            Vec::new,
+            |_calls| Vec::new(),
+            |_call, _force| Approval::Allow,
+            &NoHooks,
+            &no_sessions,
+        );
+        drain(&mut rx);
+        let seen = seen_round2.into_inner();
+        let roles: Vec<&str> = seen.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "user"]);
+        // The replay: the recorded cell's attachment, built for the same
+        // vision-less model.
+        let (note, attached) = crate::llm::tools::recorded_attachment(
+            crate::llm::imagegen::IMAGEGEN_TOOL_DISPLAY,
+            "a fox",
+            &fact,
+        )
+        .expect("a generated image replays an attachment");
+        let replayed = super::super::backend::build_messages_for(
+            Some(false),
+            None,
+            "",
+            &[crate::context::ContextMessage {
+                role: crate::context::ContextRole::User,
+                text: note,
+                images: vec![std::path::PathBuf::from(attached)],
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+            }],
+            |_| None::<crate::images::AttachmentUrl>,
+        );
+        let live = seen.last().unwrap();
+        assert!(
+            matches!((&live.content, &replayed[0].content),
+                (MessageContent::Text(live), MessageContent::Text(replay)) if live == replay),
+            "live {:?} vs replay {:?}",
+            live.content,
+            replayed[0].content
+        );
+    }
+
+    #[test]
     fn an_imageless_round_attaches_nothing() {
         // The zero-image path is byte-identical to before the feature.
         let (tx, mut rx) = unbounded_channel();
@@ -4043,7 +4547,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                StreamEvent::ToolBackgrounded { id, output }
+                StreamEvent::ToolBackgrounded { id, output, .. }
                     if id == "bash_1" && output.contains("bash_1")
             )),
             "the call resolves as backgrounded: {events:?}"
@@ -4092,6 +4596,7 @@ mod tests {
             |_call, _force| Approval::Reject {
                 display: "User rejected write to hello.py".to_string(),
                 result: "The user doesn't want to proceed…".to_string(),
+                kind: crate::stream::ToolErrorKind::Rejected,
             },
             &NoHooks,
             &no_sessions,
@@ -4172,6 +4677,7 @@ mod tests {
             |_call, _force| Approval::Reject {
                 display: "User rejected input".to_string(),
                 result: "The user doesn't want to proceed…".to_string(),
+                kind: crate::stream::ToolErrorKind::Rejected,
             },
             &NoHooks,
             &|id: &str| (id == "b5xg4o2w0").then(|| "sudo pacman -Syy".to_string()),

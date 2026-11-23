@@ -41,19 +41,21 @@ use std::time::Duration;
 
 use alter_zero::agents::AgentRegistry;
 use alter_zero::app::{
-    LocalChoice, ProviderChoice, ServerTest, SubscriptionChoice, ToastKind, UsageTarget,
+    LocalChoice, ProviderChoice, ProviderLoad, ServerTest, SubscriptionChoice, ToastKind,
+    UsageTarget,
 };
 use alter_zero::background::BackgroundRegistry;
+use alter_zero::llm::model_cache::{CachedListing, FetchLedger, FetchPlan, Freshness};
 use alter_zero::llm::{
     self, AuthScheme, EnvFile, LlmBackend, ModelConfig, ModelEntry, ModelSelection, ProvidersFile,
     ReasoningSupport, STANDARD_LABEL, ServiceTier, SpeedSettings, SpeedState, ThinkingMode,
 };
 use alter_zero::permission::PermissionGate;
 use alter_zero::settings::SessionSettings;
-use alter_zero::stream::{self, CancelToken, DummyAi, ReplySource};
+use alter_zero::stream::{self, DummyAi, ReplySource};
 use alter_zero::ui;
 
-use super::workers::{ModelFetch, spawn_model_fetch};
+use super::workers::{ModelFetch, ModelFetchJob, spawn_model_fetch, spawn_probe_fetch};
 use super::{Session, config};
 
 /// A model's capabilities as the loop tracks them: its reasoning support (and
@@ -61,6 +63,15 @@ use super::{Session, config};
 /// big its context window is. `None` anywhere means "unknown" — the startup
 /// probe finds out, and until it does the loop stays optimistic.
 type Thinking = (ReasoningSupport, ThinkingMode);
+
+/// A `/model` round as [`ModelSession::model_round`] plans it: what the
+/// picker shows of every configured provider at once, and the fetches it
+/// starts — each with its own ticket and cancel flag from the ledger
+/// (`docs/model-cache.md`).
+pub(crate) struct ModelRound {
+    pub(crate) loads: Vec<ProviderLoad>,
+    pub(crate) jobs: Vec<ModelFetchJob>,
+}
 
 /// The reply backend plus the configuration that chose it.
 pub(crate) struct ModelSession {
@@ -171,7 +182,12 @@ pub(crate) struct ModelSession {
     /// backend is draining.
     steer: alter_zero::steer::SteerQueue,
     permissions: Option<PermissionGate>,
-    ask: alter_zero::ask::AskGate,
+    /// The `AskUserQuestion` gate — `None` in a headless run, where nobody
+    /// could answer, so the tool is never offered (`docs/headless.md`).
+    ask: Option<alter_zero::ask::AskGate>,
+    /// A headless run's reply budget (`--max-turns`, `docs/headless.md`),
+    /// re-attached on every rebuild like the registries; `None` in the TUI.
+    round_budget: Option<alter_zero::llm::agent::RoundBudget>,
     /// The shared task list (docs/task-tools.md) — enables the four task
     /// tools on every rebuild.
     tasks: alter_zero::tasks::TaskRegistry,
@@ -194,6 +210,18 @@ pub(crate) struct ModelSession {
     /// [`Self::skills_offered`] need a rebuild. Re-deriving both sides would
     /// make them equal by construction and rebuild either never or always.
     skills_attached: bool,
+    /// The `imagegen` tool's setup (`docs/imagegen.md`) — the shared ChatGPT
+    /// Codex sign-in, kept current here, and where images are saved. Offered
+    /// whatever provider the session runs on, while the sign-in is stored and
+    /// [`Self::imagegen_enabled`] is on.
+    imagegen: Option<alter_zero::llm::imagegen::ImagegenSetup>,
+    /// The `/settings` **Image generation** row (`docs/imagegen.md`), read by
+    /// every build so a mid-session switch sticks.
+    imagegen_enabled: bool,
+    /// Whether the **live** backend was built with the `imagegen` tool — the
+    /// last build's verdict, tracked for [`Self::refresh_imagegen`] exactly as
+    /// `skills_attached` is for the skills.
+    imagegen_attached: bool,
     /// The session's MCP manager (`docs/mcp.md`) — `None` when the feature is
     /// off. Re-attached on every rebuild like the registries above; the
     /// tracked `mcp_fingerprint` is the *last build's* offered wire-name set,
@@ -212,8 +240,10 @@ pub(crate) struct ModelSession {
     /// [`Self::release_session_start`], so a hook trusted on the review's
     /// first page still hears the `startup` it was configured for.
     session_start_held: bool,
-    /// The `/model` picker's in-flight fetch, so closing the picker cancels it.
-    fetch_cancel: Option<CancelToken>,
+    /// The `/model` list fetches still out, one live ticket per provider
+    /// (`docs/model-cache.md`): a fetch outlives the picker that started it,
+    /// a reopen waits on it, and a `/login` save retires it.
+    fetch_ledger: FetchLedger,
     /// Whether the startup capability probe is still outstanding — the gate on
     /// its `select!` branch. Cleared by the first result, or by a `/model`
     /// switch that learned the same facts first-hand.
@@ -241,13 +271,16 @@ impl ModelSession {
         agents: &AgentRegistry,
         steer: &alter_zero::steer::SteerQueue,
         permissions: Option<&PermissionGate>,
-        ask: &alter_zero::ask::AskGate,
+        ask: Option<&alter_zero::ask::AskGate>,
         tasks: &alter_zero::tasks::TaskRegistry,
         skills: &alter_zero::skills::SkillRegistry,
         subagents: &alter_zero::subagents::SubagentRegistry,
         mcp: Option<&alter_zero::llm::mcp::McpManager>,
         settings: &SessionSettings,
         hooks: Option<HookSetup>,
+        round_budget: Option<&alter_zero::llm::agent::RoundBudget>,
+        system_prompt_flags: &super::startup::SystemPromptFlags,
+        imagegen: Option<alter_zero::llm::imagegen::ImagegenSetup>,
     ) -> Self {
         let (providers, provider_issues) = config::startup_providers(home);
         // The persistent API-key store: `.env` in the config home (or
@@ -321,7 +354,16 @@ impl ModelSession {
         let skills_enabled = settings.skills;
         let skills = skills.clone();
         let subagents = subagents.clone();
-        let system_prompt = config::system_prompt(cwd, scratchpad);
+        let system_prompt =
+            config::system_prompt(cwd, scratchpad, system_prompt_flags).map(|prompt| {
+                // A headless run — the one session that carries a reply budget —
+                // tells the model nobody is watching (docs/headless.md).
+                if round_budget.is_some() {
+                    llm::backend::augment_with_headless(&prompt)
+                } else {
+                    prompt
+                }
+            });
         // The runtime half alone, for an agent definition whose body replaces
         // the persona (docs/subagents.md).
         let prompt_context = config::prompt_context(cwd, scratchpad);
@@ -434,6 +476,20 @@ impl ModelSession {
                     // tier the conversation was running (docs/fast-mode.md).
                     .with_speed(saved_speed.clone())
             });
+        // The ChatGPT Codex sign-in the `imagegen` tool makes images with,
+        // whatever provider this session runs on (docs/imagegen.md).
+        if let Some(setup) = &imagegen {
+            setup
+                .signin
+                .set(chatgpt_signin_config(&providers, &env_file, temperature));
+        }
+        let imagegen_enabled = settings.imagegen;
+        let imagegen_offered = real_backend
+            && tools
+            && imagegen_enabled
+            && imagegen
+                .as_ref()
+                .is_some_and(|setup| setup.signin.get().is_some());
         let backend: Box<dyn ReplySource> = match (stall_ms, real_config) {
             (Some(ms), _) => Box::new(stream::StallAi::new(Duration::from_millis(ms))),
             (None, Some(cfg)) => Box::new(session_backend(
@@ -453,6 +509,8 @@ impl ModelSession {
                 &subagents,
                 mcp,
                 hooks.as_ref(),
+                round_budget,
+                imagegen.as_ref().filter(|_| imagegen_offered),
             )),
             (None, None) => {
                 // The subagent registry rides the dummy too: the "subagent"
@@ -467,7 +525,6 @@ impl ModelSession {
                     // …and the session's scratchpad, where its scratchpad demo
                     // writes (docs/tool-groups.md *Scratchpad edits*).
                     .with_scratchpad(scratchpad.map(Path::to_path_buf))
-                    .with_ask(ask.clone())
                     .with_agents(agents.clone())
                     // …and the mid-turn queue, so the offline demo takes a
                     // queued message once its tool round resolves, exactly as
@@ -477,6 +534,11 @@ impl ModelSession {
                     // (docs/background.md).
                     .with_steer(steer.clone())
                     .with_background(registry.clone());
+                // The asking demo only where somebody can answer it.
+                let dummy = match ask {
+                    Some(gate) => dummy.with_ask(gate.clone()),
+                    None => dummy,
+                };
                 Box::new(match permissions {
                     Some(gate) => dummy.with_permissions(gate.clone()),
                     None => dummy,
@@ -545,7 +607,8 @@ impl ModelSession {
             agents: agents.clone(),
             steer: steer.clone(),
             permissions: permissions.cloned(),
-            ask: ask.clone(),
+            ask: ask.cloned(),
+            round_budget: round_budget.cloned(),
             tasks: tasks.clone(),
             subagents,
             // What the backend built just above was handed: the same three
@@ -554,12 +617,15 @@ impl ModelSession {
             skills_attached: real_backend && tools && skills_enabled && skills.has_enabled(),
             skills,
             skills_enabled,
+            imagegen,
+            imagegen_enabled,
+            imagegen_attached: imagegen_offered,
             mcp_fingerprint: mcp
                 .map(alter_zero::llm::mcp::McpManager::fingerprint)
                 .unwrap_or_default(),
             mcp: mcp.cloned(),
             hooks,
-            fetch_cancel: None,
+            fetch_ledger: FetchLedger::default(),
             probe_pending: probe.is_some(),
             session_start_held: false,
             thinking_seed: real_backend.then_some(startup_thinking).flatten(),
@@ -572,6 +638,13 @@ impl ModelSession {
     /// The backend a turn spawns on.
     pub(crate) fn backend(&self) -> &dyn ReplySource {
         self.backend.as_ref()
+    }
+
+    /// Whether a real model answers — not the offline demo — which a
+    /// headless run requires unless the demo was asked for
+    /// (`docs/headless.md`).
+    pub(crate) const fn is_real(&self) -> bool {
+        self.real_backend
     }
 
     /// The model id the footer shows (`docs/footer.md`).
@@ -614,13 +687,6 @@ impl ModelSession {
 
     /// Is this the test-only stalled backend? It ignores scripted replies, so
     /// `/compact` and auto-compaction opt out (`docs/interrupt.md`).
-    /// Is no real provider answering — is the built-in dummy playing its
-    /// scripted replies because nothing resolved (`docs/llm.md`)? The headless
-    /// run says so on stderr: a caller that hears canned text should know why.
-    pub(crate) fn is_offline(&self) -> bool {
-        !self.real_backend
-    }
-
     pub(crate) fn is_stalled_test_backend(&self) -> bool {
         self.stall_ms.is_some()
     }
@@ -668,6 +734,7 @@ impl ModelSession {
         match config::load_providers(self.home.as_deref(), in_use) {
             Ok((providers, issues)) => {
                 self.providers = providers;
+                self.sync_imagegen_signin();
                 issues
             }
             Err(reason) => vec![format!("{reason} — keeping the providers already loaded")],
@@ -861,6 +928,7 @@ impl ModelSession {
         // built — `set_tools`, a `/model` switch and a skill toggle all land
         // on it, and any of them can change the verdict.
         self.skills_attached = self.skills_offered();
+        self.imagegen_attached = self.imagegen_offered();
         self.mcp_fingerprint = self
             .mcp
             .as_ref()
@@ -877,12 +945,14 @@ impl ModelSession {
             &self.agents,
             &self.steer,
             self.permissions.as_ref(),
-            &self.ask,
+            self.ask.as_ref(),
             &self.tasks,
             self.skills_enabled.then_some(&self.skills),
             &self.subagents,
             self.mcp.as_ref(),
             self.hooks.as_ref(),
+            self.round_budget.as_ref(),
+            self.imagegen.as_ref().filter(|_| self.imagegen_attached),
         ));
     }
 
@@ -1111,6 +1181,57 @@ impl ModelSession {
     /// each one for nothing.
     pub(crate) fn refresh_skills(&mut self) {
         if self.skills_offered() != self.skills_attached {
+            self.rebuild_current();
+        }
+    }
+
+    /// Whether a build right now would put the `imagegen` spec on the wire
+    /// (`docs/imagegen.md`): tools at all, a real backend, the **Image
+    /// generation** row on, and the ChatGPT Codex sign-in stored — whatever
+    /// provider the session itself runs on. Also what the skills walk
+    /// withholds the seeded `imagegen` skill by.
+    pub(crate) fn imagegen_offered(&self) -> bool {
+        self.real_backend && self.tools && self.imagegen_enabled && self.chatgpt_signed_in()
+    }
+
+    /// Whether a ChatGPT Codex sign-in is stored for the tool to make images
+    /// with — the **Image generation** row's availability.
+    pub(crate) fn chatgpt_signed_in(&self) -> bool {
+        self.imagegen
+            .as_ref()
+            .is_some_and(|setup| setup.signin.get().is_some())
+    }
+
+    /// The `/settings` **Image generation** row (`docs/imagegen.md`): rebuilds
+    /// only when the tool set changes, since a rebuild costs the retained
+    /// prompt prefix.
+    pub(crate) fn set_imagegen(&mut self, enabled: bool) {
+        self.imagegen_enabled = enabled;
+        if self.imagegen_offered() != self.imagegen_attached {
+            self.rebuild_current();
+        }
+    }
+
+    /// Bring the tool's shared sign-in up to date with the key store — a
+    /// `/login` save, a provider reload — so the next call makes its image
+    /// with the account just signed in to, without a rebuild.
+    pub(crate) fn sync_imagegen_signin(&self) {
+        if let Some(setup) = &self.imagegen {
+            setup.signin.set(chatgpt_signin_config(
+                &self.providers,
+                &self.env_file,
+                self.temperature,
+            ));
+        }
+    }
+
+    /// Re-check the `imagegen` tool at a turn start: the sign-in brought up
+    /// to date, and the backend rebuilt only when that flips whether the tool
+    /// is offered — a sign-in mid-session turns it on for the next turn
+    /// (`docs/imagegen.md`, `refresh_skills`'s posture).
+    pub(crate) fn refresh_imagegen(&mut self) {
+        self.sync_imagegen_signin();
+        if self.imagegen_offered() != self.imagegen_attached {
             self.rebuild_current();
         }
     }
@@ -1512,36 +1633,76 @@ impl ModelSession {
 
     // ----- the `/model` fetch and the `/login` key write -----
 
-    /// Start the `/model` picker's fetch: cancel any in-flight one, then GET
-    /// **every** configured provider's list off-thread in parallel (the picker
-    /// shows each as it lands and merges them). Returns how many providers are
-    /// being fetched — `0` means none is configured, and the caller points the
-    /// user at `/login` instead.
-    pub(crate) fn begin_model_fetch(
-        &mut self,
-        tx: &tokio::sync::mpsc::UnboundedSender<ModelFetch>,
-    ) -> usize {
-        self.cancel_model_fetch();
+    /// Plan a `/model` round at `now` (Unix seconds): for **every**
+    /// configured provider, what the picker shows of it at once — its kept
+    /// listing, unless that was read from somewhere else — and what is done
+    /// about its list (`llm::model_cache::plan`, `docs/model-cache.md`): a
+    /// fetch already out for it from the same source is waited on, a fresh
+    /// kept list is left as it is unless `force` (Ctrl+R) says ask anyway,
+    /// and anything else — a stale list, a server the user runs, nothing
+    /// kept — starts a fetch, superseding one out from another source.
+    /// Empty when no provider is configured, and the caller points the user
+    /// at `/login` instead. The fetches run in parallel and outlive the
+    /// picker; the picker merges each as it lands.
+    pub(crate) fn model_round(&mut self, now: i64, force: bool) -> ModelRound {
+        let dir = config::model_cache_dir();
         // Every provider with a resolving credential — a pasted key *or* a
         // subscription's stored token. `provider_choices` answers a different
         // question (which providers `/login` offers a key field for), and
         // fetching from that list would leave a signed-in GitHub Copilot with
         // no models in the picker at all (`docs/copilot.md`).
-        let configured: Vec<ProviderChoice> =
-            config::all_provider_choices(&self.providers, &self.env_file)
-                .into_iter()
-                .filter(|c| c.configured)
-                .collect();
-        if configured.is_empty() {
-            return 0;
-        }
-        let cancel = CancelToken::new();
-        self.fetch_cancel = Some(cancel.clone());
-        for choice in &configured {
+        let mut round = ModelRound {
+            loads: Vec::new(),
+            jobs: Vec::new(),
+        };
+        for choice in config::all_provider_choices(&self.providers, &self.env_file)
+            .into_iter()
+            .filter(|c| c.configured)
+        {
             let cfg = self.config_for(&choice.id, &self.active_model, None, None, None, None);
-            spawn_model_fetch(choice.name.clone(), cfg, cancel.clone(), tx.clone());
+            // No config, no source: its fetch reports why, as it always did.
+            let source = cfg
+                .as_ref()
+                .map(llm::model_cache::listing_source)
+                .unwrap_or_default();
+            let self_hosted = cfg.as_ref().is_some_and(llm::model_cache::is_self_hosted);
+            let kept = dir.as_deref().filter(|_| cfg.is_some()).and_then(|dir| {
+                let listing = config::load_model_listing(dir, &choice.id)?;
+                let freshness = llm::model_cache::freshness(
+                    &listing,
+                    &source,
+                    env!("CARGO_PKG_VERSION"),
+                    now,
+                    self_hosted,
+                );
+                (freshness != Freshness::Unusable).then_some((listing, freshness))
+            });
+            // A fetch out that this open will not wait on is retired, so it
+            // cannot land over the list kept here instead.
+            let out = self.fetch_ledger.await_or_retire(&choice.id, &source, now);
+            let plan = llm::model_cache::plan(kept.as_ref().map(|(_, f)| *f), out, force);
+            if plan == FetchPlan::Start {
+                let (ticket, cancel) = self.fetch_ledger.issue(&choice.id, &source, now);
+                round.jobs.push(ModelFetchJob {
+                    provider: choice.id.clone(),
+                    ticket,
+                    cfg,
+                    cancel,
+                });
+            }
+            let (listed_at, models) = kept.map_or((None, Vec::new()), |(listing, _)| {
+                (Some(listing.fetched_at), listing.models)
+            });
+            round.loads.push(ProviderLoad {
+                id: choice.id,
+                name: choice.name,
+                source,
+                listed_at,
+                models,
+                fetch: plan != FetchPlan::Keep,
+            });
         }
-        configured.len()
+        round
     }
 
     /// The signed-in subscriptions the `/usage` page reads (`docs/usage.md`):
@@ -1574,12 +1735,18 @@ impl ModelSession {
         targets
     }
 
-    /// Cancel an in-flight `/model` fetch — the picker closed, a row was
-    /// picked, or the app is quitting. Its detached worker exits on the cancel.
-    pub(crate) fn cancel_model_fetch(&mut self) {
-        if let Some(cancel) = self.fetch_cancel.take() {
-            cancel.cancel();
-        }
+    /// A `/model` fetch landed: the source it read when it is still its
+    /// provider's live fetch (the ticket closes), else `None` — superseded
+    /// by a newer fetch, or retired by a `/login` save — and its answer is
+    /// neither kept nor shown (`docs/model-cache.md`).
+    pub(crate) fn settle_model_fetch(&mut self, provider: &str, ticket: u64) -> Option<String> {
+        self.fetch_ledger.settle(provider, ticket)
+    }
+
+    /// Cancel every `/model` fetch still out — the app is quitting. Closing
+    /// the picker does not: a fetch outlives it, its list kept when it lands.
+    pub(crate) fn cancel_model_fetches(&mut self) {
+        self.fetch_ledger.cancel_all();
     }
 
     /// Clear the capability-probe gate: its answer arrived (or is now moot).
@@ -1595,6 +1762,22 @@ impl ModelSession {
         match EnvFile::update(&self.env_file_path, env_var, key) {
             Ok(updated) => {
                 self.env_file = EnvFile::parse(&updated);
+                // What the providers reading this variable sign in with, or
+                // where they point, just changed: their kept lists may be
+                // another account's or another server's
+                // (`docs/model-cache.md`).
+                let stale = config::providers_reading(&self.providers, env_var);
+                for provider in &stale {
+                    // A fetch still out read with the credential just
+                    // replaced: neither kept nor shown when it lands.
+                    self.fetch_ledger.retire(provider);
+                }
+                if let Some(dir) = config::model_cache_dir() {
+                    config::forget_model_listings(&dir, &stale);
+                }
+                // A ChatGPT sign-in reaches the image tool's next call at
+                // once (docs/imagegen.md).
+                self.sync_imagegen_signin();
                 Ok(())
             }
             Err(e) => Err(format!(
@@ -1728,6 +1911,29 @@ impl HookSetup {
     }
 }
 
+/// The ChatGPT Codex sign-in as a config the `imagegen` tool can mint with
+/// (`docs/imagegen.md`) — `None` while no token is stored under the
+/// provider's own variable.
+fn chatgpt_signin_config(
+    providers: &llm::ProvidersFile,
+    env_file: &llm::EnvFile,
+    temperature: Option<f32>,
+) -> Option<ModelConfig> {
+    let provider = config::chatgpt_signin_id(providers, env_file)?;
+    config::model_config_for(
+        providers,
+        env_file,
+        &provider,
+        alter_zero::llm::imagegen::IMAGE_MODEL,
+        temperature,
+        None,
+        None,
+        None,
+        None,
+    )
+    .filter(ModelConfig::is_usable)
+}
+
 /// the background-shell registry, the subagent registry (enabling the `agent`
 /// tool), and the permission gate. Every backend (re)build in the session goes
 /// through this: the initial pick and each rebind (a `/model` switch, a
@@ -1746,12 +1952,14 @@ fn session_backend(
     agents: &AgentRegistry,
     steer: &alter_zero::steer::SteerQueue,
     permissions: Option<&PermissionGate>,
-    ask: &alter_zero::ask::AskGate,
+    ask: Option<&alter_zero::ask::AskGate>,
     tasks: &alter_zero::tasks::TaskRegistry,
     skills: Option<&alter_zero::skills::SkillRegistry>,
     subagents: &alter_zero::subagents::SubagentRegistry,
     mcp: Option<&alter_zero::llm::mcp::McpManager>,
     hooks: Option<&HookSetup>,
+    round_budget: Option<&alter_zero::llm::agent::RoundBudget>,
+    imagegen: Option<&alter_zero::llm::imagegen::ImagegenSetup>,
 ) -> LlmBackend {
     // Captured before `configure` consumes the config: the hooks payload
     // names the model that is about to answer (docs/hooks.md).
@@ -1776,18 +1984,32 @@ fn session_backend(
         // same one, so a message queued against the turn a `/model` switch
         // replaced still reaches its successor.
         .with_steer(steer.clone())
-        // The ask gate (docs/ask.md): enables the `askuserquestion` tool —
-        // always attached; asking is not a permission.
-        .with_ask(ask.clone())
         // The shared task list (docs/task-tools.md): enables the four task
-        // tools — always attached, like the ask gate; the checklist is the
-        // session's, so every rebuild re-binds the same registry.
+        // tools — always attached; the checklist is the session's, so every
+        // rebuild re-binds the same registry.
         .with_tasks(tasks.clone());
+    // The ask gate (docs/ask.md): enables the `askuserquestion` tool —
+    // attached wherever somebody can answer (asking is not a permission),
+    // which is everywhere but a headless run (docs/headless.md).
+    if let Some(ask) = ask {
+        backend = backend.with_ask(ask.clone());
+    }
+    // A headless run's reply budget (`--max-turns`, docs/headless.md): every
+    // request the lead sends counts against it, over every rebuild.
+    if let Some(budget) = round_budget {
+        backend = backend.with_round_budget(budget.clone());
+    }
     // The discovered skills (docs/skills.md): enables the `skill` tool, and
     // rides every rebuild so a `/model` switch keeps them. `None` is the
     // `/settings` **Skills** row off; an empty registry attaches nothing.
     if let Some(skills) = skills {
         backend = backend.with_skills(skills.clone());
+    }
+    // The `imagegen` tool (docs/imagegen.md): images made with the ChatGPT
+    // Codex sign-in, whatever provider answers — attached while it is stored,
+    // and `refresh_imagegen` re-runs this build when that changes.
+    if let Some(setup) = imagegen {
+        backend = backend.with_imagegen(setup.clone());
     }
     // The MCP servers' tools (docs/mcp.md): one `mcp__server__tool` spec per
     // connected server's tool — a manager with nothing connected attaches
@@ -1997,21 +2219,43 @@ impl Session<'_> {
         if let Some(provider) = self.models.active_provider() {
             self.app.set_active_provider(provider);
         }
-        match self.models.begin_model_fetch(&self.model_tx) {
-            0 => self.app.set_models_needs_login(),
-            providers => self.app.begin_model_load(providers),
-        }
+        self.load_model_lists(false);
     }
 
-    /// Esc/Ctrl+C dismissed the inline picker: cancel a pending fetch and let the
-    /// region collapse back to the composer on the next draw.
-    pub(crate) fn close_model_picker(&mut self) {
-        self.models.cancel_model_fetch();
+    /// Ctrl+R in the picker (`docs/model-cache.md`): ask every configured
+    /// provider for its list again, whatever the cache says, the rows on
+    /// screen staying put until each answer replaces its own. The provider
+    /// file is re-read first, as an open does, so a provider added or
+    /// removed since is fetched or dropped.
+    pub(crate) fn refresh_model_picker(&mut self) {
+        if self.app.model_picker.is_none() {
+            return;
+        }
+        self.reload_providers();
+        self.load_model_lists(true);
+    }
+
+    /// Lay a round over the open picker — the kept lists at once, the
+    /// fetches the round starts on their workers — or, with no provider
+    /// configured, point the user at `/login`.
+    fn load_model_lists(&mut self, force: bool) {
+        let now = super::host::unix_secs_signed();
+        let ModelRound { loads, jobs } = self.models.model_round(now, force);
+        if loads.is_empty() {
+            self.app.set_models_needs_login();
+            return;
+        }
+        self.app.set_model_picker_now(now);
+        self.app.begin_model_round(loads);
+        for job in jobs {
+            spawn_model_fetch(job, self.model_tx.clone());
+        }
+        self.frame.schedule_frame();
     }
 
     /// Enter on a picker row: rebuild the backend for the chosen provider/model
-    /// (`docs/llm.md`). The picker is already closed (`on_key` did it); cancel any
-    /// pending fetch, then switch if the config is usable (has a key), else keep
+    /// (`docs/llm.md`). The picker is already closed (`on_key` did it) and its
+    /// fetches run on; switch if the config is usable (has a key), else keep
     /// the current backend. The outcome is a transient toast — a mid-turn switch
     /// must not split the streaming reply in scrollback (`docs/toast.md`).
     pub(crate) fn select_model(
@@ -2023,7 +2267,6 @@ impl Session<'_> {
         context: Option<u64>,
         service_tiers: Vec<ServiceTier>,
     ) {
-        self.models.cancel_model_fetch();
         // The picked entry's reasoning support seeds the Ctrl+T cycle at its
         // default mode (medium where offered) — docs/reasoning.md.
         let thinking = reasoning.map(|support| {
@@ -2138,7 +2381,7 @@ impl Session<'_> {
     /// `probe_rx`, gated by `probe_pending`.
     pub(crate) fn spawn_pending_probe(&mut self) {
         if let Some((provider, cfg)) = self.models.take_probe() {
-            spawn_model_fetch(provider, cfg, CancelToken::new(), self.probe_tx.clone());
+            spawn_probe_fetch(provider, cfg, self.probe_tx.clone());
         }
     }
 
@@ -2233,19 +2476,40 @@ impl Session<'_> {
 }
 
 impl Session<'_> {
-    /// A finished `/model` fetch from one provider's worker thread: merge its
-    /// models into the open picker, or record the failure beside the providers
-    /// that did load. Both are no-ops if the picker was already dismissed. See
-    /// `docs/llm.md`.
-    pub(crate) fn on_model_fetch(
-        &mut self,
-        label: String,
-        result: Result<Vec<ModelEntry>, String>,
-    ) {
-        match result {
-            Ok(models) => self.app.add_models(models),
-            Err(reason) => self.app.add_model_error(label, reason),
-        }
+    /// A finished `/model` fetch from one provider's worker thread
+    /// (`docs/model-cache.md`). Dropped whole unless it is still the
+    /// provider's live fetch — a newer one superseded it, or a `/login` save
+    /// retired it because it was read with the credential that save
+    /// replaced. A live listing is kept **here, on the loop** — the thread a
+    /// `/login` save runs on, so the two can never interleave and a list
+    /// read with an old key can never be written after the save that dropped
+    /// it — then merged into the open picker, which takes it when it waits
+    /// on that provider: replacing the provider's rows, or recording the
+    /// failure beside the rows it still shows.
+    pub(crate) fn on_model_fetch(&mut self, fetch: ModelFetch) {
+        let ModelFetch {
+            provider,
+            ticket,
+            listed_at,
+            result,
+        } = fetch;
+        let Some(source) = self.models.settle_model_fetch(&provider, ticket) else {
+            return;
+        };
+        let result = match (result, config::model_cache_dir()) {
+            (Ok(models), Some(dir)) => {
+                let listing = CachedListing {
+                    fetched_at: listed_at,
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    source,
+                    models,
+                };
+                config::store_model_listing(&dir, &provider, &listing);
+                Ok(listing.models)
+            }
+            (result, _) => result,
+        };
+        self.app.finish_model_fetch(&provider, result, listed_at);
         self.frame.schedule_frame();
     }
 }

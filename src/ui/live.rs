@@ -7,7 +7,7 @@
 //! `docs/parallel-tools.md`, a streaming command's tail in
 //! `docs/tool-streaming.md`.
 
-use super::agent::{agent_view_preview_lines, agent_view_rule_label};
+use super::agent::{agent_view_cell_lines, agent_view_rule_label};
 use super::file_cell::draft_cell_lines;
 use super::layout::{
     fit_preview_rows, input_box, key_onboarding_rows, live_layout, model_picker_rows,
@@ -109,58 +109,83 @@ pub(super) fn preview_lines(
     rows: u16,
 ) -> Vec<Line<'static>> {
     let rows = usize::from(rows);
-    if let Some(run) = app.viewed_agent() {
-        // The viewed agent's own strip — fed the same boundary-built frontier
-        // the main branch below gets, since its commits go through the same
-        // kind of `StreamRender` (`docs/agent-view-streaming.md`).
-        let streaming = run.tool_queue.is_empty()
-            && run.drafts().previews().next().is_none()
-            && run.reasoning().is_none();
-        trim_preview(
-            agent_view_preview_lines(run, app.pulse(), width, stream_preview, app.path_display()),
-            rows,
-            streaming,
-        )
-    } else if app.agent_group().is_some() || !app.tool_queue().is_empty() {
-        trim_preview(preview_tool_lines(app, width), rows, false)
-    } else if app.tool_drafts().previews().next().is_some() {
-        // A `write` the model is still generating, its file streaming into
-        // the cell (docs/write-streaming.md) — before any batch exists, so
-        // it never meets the queue above, and after the backend closed any
-        // thinking phase, so it never meets the block below. Under the open
-        // read/search group, which a scratchpad write streams into instead
-        // of a cell of its own (docs/tool-groups.md *Scratchpad edits*).
-        trim_preview(drafting_lines(app, width), rows, false)
-    } else {
-        let group = open_group_lines(app, width);
-        if !group.is_empty() {
-            // Between rounds — the reads resolved, the model writing its
-            // next call — the open group's cell stays up, its bullet still
-            // blinking: the next call may well be another read. It holds the
-            // slot alone through a thought too, which opens no block while
-            // the group is up: the status line says the model is thinking
-            // and Ctrl+O shows the text (docs/tool-groups.md *Thoughts*).
-            trim_preview(group, rows, false)
-        } else if let Some(text) = app.reasoning() {
-            trim_preview(live_reasoning_lines(text, app.pulse(), width), rows, false)
-        } else if let Some(lines) = stream_preview {
-            trim_preview(lines.to_vec(), rows, true)
-        } else {
-            trim_preview(
-                app.streaming_text()
-                    .filter(|t| !t.is_empty())
-                    .map(|text| {
-                        message_lines(Role::Assistant, text, width)
-                            .pop()
-                            .unwrap_or_default()
-                    })
-                    .into_iter()
-                    .collect(),
-                rows,
-                true,
-            )
-        }
+    // Live cells keep their head: the running call, the `● Thinking…`
+    // header — the rows that say what is happening.
+    if let Some(cells) = live_cell_lines(app, width) {
+        return trim_preview(cells.to_vec(), rows, false);
     }
+    // A reply's frontier tail-follows: its newest rows are the ones still
+    // arriving. The boundary's own render of it, when it has one — the
+    // viewed agent's inside its session view, fed the same way since its
+    // commits go through the same kind of `StreamRender`
+    // (`docs/agent-view-streaming.md`).
+    if let Some(lines) = stream_preview {
+        return trim_preview(lines.to_vec(), rows, true);
+    }
+    let streaming = match app.viewed_agent() {
+        Some(run) => run.streaming.as_deref(),
+        None => app.streaming_text(),
+    };
+    trim_preview(
+        streaming
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                message_lines(Role::Assistant, text, width)
+                    .pop()
+                    .unwrap_or_default()
+            })
+            .into_iter()
+            .collect(),
+        rows,
+        true,
+    )
+}
+
+/// The strip's preview when it is **live cells** rather than a reply's
+/// frontier — `None` when nothing live is on screen (the reply streams, or
+/// the strip previews nothing):
+///
+/// - an agent session view's own — the viewed agent's queue, the `write` it
+///   is generating, its open thinking phase
+///   ([`agent_view_cell_lines`](super::agent::agent_view_cell_lines));
+/// - a live agent group or tool queue ([`preview_tool_lines`]);
+/// - a `write` the model is still generating, its file streaming into the
+///   cell (docs/write-streaming.md) — before any batch exists, so it never
+///   meets the queue above, and after the backend closed any thinking phase,
+///   so it never meets the block below; under the open read/search group,
+///   which a scratchpad write streams into instead of a cell of its own
+///   (docs/tool-groups.md *Scratchpad edits*);
+/// - the open read/search group's cell, alone: between rounds — the reads
+///   resolved, the model writing its next call — it stays up, its bullet
+///   still blinking, and it holds the slot through a thought too, which
+///   opens no block while the group is up (docs/tool-groups.md *Thoughts*);
+/// - an open thinking phase's live block (docs/thinking-stream.md).
+///
+/// The one walk `preview_rows` sizes by and [`preview_lines`] draws, **built
+/// once a frame** ([`frame_memo`](super::frame_memo)): a frame asks for the
+/// count some seven times before it paints, and each used to build the cells
+/// to count them.
+pub(super) fn live_cell_lines(app: &App, width: u16) -> super::frame_memo::Cells {
+    super::frame_memo::live_cells(width, || build_live_cells(app, width))
+}
+
+/// [`live_cell_lines`]' build — the precedence the strip renders by.
+fn build_live_cells(app: &App, width: u16) -> Option<Vec<Line<'static>>> {
+    if let Some(run) = app.viewed_agent() {
+        return agent_view_cell_lines(run, app.pulse(), width, app.path_display());
+    }
+    if app.agent_group().is_some() || !app.tool_queue().is_empty() {
+        return Some(preview_tool_lines(app, width));
+    }
+    if app.tool_drafts().previews().next().is_some() {
+        return Some(drafting_lines(app, width));
+    }
+    let group = open_group_lines(app, width);
+    if !group.is_empty() {
+        return Some(group);
+    }
+    app.live_thought()
+        .map(|thought| live_reasoning_lines(thought, app.pulse(), width))
 }
 
 /// The strip while the model generates a `write`: the open group — which a
@@ -222,7 +247,7 @@ fn trim_preview(mut lines: Vec<Line<'static>>, rows: usize, tail: bool) -> Vec<L
 ///
 /// The one renderer for a live cell, shared by the main strip
 /// ([`preview_tool_lines`]) and the **agent session view's**
-/// ([`super::agent::agent_view_preview_lines`]) — a subagent's running
+/// ([`super::agent::agent_view_cell_lines`]) — a subagent's running
 /// command tails its output exactly like the main turn's, which a second
 /// thinner copy of this walk did not (`docs/agent-view-streaming.md`).
 /// `elapsed` is the **running command's own** runtime — what every `(Ns)`
@@ -257,6 +282,13 @@ pub(super) fn live_call_lines(
     }
     if is_command_tool(tool) && tool.status == ToolStatus::Running {
         return running_command_lines(tool, live, elapsed, pulse, width, paths);
+    }
+    if tool.status == ToolStatus::Running
+        && tool
+            .name
+            .eq_ignore_ascii_case(crate::llm::imagegen::IMAGEGEN_TOOL_NAME)
+    {
+        return super::tool::imagegen_running_lines(tool, elapsed, pulse, width, paths);
     }
     live_tool_lines(tool, width, pulse, paths)
 }
@@ -381,7 +413,7 @@ pub(super) fn preview_tool_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 /// into its cell (`docs/write-streaming.md`) — blank-separated like a batch.
 /// The one builder for the main strip ([`preview_lines`], sized by
 /// `preview_rows` through the same walk) and the agent session view's
-/// ([`super::agent::agent_view_preview_lines`]), so a subagent's file
+/// ([`super::agent::agent_view_cell_lines`]), so a subagent's file
 /// streams exactly as the main turn's does.
 pub(super) fn draft_preview_lines(
     drafts: &crate::app::ToolDrafts,
@@ -807,6 +839,27 @@ pub fn render_live_with_preview(
         render_donate_picker(body, buf, app);
         return;
     }
+    // …and the read-only `/sponsor` page, its twin. See `docs/sponsor.md`.
+    if app.sponsor_page.is_some() {
+        let [strip, body] = view_split(
+            area,
+            super::sponsor_view::sponsor_menu_rows(app, area.width, area.height),
+        );
+        render_strip_above(strip, buf, app, stream_preview);
+        render_sponsor_page(body, buf, app);
+        return;
+    }
+    // …and the read-only `/discord` page, the `/sponsor` page's twin. See
+    // `docs/discord.md`.
+    if app.discord_page.is_some() {
+        let [strip, body] = view_split(
+            area,
+            super::discord_view::discord_menu_rows(app, area.width, area.height),
+        );
+        render_strip_above(strip, buf, app, stream_preview);
+        render_discord_page(body, buf, app);
+        return;
+    }
     // …and the `/secrets` page, the same built-line body — its values
     // masked in the builder. See `docs/secrets.md`.
     if app.secrets_page.is_some() {
@@ -854,6 +907,17 @@ pub fn render_live_with_preview(
         let [strip, body] = view_split(area, body_h);
         render_strip_above(strip, buf, app, stream_preview);
         render_mcp_menu(body, buf, app);
+        return;
+    }
+    // …and the `/plugins` page: a search-line picker on its list, the `/mcp`
+    // pages' twin on its detail pages. See `docs/plugins.md`.
+    if app.plugins_menu.is_some() {
+        let [strip, body] = view_split(
+            area,
+            super::plugins_view::plugins_menu_rows(app, area.width, area.height),
+        );
+        render_strip_above(strip, buf, app, stream_preview);
+        render_plugins_menu(body, buf, app);
         return;
     }
     // The ↓ background manager band replaces the composer (and the band/footer
@@ -1002,9 +1066,9 @@ pub fn render_live_with_preview(
             band_area.height,
         ))
         .render(band_area, buf);
-    } else if file_menu_rows(app) > 0 {
+    } else if file_menu_rows(app, area.width) > 0 {
         Paragraph::new(file_menu_lines(app, band_area.width)).render(band_area, buf);
-    } else if skill_menu_rows(app) > 0 {
+    } else if skill_menu_rows(app, area.width) > 0 {
         Paragraph::new(skill_menu_lines(app, band_area.width)).render(band_area, buf);
     }
 

@@ -39,7 +39,9 @@ use crate::stream::{
 /// swap personas). Kept short to save tokens. The boundary folds the runtime
 /// **environment context** (date/os/user/cwd) onto this at startup so the
 /// agent has context awareness — see [`augment_with_environment`] and
-/// `docs/environment.md`. Override the persona with `ALTER_ZERO_SYSTEM_PROMPT`.
+/// `docs/environment.md`. Replace the persona with `--system-prompt[-file]`
+/// or `ALTER_ZERO_SYSTEM_PROMPT`, add to it with `--append-system-prompt[-file]`
+/// ([`compose_persona`], `docs/system-prompt.md`).
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/alter_zero.md");
 
 /// A real OpenAI-compatible backend. Holds the streaming client (carrying the
@@ -124,6 +126,12 @@ pub struct LlmBackend {
     /// spec set that can only answer "unknown tool" spends the model's
     /// attention on a dead end). Subagents carry it too.
     mcp: Option<super::mcp::McpManager>,
+    /// The `imagegen` tool's setup — the ChatGPT Codex sign-in and where
+    /// images are saved — when the boundary attached it, **enabling the
+    /// tool** (`docs/imagegen.md`): offered whatever provider this backend
+    /// runs on, since the image is made with the ChatGPT sign-in. Subagents
+    /// carry it too, through their type's allowlist.
+    imagegen: Option<super::imagegen::ImagegenSetup>,
     /// The auto mode classifier bound to this backend's provider
     /// (`docs/permissions.md`): consulted by the approve seam for `bash`
     /// calls in [`crate::permission::PermissionMode::Auto`] — idle in every
@@ -151,6 +159,10 @@ pub struct LlmBackend {
     /// calls** knob says otherwise, and **`0` means no limit** (the app's own
     /// default). See `docs/settings.md`.
     max_tool_calls: usize,
+    /// The run's budget of model replies — `--max-turns`, a headless run's
+    /// (`docs/headless.md`). `None` on every other backend: the TUI never
+    /// counts, and neither does a subagent or a compaction.
+    round_budget: Option<agent::RoundBudget>,
     /// The session's **mid-turn message queue** (`docs/queue.md`): what the
     /// user typed while this turn was already running. Drained at every round
     /// boundary, so a message reaches the model within the turn it was
@@ -187,7 +199,10 @@ impl LlmBackend {
     }
 
     /// Build a backend with an explicit system prompt (`None` sends no system
-    /// message). The boundary passes `ALTER_ZERO_SYSTEM_PROMPT` through here.
+    /// message). The boundary passes the prompt it assembled through here —
+    /// the persona [`compose_persona`] made of the system prompt flags and
+    /// `ALTER_ZERO_SYSTEM_PROMPT`, then the runtime blocks
+    /// (`docs/system-prompt.md`).
     /// Tools are enabled unless `ALTER_ZERO_TOOLS` is falsy (see `docs/tools.md`).
     #[must_use]
     pub fn with_system_prompt(cfg: ModelConfig, system_prompt: Option<String>) -> Self {
@@ -241,10 +256,12 @@ impl LlmBackend {
             tasks: None,
             skills: None,
             mcp: None,
+            imagegen: None,
             classifier,
             turn_context: Arc::new(Mutex::new(ClassifierContext::new())),
             max_retries: MAX_RETRIES,
             max_tool_calls: agent::MAX_TOOL_ITERATIONS,
+            round_budget: None,
             steer: SteerQueue::new(),
             hooks: Arc::new(NoHooks),
             secrets: None,
@@ -400,6 +417,20 @@ impl LlmBackend {
         self
     }
 
+    /// Attach the `imagegen` tool's setup, **enabling the tool**
+    /// (`docs/imagegen.md`): the client's tool set gains its spec (tools must
+    /// already be enabled). The boundary attaches it while the ChatGPT Codex
+    /// sign-in is stored, and rebuilds when that changes
+    /// (`ModelSession::refresh_imagegen`, the `skills_attached` pattern).
+    #[must_use]
+    pub fn with_imagegen(mut self, setup: super::imagegen::ImagegenSetup) -> Self {
+        if self.tools_enabled {
+            self.imagegen = Some(setup);
+            self.sync_tool_specs();
+        }
+        self
+    }
+
     /// Rebuild the client's tool set from what is attached — the `agent` spec
     /// when a subagent registry is, the ask spec when an ask gate is, the
     /// task specs when a task registry is, the MCP specs when a manager is —
@@ -421,6 +452,9 @@ impl LlmBackend {
         if self.skills.is_some() {
             specs.push(tools::skill_spec());
         }
+        if self.imagegen.is_some() {
+            specs.push(super::imagegen::imagegen_spec());
+        }
         if let Some(manager) = &self.mcp {
             specs.extend(manager.tool_specs());
         }
@@ -432,10 +466,14 @@ impl LlmBackend {
 
     /// Set how many times a failed request is retried before the error is
     /// surfaced — the `/settings` **Error retry** knob (`docs/settings.md`).
-    /// `0` never retries. Defaults to [`retry::MAX_RETRIES`].
+    /// `0` never retries. Defaults to [`retry::MAX_RETRIES`]. Auto mode's
+    /// classifier carries the same budget: a verdict is a request too, and
+    /// one that gave up where the turn would have retried turned a
+    /// provider's hiccup into a prompt (`docs/permissions.md`).
     #[must_use]
-    pub const fn with_max_retries(mut self, max_retries: u32) -> Self {
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self.classifier = self.classifier.with_max_retries(max_retries);
         self
     }
 
@@ -446,6 +484,22 @@ impl LlmBackend {
     pub const fn with_max_tool_calls(mut self, max_tool_calls: usize) -> Self {
         self.max_tool_calls = max_tool_calls;
         self
+    }
+
+    /// Count every request this backend's turns send against `budget` —
+    /// `--max-turns` (`docs/headless.md`). A request the budget refuses is
+    /// never sent: its turn ends on the budget's message. Shared by clone, so
+    /// a rebuild that re-attaches it keeps counting.
+    #[must_use]
+    pub fn with_round_budget(mut self, budget: agent::RoundBudget) -> Self {
+        self.round_budget = Some(budget);
+        self
+    }
+
+    /// The budget [`with_round_budget`](Self::with_round_budget) attached.
+    #[must_use]
+    pub const fn round_budget(&self) -> Option<&agent::RoundBudget> {
+        self.round_budget.as_ref()
     }
 
     /// Whether the `bash`/`read`/`write`/`edit` tools are offered to the model.
@@ -476,6 +530,31 @@ fn tools_enabled_from_env() -> bool {
             "0" | "false" | "no" | "off"
         ),
         Err(_) => true,
+    }
+}
+
+/// The persona block of the system prompt (`docs/system-prompt.md`): the
+/// `replacement` — `--system-prompt[-file]`, else `ALTER_ZERO_SYSTEM_PROMPT`
+/// — or, with none, the built-in [`DEFAULT_SYSTEM_PROMPT`]; then any
+/// `appended` text after a blank line. The texts go in as written, with
+/// nothing filled in: appended text is trimmed here, and the prompt's own
+/// ends where the backend takes it (`LlmBackend::configure`). A blank or
+/// absent append leaves the persona exactly as given, so a run with no
+/// flags composes byte-for-byte what it always did, and a blank replacement
+/// with nothing appended stays blank — the "empty
+/// `ALTER_ZERO_SYSTEM_PROMPT` → no system message" contract
+/// (`docs/context.md`). Appended text is something to say, so with a blank
+/// persona it stands alone.
+#[must_use]
+pub fn compose_persona(replacement: Option<&str>, appended: Option<&str>) -> String {
+    let persona = replacement.unwrap_or(DEFAULT_SYSTEM_PROMPT);
+    let appended = appended.map(str::trim).unwrap_or_default();
+    if appended.is_empty() {
+        persona.to_string()
+    } else if persona.trim().is_empty() {
+        appended.to_string()
+    } else {
+        format!("{}\n\n{appended}", persona.trim_end())
     }
 }
 
@@ -548,6 +627,25 @@ pub fn augment_with_scratchpad(base: &str, dir: &str) -> String {
         return base.to_string();
     }
     format!("{}\n\n{}", base.trim_end(), render_scratchpad(dir))
+}
+
+/// The headless block appended to the system prompt of a run with no screen
+/// — authored in [`prompts/headless.md`](../../prompts/headless.md) in the
+/// persona's own terse style (`docs/headless.md`).
+const HEADLESS_TEMPLATE: &str = include_str!("../../prompts/headless.md");
+
+/// Append the headless block to a base system prompt, so the model knows no
+/// one can answer it, that a call needing approval is refused, and that the
+/// run ends with its turn (`docs/headless.md`). Composes *after*
+/// [`augment_with_scratchpad`], the prompt's last block; a blank base is
+/// returned unchanged, keeping the "empty `ALTER_ZERO_SYSTEM_PROMPT` → no
+/// system message" contract (`docs/context.md`).
+#[must_use]
+pub fn augment_with_headless(base: &str) -> String {
+    if base.trim().is_empty() {
+        return base.to_string();
+    }
+    format!("{}\n\n{}", base.trim_end(), HEADLESS_TEMPLATE.trim())
 }
 
 /// Extract a human distro name from `/etc/os-release` contents — the
@@ -667,6 +765,18 @@ pub fn build_messages_for<U: Into<AttachmentUrl>>(
     messages
 }
 
+/// The line a known non-vision model reads in a picture's place — the one
+/// degrade the replay applies (`chat_message`) and the live round's own for a
+/// picture the executor kept back (`llm::agent`, `docs/imagegen.md`), so the
+/// two turns' requests match.
+#[must_use]
+pub(crate) fn omitted_image_line(path: &Path) -> String {
+    format!(
+        "\n[image omitted: {} — the current model does not support image input]",
+        path.display()
+    )
+}
+
 /// One context message as a wire [`ChatMessage`]: an assistant tool-call turn
 /// or a `tool`-role result in the provider-native shape, plain text when
 /// imageless, or the multimodal parts array when attachments encode — unless
@@ -701,10 +811,7 @@ fn chat_message<U: Into<AttachmentUrl>>(
         // it knows an image existed and why it can't see it.
         let mut text = message.text.clone();
         for path in &message.images {
-            text.push_str(&format!(
-                "\n[image omitted: {} — the current model does not support image input]",
-                path.display()
-            ));
+            text.push_str(&omitted_image_line(path));
         }
         return ChatMessage::new(role, text);
     }
@@ -753,10 +860,13 @@ impl ReplySource for LlmBackend {
         let task_list = self.tasks.clone();
         let skills = self.skills.clone();
         let mcp = self.mcp.clone();
+        let imagegen = self.imagegen.clone();
         let classifier = self.classifier.clone();
         let turn_context = Arc::clone(&self.turn_context);
         let max_retries = self.max_retries;
         let max_tool_calls = self.max_tool_calls;
+        // The run's reply budget, when it has one (docs/headless.md).
+        let round_budget = self.round_budget.clone();
         let hooks = Arc::clone(&self.hooks);
         let secrets = self.secrets.clone();
         // The mid-turn queue this turn answers to (docs/queue.md): the loop
@@ -835,7 +945,9 @@ impl ReplySource for LlmBackend {
                     super::skill::LoadedSkills::from_messages(registry, &messages, secrets.as_ref())
                 })
                 .unwrap_or_default();
-            let mut executor = RealToolExecutor::new().with_vision(vision);
+            let mut executor = RealToolExecutor::new()
+                .with_vision(vision)
+                .with_imagegen(imagegen);
             let notices = background.clone();
             if let Some(registry) = background.clone() {
                 // The registry carries the terminal-detach helper from
@@ -876,6 +988,13 @@ impl ReplySource for LlmBackend {
                 &offered,
                 &mut messages,
                 |msgs| {
+                    // `--max-turns` (docs/headless.md): a reply the run's
+                    // budget cannot pay for is never asked for.
+                    if let Some(budget) = &round_budget
+                        && !budget.take()
+                    {
+                        return agent::RoundOutcome::Limit(budget.limit_message());
+                    }
                     if let Ok(mut previous) = wire_history.lock() {
                         previous.remember(msgs);
                     }
@@ -1143,6 +1262,7 @@ impl ReplySource for LlmBackend {
         let Ok(mut memo) = self.agent_tools.lock() else {
             return ToolDefinition::from_specs(&subagent_tool_specs(
                 self.skills.is_some(),
+                self.imagegen.is_some(),
                 self.mcp.as_ref(),
                 &allowed,
             ));
@@ -1155,6 +1275,7 @@ impl ReplySource for LlmBackend {
         }
         let tools = ToolDefinition::from_specs(&subagent_tool_specs(
             self.skills.is_some(),
+            self.imagegen.is_some(),
             self.mcp.as_ref(),
             &allowed,
         ));
@@ -1255,6 +1376,9 @@ struct SubagentConfig {
     /// tools (`docs/mcp.md`) — a side agent queries a wiki exactly as the
     /// lead does, over the same live connections.
     mcp: Option<super::mcp::McpManager>,
+    /// The session's `imagegen` setup, so a subagent whose type allows it
+    /// can make images too (`docs/imagegen.md`).
+    imagegen: Option<super::imagegen::ImagegenSetup>,
     /// The session's retry budget, so a subagent's rounds retry exactly as
     /// the main turn's do (`docs/settings.md`).
     max_retries: u32,
@@ -1290,6 +1414,7 @@ impl LlmBackend {
             classifier: self.classifier.clone(),
             skills: self.skills.clone(),
             mcp: self.mcp.clone(),
+            imagegen: self.imagegen.clone(),
             max_retries: self.max_retries,
             max_tool_calls: self.max_tool_calls,
             hooks: Arc::clone(&self.hooks),
@@ -1340,10 +1465,20 @@ impl SubagentConfig {
                 )
             })
             .unwrap_or_default();
+        // The `imagegen` skill tells its reader to call the tool: a type
+        // that may not is not briefed on it (`docs/imagegen.md`).
+        let hidden: Vec<&std::path::Path> = self
+            .imagegen
+            .as_ref()
+            .filter(|_| !allowed.allows(super::imagegen::IMAGEGEN_TOOL_NAME))
+            .and_then(|setup| setup.skill.as_deref())
+            .into_iter()
+            .collect();
         subagent_briefing(
             self.skills
                 .as_ref()
                 .filter(|_| allowed.allows(crate::skills::SKILL_TOOL_NAME)),
+            &hidden,
             self.secrets.as_ref().filter(|_| allowed.reaches_secrets()),
             &mcp_instructions,
         )
@@ -1390,6 +1525,7 @@ struct AgentToolsMemo {
 /// **counts** it (`ReplySource::agent_tool_definitions`).
 fn subagent_tool_specs(
     skills: bool,
+    imagegen: bool,
     mcp: Option<&super::mcp::McpManager>,
     allowed: &crate::subagents::AgentTools,
 ) -> Vec<serde_json::Value> {
@@ -1397,6 +1533,9 @@ fn subagent_tool_specs(
     let mut extras = Vec::new();
     if skills {
         extras.push(tools::skill_spec());
+    }
+    if imagegen {
+        extras.push(super::imagegen::imagegen_spec());
     }
     if let Some(manager) = mcp {
         extras.extend(manager.tool_specs());
@@ -1418,11 +1557,12 @@ fn subagent_tool_specs(
 /// window: `SubagentConfig` does not carry one, and a roster is small.
 fn subagent_briefing(
     skills: Option<&crate::skills::SkillRegistry>,
+    hidden: &[&std::path::Path],
     secrets: Option<&crate::secrets::SecretRegistry>,
     mcp_instructions: &str,
 ) -> Option<String> {
     let skills = skills
-        .map(|skills| skills.listing(crate::skills::listing_budget(None)))
+        .map(|skills| skills.listing_except(crate::skills::listing_budget(None), hidden))
         .unwrap_or_default();
     let secrets = secrets
         .map(crate::secrets::SecretRegistry::listing)
@@ -1713,6 +1853,7 @@ fn spawn_subagent_run(
 ) {
     let skills = config.skills.clone();
     let mcp = config.mcp.clone();
+    let imagegen = config.imagegen.clone();
     let secrets = config.secrets.clone();
     // Kept whole for the settle-window continuation at the very bottom.
     let respawn_config = config.clone();
@@ -1723,7 +1864,7 @@ fn spawn_subagent_run(
     let allowed = definition
         .as_ref()
         .map_or(crate::subagents::AgentTools::All, |def| def.tools.clone());
-    let specs = subagent_tool_specs(skills.is_some(), mcp.as_ref(), &allowed);
+    let specs = subagent_tool_specs(skills.is_some(), imagegen.is_some(), mcp.as_ref(), &allowed);
     // A definition may pin its own model (`model: kimi-k3`): same provider,
     // base and key, and the session's thinking mode / vision verdict dropped
     // — both describe the model being replaced, not this one.
@@ -1836,7 +1977,8 @@ fn spawn_subagent_run(
         }
         let mut executor = RealToolExecutor::new()
             .with_vision(vision)
-            .with_detach_helper(detach);
+            .with_detach_helper(detach)
+            .with_imagegen(imagegen);
         // The shared background registry rides in so the subagent's `bash`
         // can `run_in_background` — every launch attributed to this agent,
         // and the Ctrl+B latch untouched (docs/agent-tool.md).
@@ -2659,6 +2801,7 @@ mod tests {
             description: "Charts.".to_string(),
             dir: std::path::PathBuf::from("/skills/dataviz"),
             path: std::path::PathBuf::from("/skills/dataviz/SKILL.md"),
+            plugin: None,
         }]);
         let defs = crate::subagents::SubagentRegistry::new(vec![
             crate::subagents::parse_agent(
@@ -2754,13 +2897,19 @@ mod tests {
         assert_eq!(plain.max_retries, MAX_RETRIES);
         assert_eq!(plain.max_tool_calls(), agent::MAX_TOOL_ITERATIONS);
 
+        // A verdict is a request too: auto mode's classifier retries on the
+        // same budget as the turn it reviews for (docs/permissions.md).
+        assert_eq!(plain.classifier.max_retries(), MAX_RETRIES);
+
         let tuned = plain.with_max_retries(0).with_max_tool_calls(0);
         assert_eq!(tuned.max_retries, 0, "never retry");
+        assert_eq!(tuned.classifier.max_retries(), 0, "nor a verdict");
         assert_eq!(tuned.max_tool_calls(), 0, "no tool-round limit");
         // …and a subagent runs under the same budgets, so a long side-task
         // isn't cut off by a ceiling the main turn doesn't have.
         let sub = tuned.subagent_config();
         assert_eq!(sub.max_retries, 0);
+        assert_eq!(sub.classifier.max_retries(), 0);
         assert_eq!(sub.max_tool_calls, 0);
     }
 
@@ -2791,6 +2940,7 @@ mod tests {
             description: "d".to_string(),
             dir: std::path::PathBuf::from("/s/commit"),
             path: std::path::PathBuf::from("/s/commit/SKILL.md"),
+            plugin: None,
         }]);
         assert!(
             LlmBackend::configure(ModelConfig::fallback(), None, true)
@@ -2806,6 +2956,112 @@ mod tests {
         );
     }
 
+    fn imagegen_setup() -> super::super::imagegen::ImagegenSetup {
+        super::super::imagegen::ImagegenSetup {
+            signin: super::super::imagegen::ChatGptSignin::default(),
+            dir: std::path::PathBuf::from("/g"),
+            skill: Some(std::path::PathBuf::from(
+                "/home/me/.alter-zero/skills/imagegen",
+            )),
+        }
+    }
+
+    fn tool_names(backend: &LlmBackend) -> Vec<String> {
+        ReplySource::tool_definitions(backend)
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn imagegen_attaches_only_when_tools_are_enabled() {
+        // The `with_skills` rule (docs/imagegen.md): a tools-off backend
+        // offers nothing, so attaching to one is a no-op.
+        let on = LlmBackend::configure(ModelConfig::fallback(), None, true)
+            .with_imagegen(imagegen_setup());
+        assert!(tool_names(&on).contains(&"imagegen".to_string()));
+        let off = LlmBackend::configure(ModelConfig::fallback(), None, false)
+            .with_imagegen(imagegen_setup());
+        assert!(tool_names(&off).is_empty());
+        // It composes with the other attachments in any order.
+        let both = LlmBackend::configure(ModelConfig::fallback(), None, true)
+            .with_imagegen(imagegen_setup())
+            .with_ask(AskGate::new());
+        let names = tool_names(&both);
+        assert!(names.contains(&"imagegen".to_string()), "{names:?}");
+        assert!(names.contains(&"askuserquestion".to_string()), "{names:?}");
+        let plain = LlmBackend::configure(ModelConfig::fallback(), None, true);
+        assert!(!tool_names(&plain).contains(&"imagegen".to_string()));
+    }
+
+    fn agent_types(specs: &[(&str, &str)]) -> crate::subagents::SubagentRegistry {
+        crate::subagents::SubagentRegistry::new(
+            specs
+                .iter()
+                .map(|(name, tools)| {
+                    crate::subagents::parse_agent(
+                        &format!("---\nname: {name}\ndescription: d\ntools: {tools}\n---\n"),
+                        name,
+                    )
+                    .expect("parses")
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_subagent_gets_imagegen_only_when_its_type_allows_it() {
+        let defs = agent_types(&[("reader", "Read"), ("artist", "Read, ImageGen")]);
+        let backend = LlmBackend::configure(ModelConfig::fallback(), None, true)
+            .with_subagents(defs.clone())
+            .with_imagegen(imagegen_setup());
+        let names = |backend: &LlmBackend, agent_type: &str| -> Vec<String> {
+            ReplySource::agent_tool_definitions(backend, agent_type)
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&backend, "reader"), ["read"]);
+        assert_eq!(names(&backend, "artist"), ["read", "imagegen"]);
+        let general = names(&backend, crate::agents::GENERAL_PURPOSE);
+        assert!(general.contains(&"imagegen".to_string()), "{general:?}");
+        // Without the session's setup, no subagent is offered it.
+        let without =
+            LlmBackend::configure(ModelConfig::fallback(), None, true).with_subagents(defs);
+        assert_eq!(names(&without, "artist"), ["read"]);
+    }
+
+    #[test]
+    fn a_subagent_without_the_imagegen_tool_is_not_briefed_on_its_skill() {
+        // The tool and the listing travel together (docs/subagents.md): a
+        // type whose `tools:` leaves `ImageGen` out would read a skill that
+        // tells it to call a tool it does not have.
+        let skill = |name: &str, dir: &str| crate::skills::SkillMetadata {
+            name: name.to_string(),
+            description: format!("the {name} skill"),
+            dir: std::path::PathBuf::from(dir),
+            path: std::path::PathBuf::from(format!("{dir}/SKILL.md")),
+            plugin: None,
+        };
+        let registry = crate::skills::SkillRegistry::new(vec![
+            skill("commit", "/s/commit"),
+            skill("imagegen", "/home/me/.alter-zero/skills/imagegen"),
+        ]);
+        let defs = agent_types(&[
+            ("reader", "Read, Skill"),
+            ("artist", "Read, Skill, ImageGen"),
+        ]);
+        let backend = LlmBackend::configure(ModelConfig::fallback(), None, true)
+            .with_skills(registry)
+            .with_subagents(defs)
+            .with_imagegen(imagegen_setup());
+        let reader = ReplySource::agent_system_reminder(&backend, "reader").expect("briefed");
+        assert!(reader.contains("commit: the commit skill"), "{reader}");
+        assert!(!reader.contains("imagegen"), "{reader}");
+        let artist = ReplySource::agent_system_reminder(&backend, "artist").expect("briefed");
+        assert!(artist.contains("imagegen: the imagegen skill"), "{artist}");
+    }
+
     #[test]
     fn a_subagent_carrying_the_skill_tool_is_told_which_skills_exist() {
         // The tool spec's own text says the available skills are named in a
@@ -2818,17 +3074,18 @@ mod tests {
             description: "Write a commit message".to_string(),
             dir: std::path::PathBuf::from("/s/commit"),
             path: std::path::PathBuf::from("/s/commit/SKILL.md"),
+            plugin: None,
         }]);
-        let reminder = subagent_briefing(Some(&registry), None, "").expect("a reminder");
+        let reminder = subagent_briefing(Some(&registry), &[], None, "").expect("a reminder");
         assert!(reminder.contains("<system-reminder>"), "{reminder}");
         assert!(
             reminder.contains("commit: Write a commit message"),
             "{reminder}"
         );
         // No registry (or nothing enabled) means no tool, so no reminder.
-        assert!(subagent_briefing(None, None, "").is_none());
+        assert!(subagent_briefing(None, &[], None, "").is_none());
         registry.set_disabled(["commit".to_string()].into_iter().collect());
-        assert!(subagent_briefing(Some(&registry), None, "").is_none());
+        assert!(subagent_briefing(Some(&registry), &[], None, "").is_none());
     }
 
     /// A subagent allowed an MCP server's tools is told how that server
@@ -2840,7 +3097,7 @@ mod tests {
             "deepwiki".to_string(),
             "Ask about one repo at a time.".to_string(),
         )]);
-        let reminder = subagent_briefing(None, None, &section).expect("a reminder");
+        let reminder = subagent_briefing(None, &[], None, &section).expect("a reminder");
         assert!(
             reminder.contains("## deepwiki\nAsk about one repo at a time."),
             "{reminder}"
@@ -2850,7 +3107,7 @@ mod tests {
                 .trim_end()
                 .ends_with(&format!("{section}\n</system-reminder>"))
         );
-        assert!(subagent_briefing(None, None, "").is_none());
+        assert!(subagent_briefing(None, &[], None, "").is_none());
     }
 
     #[test]
@@ -2965,6 +3222,79 @@ mod tests {
         );
     }
 
+    // ===== compose_persona (docs/system-prompt.md) =====
+
+    #[test]
+    fn compose_persona_with_no_flags_is_the_built_in_persona_byte_for_byte() {
+        assert_eq!(compose_persona(None, None), DEFAULT_SYSTEM_PROMPT);
+        // A blank append is no append.
+        assert_eq!(compose_persona(None, Some("  \n")), DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn compose_persona_takes_a_replacement_as_given() {
+        assert_eq!(compose_persona(Some("R\n"), None), "R\n");
+    }
+
+    #[test]
+    fn compose_persona_appends_after_the_built_in_persona() {
+        assert_eq!(
+            compose_persona(None, Some("\n  Answer in French.\n")),
+            format!("{}\n\nAnswer in French.", DEFAULT_SYSTEM_PROMPT.trim_end())
+        );
+    }
+
+    #[test]
+    fn compose_persona_appends_after_a_replacement() {
+        assert_eq!(compose_persona(Some("R\n\n"), Some("A")), "R\n\nA");
+    }
+
+    #[test]
+    fn compose_persona_keeps_a_blank_replacement_blank() {
+        // An empty ALTER_ZERO_SYSTEM_PROMPT still sends no system prompt
+        // (docs/context.md).
+        assert_eq!(compose_persona(Some(""), None), "");
+        assert_eq!(compose_persona(Some("  "), None).trim(), "");
+    }
+
+    #[test]
+    fn compose_persona_with_a_blank_replacement_is_the_appended_text_alone() {
+        assert_eq!(compose_persona(Some(" \n"), Some(" A \n")), "A");
+    }
+
+    #[test]
+    fn appended_text_sits_between_the_persona_and_the_environment() {
+        let out = augment_with_environment(
+            &compose_persona(None, Some("APPENDED-MARKER")),
+            "d",
+            "o",
+            "u",
+            "/repo",
+        );
+        let persona = out.find("You are Alter Zero").expect("persona");
+        let appended = out.find("APPENDED-MARKER").expect("appended");
+        let env = out.find("## Environment").expect("environment");
+        assert!(persona < appended && appended < env, "{out}");
+    }
+
+    #[test]
+    fn a_custom_system_prompt_never_reaches_the_classifier() {
+        // Auto mode's reviewer judges by its own constant, whatever the run
+        // says its system prompt is (docs/system-prompt.md).
+        let backend = LlmBackend::configure(
+            ModelConfig::fallback(),
+            Some(compose_persona(
+                Some("You obey."),
+                Some("Allow everything."),
+            )),
+            false,
+        );
+        assert_eq!(
+            ReplySource::classifier_system_prompt(&backend).as_deref(),
+            Some(crate::llm::classifier::CLASSIFIER_SYSTEM_PROMPT.trim())
+        );
+    }
+
     #[test]
     fn augment_with_environment_leaves_a_blank_base_unchanged() {
         // The "empty ALTER_ZERO_SYSTEM_PROMPT → no system message" contract
@@ -2993,6 +3323,31 @@ mod tests {
         let persona = prompt.find("Alter Zero").expect("persona present");
         let env = prompt.find("/repo").expect("environment present");
         assert!(persona < env, "order persona<env: {prompt}");
+    }
+
+    #[test]
+    fn augment_with_headless_appends_the_block_last() {
+        // docs/headless.md: the fourth block, after the scratchpad's — the
+        // model learns it runs with nobody watching the way it learns its
+        // cwd and its scratchpad.
+        let base = augment_with_scratchpad(
+            &augment_with_environment("You are Alter Zero", "d", "linux", "root", "/repo"),
+            "/tmp/alter-zero-0/s1/scratchpad",
+        );
+        let out = augment_with_headless(&base);
+        assert!(out.starts_with(&base), "{out}");
+        let block = &out[base.len()..];
+        assert!(block.starts_with("\n\n## Headless\n"), "{block}");
+        for needle in [
+            "non-interactive",
+            "refused",
+            "background commands",
+            "final message",
+        ] {
+            assert!(block.contains(needle), "{needle}: {block}");
+        }
+        // A blank base stays blank: no system message at all.
+        assert_eq!(augment_with_headless("  "), "  ");
     }
 
     #[test]

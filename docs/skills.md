@@ -63,21 +63,36 @@ its own project:
 
 | # | Root | Scope |
 |---|------|-------|
-| 1 | `<cwd>/.alter-zero/skills` | directory |
-| 2 | `<cwd>/.claude/skills` | directory (compat) |
-| 3 | `<project root>/.alter-zero/skills` | project |
-| 4 | `<project root>/.claude/skills` | project (compat) |
-| 5 | `{config_home}/skills` | personal (`~/.alter-zero/skills`) |
+| 1 | `<dir>/.alter-zero/skills` | each directory from the cwd up to the project root, nearest first |
+| 2 | `<dir>/.agents/skills` | the same directories, shared with Codex (`docs/agents-dir.md`) |
+| 3 | `<dir>/.claude/skills` | the same directories (compat) |
+| 4 | `{config_home}/skills` | personal (`~/.alter-zero/skills`) |
+| 5 | `~/.agents/skills` | personal, shared with Codex |
 | 6 | `~/.claude/skills` | personal (compat) |
 
-Rows 3–4 are the **`.git` walk-up** — `project_doc::find_project_root`, the
-same discovery `AGENTS.md` uses — and they are skipped entirely when the
-project root *is* the cwd, which is the common case: launched at the repo
-root, the walk reads the same two directories it always did. They exist
-because launching in `repo/src` must still find `repo/.claude/skills`; a
-skill is a property of the project, not of whichever directory you happened
-to start in. The cwd keeps precedence over the project root for the same
-reason project keeps it over personal: the more specific root wins.
+Rows 1–3 repeat for **every directory from the cwd up to the project root**:
+the cwd's three, then its parent's, up to and including the project root's.
+The project root is the nearest `.git` ancestor
+(`project_doc::find_project_root`), and the directories are the ones
+`AGENTS.md` discovery reads (`project_doc::doc_chain`), nearest first.
+Without a project root the cwd alone is read. Launched at the repo root, the
+walk reads that one directory's three roots. Launched in
+`repo/packages/web/src`, it still finds `packages/web/.agents/skills` and
+`repo/.claude/skills`; a skill is a property of the project, not of whichever
+directory you happened to start in. The nearer directory keeps precedence
+over the farther one for the same reason project keeps it over personal: the
+more specific root wins. This walk is Codex's rule for `.agents/skills`. It
+replaced reading only the cwd and the project root, so a directory nested two
+deep used to miss the ones between.
+
+Within one directory `.agents/skills` comes after our own `.alter-zero/skills`
+and ahead of Claude Code's `.claude/skills`. `.agents/` is the directory
+every agent is meant to share, so it outranks another product's own
+(`docs/agents-dir.md`).
+
+A path is listed once, where it first appears. Launched in `~`, the cwd's three
+rows *are* the personal three, and `/skills` used to name each directory
+twice.
 
 The personal root hangs off the **config home**, so it follows
 `ALTER_ZERO_CONFIG_DIR` exactly like `hooks.json`, `permissions.json`,
@@ -99,17 +114,38 @@ markdown with no tool-specific behaviour in them, the ecosystem writes them to
 returns `NotFound`. A user who has already written skills for Claude Code gets
 them here for free.
 
+The `.agents/` rows are the same bargain made with Codex, which reads skills
+from `~/.agents/skills` and from `.agents/skills` in each directory of the
+project (`docs/agents-dir.md`). A repository that ships skills for Codex
+offers them here unchanged. The one difference is depth. Codex looks for a
+`SKILL.md` up to six directories below a root, while the walk here reads
+`<root>/<name>/SKILL.md` only. That is the layout this page and
+`skill-creator` teach, and it keeps the per-turn rescan to one `read_dir` per
+root.
+
 The project rows sit deliberately **outside** the startup review that guards
 the project's hooks and MCP servers (`docs/config-review.md`): a `SKILL.md`
 is inert markdown until the model explicitly loads it, and any command in a
 loaded body still meets the permission gate like every other tool call —
 there is nothing here that executes on discovery.
 
+Installed **plugins** add skills too (`docs/plugins.md`): each plugin's
+skills and commands, named `{plugin}:{name}` so they never collide with a
+root's, appended after the walk at bootstrap and at every rescan — so
+`ALTER_ZERO_SKILLS_DIR`, which replaces the roots, does not hide them. A
+plugin's skill is loaded and listed like any other; one in the Agent
+Plugins format is read strictly (its frontmatter must name it as its
+directory does, and describe it), and its body's `${CLAUDE_PLUGIN_ROOT}` /
+`${PLUGIN_ROOT}` (and `…_DATA`) are its plugin's directories
+(`skills::render_skill`). `LoadedSkills` keys on the `SKILL.md` file, so two
+skills that share a name in different places are told apart.
+
 ### Built-in skills
 
-Five skills ship with the binary: **`skill-creator`**, **`jina-reader`**,
-**`web-search`**, **`yt-dlp`** and **`flaredantic`**. All use the same seed and discovery path
-described below.
+Six skills ship with the binary: **`skill-creator`**, **`jina-reader`**,
+**`web-search`**, **`yt-dlp`**, **`flaredantic`** and **`imagegen`**. All use the same seed and discovery path
+described below; `imagegen` alone is withheld from discovery while the
+session does not offer its tool.
 
 #### `skill-creator`
 
@@ -130,14 +166,16 @@ other markdown this crate carries, then **written into `{config_home}/skills`
 at startup when the file is absent** — the agent definitions' rule
 (`docs/subagents.md`), for the agent definitions' reasons: a default that is a
 real file on disk can be read, edited and diffed, and a release that improves
-it ships the improvement. `every_authored_built_in_file_is_embedded` keeps the
+it ships the improvement — to every install that left it unedited, whose copy
+the next launch replaces (`docs/builtin-updates.md`). `every_authored_built_in_file_is_embedded` keeps the
 directory and the embedded list in step: a file authored under
 `prompts/skills/` but left out of `BUILTIN_SKILL_FILES` fails the test suite
 instead of quietly missing from every install (a script's `test_*` unit tests
 stay out on purpose). The seed runs *before* the walk, so the session that
-installed the app can already use it. An edited copy is never overwritten; a
-deleted file comes back next launch, so the off-switch is `/skills` (which
-persists) rather than `rm -rf`.
+installed the app can already use it. An edited copy is never overwritten
+(when a release changes a file you edited, its new version is written beside
+yours as `<file>.new`); a deleted file comes back next launch, so the
+off-switch is `/skills` (which persists) rather than `rm -rf`.
 
 One difference from the agent definitions: `ALTER_ZERO_SKILLS_DIR` is **never
 seeded into**. That variable replaces the root list — it says "these are the
@@ -191,7 +229,7 @@ non-automatic retries rather than an assumption that HTTP success means
 complete extraction.
 
 Like `skill-creator`, it is editable at `{config_home}/skills/jina-reader/`,
-never overwrites an existing file, respects project-root precedence and can
+never overwrites an edited file, respects project-root precedence and can
 be disabled per project through `/skills`. An `ALTER_ZERO_SKILLS_DIR` override
 receives no built-ins. Offline regression tests exercise the actual
 seed → discovery → listing → tool-load path and verify that local edits
@@ -378,6 +416,34 @@ ordinary shell permission gate. Its seeded files preserve edits, deleted files
 return next launch, project skills take precedence, `/skills` disables it, and
 an `ALTER_ZERO_SKILLS_DIR` override receives no built-ins.
 
+#### `imagegen`
+
+**`imagegen`** is OpenAI Codex's image-generation system skill, ported with its
+references and scripts (Apache-2.0, its `LICENSE.txt` seeded beside it). It
+drives the native **`imagegen`** tool, which makes images with
+`gpt-image-2` through the ChatGPT Codex sign-in, whatever provider the session
+runs on (`docs/imagegen.md`). It covers:
+- when a bitmap is right and when SVG/CSS is;
+- how to shape a prompt, and Codex's use-case taxonomy;
+- where a generated image belongs: copied into the project when the project
+  uses it.
+
+Its fallback CLI (`scripts/image_gen.py`, needing `OPENAI_API_KEY` and the
+`openai` package) is run through `python3` from the `Base directory` header,
+as `web-search`'s scripts are. Its scripts are Codex's own, unmodified; its
+prose is adapted to this app's tool names and paths.
+
+It is the one built-in that is **gated**:
+- It is always seeded, so a signed-out launch never retires it.
+- Discovery passes over the seeded folder, `{config_home}/skills/imagegen`,
+  while the session does not offer the `imagegen` tool
+  (`llm::skill::withheld_builtin_skills`). So `/skills`, the `$` picker, the
+  listing and the Skill tool all agree that it is not there.
+- A `/login` that signs in to ChatGPT turns it on at the next turn's rescan.
+- A project's own skill named `imagegen` is never withheld: the gate is the
+  folder, not the name.
+- A subagent whose type may not call `ImageGen` is not briefed on it.
+
 ### The walk re-runs every turn
 
 Discovery runs at startup **and at every turn start** —
@@ -390,8 +456,10 @@ that load are observed; after loading, it reuses the instructions already in
 context until that body is removed. Discovery does not reload bodies into
 the conversation.
 
-The cost is four to six `read_dir`s and one small read per skill, against a
-turn that is about to make a network request. Two things follow from the new
+The cost is three `read_dir`s per directory from the cwd up to the project
+root, plus three personal ones (six at a repo root, nearly all `NotFound`),
+and one small read per skill, against a turn that is about to make a network
+request. Two things follow from the new
 set beyond the registry itself, and both matter:
 
 - **The listing is re-rendered**, so this turn's context carries it. A
@@ -912,12 +980,12 @@ here unchanged (`hooks::claude_code_alias`, `docs/hooks.md`).
 | Where | What |
 |---|---|
 | `src/skills.rs` | **pure**: `SkillMetadata`, frontmatter parse, name validation, listing + budget, body render, the `SkillRegistry` handle |
-| `prompts/skills/` | embedded and seeded built-ins: `skill-creator` and `flaredantic` (`SKILL.md` + `reference.md` each), `web-search` (`SKILL.md` + five `scripts/*.py`, their unit tests beside them unseeded), `jina-reader` and `yt-dlp` (one `SKILL.md` each) |
-| `src/llm/skill.rs` | root resolution, the `read_dir` walk, the built-in seed (`seed_builtin_skills`), context-derived `LoadedSkills`, and the tool executor (`run_skill_tool`) |
+| `prompts/skills/` | embedded and seeded built-ins: `skill-creator` and `flaredantic` (`SKILL.md` + `reference.md` each), `web-search` (`SKILL.md` + five `scripts/*.py`, their unit tests beside them unseeded), `imagegen` (`SKILL.md`, `LICENSE.txt`, four `references/*.md`, two `scripts/*.py`), `jina-reader` and `yt-dlp` (one `SKILL.md` each) |
+| `src/llm/skill.rs` | root resolution, the `read_dir` walk, the built-in sync (`sync_builtin_skills`, over `crate::builtins` — `docs/builtin-updates.md`), context-derived `LoadedSkills`, and the tool executor (`run_skill_tool`) |
 | `src/llm/tools.rs` | `skill_spec()`, `display_name`, `summarize_call` |
 | `src/llm/backend.rs` | `with_skills` — the `with_tasks` pattern |
 | `src/context.rs` | the leading listing fragment |
-| `src/tui/bootstrap.rs` | the built-in seed, then discovery at startup, and the failure toast |
+| `src/tui/bootstrap.rs` | the built-in sync, then discovery at startup, and the failure toast |
 | `src/tui/models.rs` | `with_skills` on every backend rebuild, `sync_skill_listing` |
 | `src/app/skills_menu.rs` | the `/skills` picker's state, rows and key map |
 | `src/ui/skills_view.rs` | the `/skills` picker's rendering and geometry |

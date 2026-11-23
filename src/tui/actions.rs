@@ -85,8 +85,8 @@ impl Session<'_> {
                 // queued (invariant 4) — so flush them and repaint the inline
                 // view the same way a normal Ctrl+O return does; otherwise
                 // restore() lands on the stale live status strip
-                // ("Working… (… tokens)") instead of the committed
-                // "Done for Ns" summary.
+                // ("Hatching… (… tokens)") instead of the committed
+                // "Hatched for Ns" summary.
                 if self.app.view != View::Conversation {
                     self.term.exit_overlay()?;
                     self.overlay_return_repaint()?;
@@ -186,7 +186,11 @@ impl Session<'_> {
             }
             Action::SetPermissionMode(mode) => self.set_permission_mode(mode),
             Action::OpenModelPicker => self.open_model_picker(),
-            Action::CloseModelPicker => self.close_model_picker(),
+            Action::RefreshModels => self.refresh_model_picker(),
+            // The picker is already closed. Its fetches run on: what they
+            // read is kept when they land, and a reopen waits on them
+            // (docs/model-cache.md).
+            Action::CloseModelPicker => {}
             Action::SelectModel {
                 provider,
                 id,
@@ -262,6 +266,18 @@ impl Session<'_> {
                 // collapses back to the composer on the next draw.
             }
             Action::CopyDonationAddress(address) => self.copy_donation_address(address),
+            Action::OpenSponsorPage | Action::CloseSponsorPage => {
+                // The `/donate` page's rule: the pure open or close already
+                // happened and after_key schedules the frame
+                // (docs/sponsor.md).
+            }
+            Action::CopySponsorLink(link) => self.copy_sponsor_link(link),
+            Action::OpenDiscordPage | Action::CloseDiscordPage => {
+                // The `/sponsor` page's rule: the pure open or close already
+                // happened and after_key schedules the frame
+                // (docs/discord.md).
+            }
+            Action::CopyDiscordInvite => self.copy_discord_invite(),
             // The pure open already happened; the boundary reloads the file
             // so a secret another session saved is listed (docs/secrets.md).
             Action::OpenSecretsPage => self.open_secrets_page(),
@@ -309,6 +325,12 @@ impl Session<'_> {
                 // Esc/Ctrl+C dismissed the browser: nothing to reap; the
                 // region collapses back to the composer on the next draw.
             }
+            Action::OpenPluginsMenu => self.open_plugins_menu(),
+            // The page closed (Esc on its list, Ctrl+C anywhere): its job, if
+            // one runs, is stopped; the answer still lands and a change it
+            // made is still taken in (docs/plugins.md).
+            Action::ClosePluginsMenu | Action::CancelPluginJob => self.cancel_plugin_job(),
+            Action::PluginOp { op, round } => self.run_plugin_op(op, round),
             Action::OpenMcpMenu => self.open_mcp_menu(),
             Action::CloseMcpMenu => {
                 // Esc/Ctrl+C dismissed the manager: nothing to reap; the
@@ -385,6 +407,11 @@ impl Session<'_> {
             .clocks
             .turn_start
             .map_or(0, |start| start.elapsed().as_secs());
+        // The running command's own clock, read now rather than at the last
+        // draw: the call the interrupt resolves records how long it ran
+        // (docs/rollout-records.md).
+        self.app
+            .set_command_elapsed(self.clocks.command_start.map(|start| start.elapsed()));
         // A thinking phase caught mid-thought settles first, so its
         // `Thought for …` cell sits ahead of everything the interrupt keeps.
         // Recording it is also what makes this a *Kept* interrupt: real work
@@ -532,7 +559,9 @@ impl Session<'_> {
         }
         // Purge scrollback + clear the screen (codex's /clear), not just blank
         // the visible screen — the old conversation must be gone from scrollback
-        // too, so scrolling up shows nothing.
+        // too, so scrolling up shows nothing. The screen it leaves is a fresh
+        // one, so the mascot on its banner greets it (docs/mascot-animation.md).
+        self.greet_from_banner();
         self.repaint_conversation()
     }
 
@@ -600,6 +629,11 @@ impl Session<'_> {
             // …and the read-only `/donate` page has no field at all
             // (docs/donate.md)…
             View::Conversation if self.app.donate_picker.is_some() => {}
+            // …nor the `/sponsor` page, its twin (docs/sponsor.md)…
+            View::Conversation if self.app.sponsor_page.is_some() => {}
+            // …nor the `/discord` page, the `/sponsor` page's twin
+            // (docs/discord.md)…
+            View::Conversation if self.app.discord_page.is_some() => {}
             // …nor does the `/export` page, its sibling (docs/export.md)…
             View::Conversation if self.app.export_picker.is_some() => {}
             // …nor the `/context` page (docs/context-usage.md).
@@ -618,6 +652,11 @@ impl Session<'_> {
             View::Conversation if self.app.mcp_menu.is_some() => {
                 let _ = self.app.paste_into_mcp_auth(pasted);
             }
+            // The `/plugins` page: a marketplace's address into its add
+            // field, or into the list's search (docs/plugins.md).
+            View::Conversation if self.app.plugins_menu.is_some() => {
+                self.app.on_paste(pasted);
+            }
             View::Conversation => {
                 self.app.on_paste(pasted);
                 // The paste may have changed the active `@token`.
@@ -628,7 +667,9 @@ impl Session<'_> {
             View::ToolOutput | View::ContextDebug => {}
         }
         self.burst.reset();
-        self.frame.schedule_frame();
+        // A paste is the user's own input, shown at once like a key
+        // (`docs/input-latency.md`).
+        self.frame.schedule_input_frame();
     }
 
     /// Esc-Esc backtrack confirmed: history is already truncated to the chosen

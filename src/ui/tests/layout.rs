@@ -276,6 +276,7 @@ fn region_is_modal_only_while_a_permission_prompt_is_open() {
         detail: None,
         agent: None,
         agent_id: None,
+        check_failure: None,
     });
     assert!(region_is_modal(&app));
 }
@@ -458,7 +459,7 @@ fn render_pipeline_survives_extreme_terminal_sizes() {
                     // mirror the Ctrl+O overlay
                     let screen = Rect::new(0, 0, w, h);
                     let mut overlay = Buffer::empty(screen);
-                    render_tool_view(screen, &mut overlay, app, &transcript_lines(app, w));
+                    render_tool_view(screen, &mut overlay, app, &transcript_page(app, w));
                     let _ = tool_view_max_scroll(app, w, h);
                 }));
                 assert!(
@@ -483,12 +484,23 @@ fn the_search_cursor_clamps_inside_a_narrow_terminal() {
 fn all_failed_picker_height_covers_each_error_row() {
     let mut app = App::new();
     app.open_model_picker("x");
-    app.begin_model_load(2);
-    app.add_model_error("OpenRouter", "HTTP 500");
-    app.add_model_error("Agent Zero API", "HTTP 401");
+    let load = |id: &str, name: &str| crate::app::ProviderLoad {
+        id: id.into(),
+        name: name.into(),
+        source: String::new(),
+        listed_at: None,
+        models: Vec::new(),
+        fetch: true,
+    };
+    app.begin_model_round(vec![
+        load("openrouter", "OpenRouter"),
+        load("a0_venice", "Agent Zero API"),
+    ]);
+    app.finish_model_fetch("openrouter", Err("HTTP 500".into()), 0);
+    app.finish_model_fetch("a0_venice", Err("HTTP 401".into()), 0);
     // The placeholder page's chrome — rule, title, subtitle, gap, search,
-    // gap, rule (7) — + 2 error rows = 9.
-    assert_eq!(model_picker_height(&app, 74, 40), Some(9));
+    // gap, rule (7) — + 2 error rows + the `ctrl+r to try again` row = 10.
+    assert_eq!(model_picker_height(&app, 74, 40), Some(10));
 }
 
 #[test]
@@ -657,7 +669,7 @@ fn a_squeezed_pickers_strip_drops_preview_rows_not_the_status_line() {
     render_live_with_preview(buf.area, &mut buf, &app, Some(&preview));
     let rows: Vec<String> = (0..h).map(|y| row(&buf, y, width)).collect();
     assert!(
-        rows.iter().any(|r| r.contains("Working…")),
+        rows.iter().any(|r| r.contains("Hatching…")),
         "the turn's status line survives the squeeze: {rows:?}"
     );
     assert!(
@@ -920,30 +932,31 @@ fn size_sweep_apps() -> Vec<(&'static str, App)> {
         app
     };
     let file_picker = {
-        // An open `@` picker with match indices deep enough in a long
-        // mixed-width path that tiny widths truncate past them, so
-        // `file_menu_row`'s truncate + match-span grouping is swept too.
+        // An open `@` picker whose query matches characters deep enough in
+        // a long mixed-width path that tiny widths truncate past them, so
+        // `file_menu_row`'s truncate + match-span grouping is swept too. The
+        // band works out what to bold from the query, which matches the long
+        // path at bytes 0, 1, 2, 23, 26, 42, 52 and 57 — `s`, `r`, `c`, `世`,
+        // `界`, `🎉`, `a` and `l`, the last five past a narrow truncation —
+        // while the composer keeps a plain `@src`, as the sweep always had.
         let long = "src/some/deeply/nested/世界 with spaces/🎉emoji/averylongfilename.rs";
         let mut app = base();
         app.input = TextArea::from_text("@src");
         app.file_search = Some(FileSearch {
             selected: 0,
-            query: "src".into(),
+            query: "src世界🎉al".into(),
             matches: vec![
                 FileMatch {
                     path: "src/app.rs".into(),
                     score: 10,
-                    indices: vec![0, 1, 2],
                 },
                 FileMatch {
                     path: long.into(),
-                    // Byte offsets of `s`, `r`, `c`, `世`, `界`, `🎉`, `a`,
-                    // and `l` — the last five land past a narrow truncation.
                     score: 5,
-                    indices: vec![0, 1, 2, 23, 26, 42, 52, 57],
                 },
             ],
             waiting: false,
+            truncated: false,
         });
         app
     };
@@ -972,11 +985,13 @@ fn tall_mcp_server_app() -> App {
             command: "npx".to_string(),
             args: (0..60).map(|i| format!("--flag-{i}")).collect(),
             env: Default::default(),
+            cwd: None,
         },
         status: crate::mcp::McpServerStatus::Connected,
         auth: None,
         identity: None,
         excluded: Vec::new(),
+        kept_client: None,
         tools: Vec::new(),
     }]);
     app.mcp_menu.as_mut().unwrap().page = crate::app::McpPage::Server;
@@ -1148,8 +1163,8 @@ fn the_transcript_overlay_seats_the_cursor_after_its_quit_hint() {
     let app = App::new();
     let area = Rect::new(0, 0, 60, 12);
     let mut buf = Buffer::empty(area);
-    let lines = transcript_lines(&app, 60);
-    render_tool_view(area, &mut buf, &app, &lines);
+    let page = transcript_page(&app, 60);
+    render_tool_view(area, &mut buf, &app, &page);
     let (x, y) = overlay_cursor_seat(&buf);
     let hint = " q/esc/ctrl+o to quit";
     assert!(

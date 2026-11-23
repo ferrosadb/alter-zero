@@ -55,17 +55,24 @@ whoever opens it (the model included) without costing the listing anything.
 In precedence order — the **first** root to claim a name wins, so a project
 can shadow a personal agent of the same name:
 
-1. `{cwd}/.alter-zero/agents`
-2. `{project_root}/.alter-zero/agents` — the nearest `.git` ancestor, skipped
-   when it *is* the cwd (launching in `repo/src` still finds the repo's
-   agents, the `AGENTS.md` walk-up)
-3. `{config_home}/agents` — `~/.alter-zero/agents`, following
-   `ALTER_ZERO_CONFIG_DIR` like every other user-level config
+1. `{dir}/.alter-zero/agents` for **every directory from the cwd up to the
+   project root** (the nearest `.git` ancestor), nearest first. These are the
+   directories `AGENTS.md` discovery and the skill roots read
+   (`project_doc::doc_chain`). Launching in `repo/packages/web/src` still finds
+   the package's agents and the repo's; without a project root the cwd alone
+   is read. Codex reads its own `.codex/agents` from the same directories.
+   This walk replaced reading only the cwd and the project root
+   (`docs/agents-dir.md`).
+2. `{config_home}/agents` — `~/.alter-zero/agents`, following
+   `ALTER_ZERO_CONFIG_DIR` like every other user-level config. Launched in
+   `~`, it is the cwd's own row and is listed once.
 
 Deliberately **no `.claude/agents`**, unlike skills. A `SKILL.md` is inert
 markdown; an agent file names a *model* and a *tool allowlist*, and silently
 inheriting another tool's agents would change which model a task runs on and
-what it may touch.
+what it may touch. No `.agents/agents` either: skills are what Codex reads
+from `.agents/`, and no agent reads definitions from there
+(`docs/agents-dir.md`).
 
 `ALTER_ZERO_AGENTS_DIR` **replaces** the whole list (the `*_DIR` convention),
 which is also what makes a test run hermetic.
@@ -77,7 +84,13 @@ repo, `include_str!`'d beside every other markdown this crate carries). At start
 **written into the user root when that file is absent** — so a fresh install
 finds them on disk and can edit them, and a release that adds a default gets
 it too. Deleting one brings it back next launch; to change a default, edit
-it (that is what the seeding is *for*).
+it (that is what the seeding is *for*). A copy nobody edited is also kept
+current: a release that changes a default replaces it, and leaves its new
+version beside an edited one as `<name>.md.new`, which the walk never reads
+(`docs/builtin-updates.md`). An `ALTER_ZERO_AGENTS_DIR` override is only
+seeded — a missing default written, nothing replaced, removed or offered —
+since it is somebody else's directory, perhaps one a team keeps in a
+repository, which whoever runs the newest build must not rewrite.
 
 If the walk still ends without one of them — no writable home, an
 `ALTER_ZERO_AGENTS_DIR` pointed at a read-only directory — the embedded
@@ -110,7 +123,9 @@ property the tool depends on, not a convenience.
   the cwd, where temporary files go — and a subagent that doesn't know them
   writes into `/tmp` and guesses the year. With no body the prompt is exactly
   what it was before this feature: the session's own assembled prompt plus
-  the note.
+  the note — as the run made it, a `--system-prompt` persona and
+  `--append-system-prompt` text included, while a body replaces those too
+  (`docs/system-prompt.md`).
 
 An unknown `subagent_type` no longer silently becomes `general-purpose`: the
 call resolves as a recoverable error naming the available types, so the model
@@ -185,6 +200,17 @@ withholds `Skill` is briefed with nothing.
 It is assembled where a launch is built, so a **chat continuation** — which
 resumes a message list that already carries it — never pushes a second copy.
 
+## Plugin agents
+
+An installed plugin's agent files (`docs/plugins.md`) are types too, named
+`{plugin}:{name}` so they never shadow a root's, appended after the walk at
+bootstrap and at every rescan. Their `tools:` is translated into this app's
+names (`plugins::translate_tools` — `Read`, `Write`, `Edit`, `Bash`, `Skill`
+and `mcp__…` names kept, `Glob`/`Grep`/`LS` as `Bash`, a permission rule's
+argument dropped, anything without a counterpart left out), and their
+`model:` is ignored — a plugin cannot know which models this session can
+reach — so they run on the session's model.
+
 ## Rescanning
 
 The roots are re-walked at **every turn start**, beside the `SKILL.md`
@@ -201,7 +227,7 @@ re-broken reports again).
 | --- | --- |
 | `src/frontmatter.rs` | the shared `---` frontmatter parse (skills + agents) |
 | `src/subagents.rs` | pure: `AgentDefinition`, the parse, `AgentTools::allows`, the listing, the reminder wrapper, `SubagentRegistry` |
-| `src/llm/subagent.rs` | boundary: the root walk, the discovery, the seeding of the embedded defaults |
+| `src/llm/subagent.rs` | boundary: the root walk, the discovery, the sync of the embedded defaults (`sync_builtin_agents`, `docs/builtin-updates.md`) |
 | `prompts/agents/*.md` | the embedded defaults themselves |
 
 `ALTER_ZERO_AGENTS_DIR` relocates the roots. There is no separate on/off

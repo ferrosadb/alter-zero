@@ -26,8 +26,21 @@ already in this codebase; this change ports the rest.
   the earliest). A thin async `run_scheduler` task receives requested deadlines
   on an mpsc channel, coalesces + rate-limits them, sleeps until due, then sends
   one draw tick. `FrameRequester` is the cloneable send handle
-  (`schedule_frame` / `schedule_frame_in`). Pure parts are unit-tested; the
-  async task is covered by `smoke.sh`.
+  (`schedule_frame` / `schedule_frame_in`, and `schedule_input_frame` for a
+  key press or a paste, whose frame is not held to the floor —
+  `docs/input-latency.md`). Pure parts are unit-tested; the async task is
+  covered by `smoke.sh`.
+
+  A tick does not say who asked for it, and one kind of asker wants less
+  than a frame: the banner mascot, whose pose is the only thing that can
+  have changed when nothing else asked. So the requester **counts** its
+  requests — all but `schedule_banner_frame_in`, the mascot's — and the
+  loop's `FrameLedger` reads the count as each frame begins: unmoved since
+  the frame before began, the frame is the banner's alone and repaints the
+  banner's cells without rendering the live region
+  (`docs/mascot-animation.md` *A frame of its own*). Everything else that
+  re-arms itself asks while a frame is drawn, which moves the count, so a
+  frame anything else wanted stays a whole one.
 
 - **`paste.rs`** — `PasteBurst`, a pure state machine: characters arriving within
   `BURST_CHAR_INTERVAL` (8 ms) of each other are a *burst* once `BURST_MIN_CHARS`
@@ -75,6 +88,17 @@ tracks the viewport row itself and never queries.
 
 ## Fairness
 
-`tokio::select!` polls its branches in a randomized order each iteration, so
-neither input nor draw ticks can starve the other — the effect codex gets from
-its explicit round-robin `poll_draw_first` toggle.
+`tokio::select!` polls its branches in a randomized order each iteration, and
+for a long time that was the loop's whole fairness policy — the effect codex
+gets from its explicit round-robin `poll_draw_first` toggle. It is fair
+between sources that are each ready now and then. Against a reply channel
+that always has an event ready it gave a due draw tick one poll in fourteen,
+so a fast stream held the frame that shows a keystroke behind a dozen more of
+its own events.
+
+The loop now polls **input first and the draw tick second** (`biased`), and
+only the remaining sources — the reply, the workers, the shells, the
+subagents — are chosen at random among themselves, by `next_wake`'s own
+`select!`. Neither of the first two can crowd the rest out: keys arrive at a
+person's pace, and the scheduler emits at most one frame per floor plus one
+per run of keys handled together. See `docs/input-latency.md`.

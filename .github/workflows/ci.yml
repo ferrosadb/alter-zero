@@ -1,11 +1,12 @@
 # .github/workflows/ci.yml — the project's gate, on every push to main and
 # every pull request (docs/release.md). Each job is one thing a contributor
 # already runs before a commit, unchanged: the pre-commit gate (`cargo fmt
-# --check` + `clippy -D warnings` + `test` + `doc`), the smoke suite over the
-# real binary in tmux, the release tooling's own fixture tests plus the
-# version/changelog agreement and the npm launcher's tests, the telemetry
-# collector's pure-half tests, and the scripts the built-in web-search skill
-# seeds.
+# --check` + `clippy -D warnings` + `test` + `doc`, all but `fmt` on macOS
+# too), the smoke suite over the real binary in tmux, the release tooling's
+# own fixture tests plus the version/changelog agreement, the shipped history
+# of built-in files against every version git has, and the npm launcher's
+# tests, the telemetry collector's pure-half tests, and the scripts the
+# built-in web-search skill seeds.
 # The release workflow re-runs the gate and the tooling tests before it builds
 # anything, and the headless Kali container has its own workflow
 # (container.yml).
@@ -49,9 +50,51 @@ jobs:
       - run: cargo test
       - run: cargo doc --no-deps --lib
 
+  test-macos:
+    # The gate, `fmt` aside, on macOS, which the README promises
+    # beside Linux. On Linux alone, a test or a code path that leans on GNU
+    # `ps` or `od`, procps' `pkill -s` or `/proc` passes by accident of the
+    # platform: `bashkill` never sent SIGTERM on a Mac, and nothing here
+    # could see it. macOS has no `setsid` binary, so the app gives a command
+    # its terminal through its own binary's helper re-exec; the library's
+    # tests start their terminal sessions the same way, through the
+    # `alter-zero` binary `cargo test` builds beside them
+    # (docs/tty-detach.md *Testing*) — the tier a Mac runs on, and every
+    # tool the tests run is macOS's own.
+    name: clippy · test · doc (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: No setsid on PATH
+        # Fail rather than pass on another tier if an image ever ships one:
+        # the terminal tests must start their sessions through the helper.
+        run: |
+          if command -v setsid; then
+            echo "::error::setsid is on PATH; this job tests the helper tier macOS runs on"
+            exit 1
+          fi
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+      # The code behind `cfg(not(target_os = "linux"))` and
+      # `cfg(target_os = "macos")` is linted nowhere else.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo doc --no-deps --lib
+
   smoke:
     name: smoke suite (tmux)
     runs-on: ubuntu-latest
+    env:
+      # The idle text layout (docs/text-layout.md) is for release and dist
+      # builds, which no job here makes. Forced on for this job's dev build,
+      # the suite drives a binary linked the way a shipped one is, and the
+      # layout's own test below can see a list or a toolchain gone stale: a
+      # section the linker script asked for that is missing or near empty.
+      # Job-wide, so every cargo call here agrees and nothing is rebuilt.
+      ALTER_ZERO_TEXT_LAYOUT: "1"
     steps:
       - uses: actions/checkout@v7
       - name: Install the pinned toolchain
@@ -71,6 +114,8 @@ jobs:
       - name: The phase readers and the selector
         run: bash scripts/smoke/selftest.sh
       - run: cargo build
+      - name: The binary is laid out
+        run: cargo test --test text_layout
       - name: Run every phase, one worker per core
         # The suite's default of twice the core count is sized for a
         # developer's box; on a loaded four-core machine it stretched the
@@ -166,10 +211,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck -x install.sh scripts/release.sh scripts/release/*.sh
+        with:
+          # The whole history: the shipped history's check reads every
+          # version of every built-in file, and refuses a shallow clone.
+          fetch-depth: 0
+      - run: shellcheck -x install.sh scripts/release.sh scripts/release/*.sh scripts/shipped_history.sh
       - run: scripts/release.sh selftest
       - name: Cargo.toml, Cargo.lock, the README badge, npm/package.json and CHANGELOG.md agree
         run: scripts/release.sh check
+      - name: prompts/shipped.sha256 lists every version of every built-in file this history carried
+        run: scripts/shipped_history.sh --check
       - name: The npm launcher's tests
         run: node --test
         working-directory: npm

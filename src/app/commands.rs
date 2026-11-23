@@ -153,10 +153,23 @@ pub enum CommandEffect {
     /// Works **mid-turn** like `/hooks` — it only replaces the composer;
     /// connection work runs on worker threads either way. See `docs/mcp.md`.
     Mcp,
+    /// Open the `/plugins` page: the plugins of the added marketplaces, to
+    /// install, update, toggle and remove, and the marketplaces themselves.
+    /// Works **mid-turn** like `/mcp` — it only replaces the composer, and
+    /// every operation runs on a worker. See `docs/plugins.md`.
+    Plugins,
     /// Open the read-only `/donate` page: the project's crypto donation
     /// addresses, each one copyable. Works **mid-turn** like `/hooks` — it
     /// only replaces the composer. See `docs/donate.md`.
     Donate,
+    /// Open the read-only `/sponsor` page: the developer's sponsor page and
+    /// contact address, each copyable. Works **mid-turn** like `/donate`.
+    /// See `docs/sponsor.md`.
+    Sponsor,
+    /// Open the read-only `/discord` page: the invite to the Alter Zero
+    /// Discord server, copyable. Works **mid-turn** like `/sponsor`. See
+    /// `docs/discord.md`.
+    Discord,
     /// Open the `/secrets` page: the user's secrets — credentials the agent
     /// uses by placeholder without ever seeing the value — to add, edit and
     /// delete. Works **mid-turn** like `/skills`: it only replaces the
@@ -304,9 +317,26 @@ pub const COMMANDS: &[SlashCommand] = &[
     ),
     SlashCommand::builtin("mcp", "Manage MCP servers", CommandEffect::Mcp),
     SlashCommand::builtin(
+        "plugins",
+        "Browse, install and manage plugins",
+        CommandEffect::Plugins,
+    ),
+    SlashCommand::builtin(
         "donate",
         "Support the project with a crypto donation",
         CommandEffect::Donate,
+    ),
+    SlashCommand::builtin(
+        "sponsor",
+        "Sponsor the developer or get in touch",
+        CommandEffect::Sponsor,
+    ),
+    // …and, beside the two pages that ask for support, the one that asks
+    // the reader in.
+    SlashCommand::builtin(
+        "discord",
+        "Join the community on Discord",
+        CommandEffect::Discord,
     ),
     SlashCommand::builtin(
         "secrets",
@@ -606,6 +636,14 @@ impl App {
                 // (docs/mcp.md).
                 Action::OpenMcpMenu
             }
+            CommandEffect::Plugins => {
+                // /plugins works mid-turn like /mcp: the page only replaces
+                // the composer and its operations run on a worker. Whether
+                // the session loads plugins is the boundary's to know, so the
+                // *loop* opens the page and reads the catalog
+                // (docs/plugins.md).
+                Action::OpenPluginsMenu
+            }
             CommandEffect::Donate => {
                 // /donate works mid-turn like /hooks: a read-only page that
                 // only replaces the composer. The catalog is a const —
@@ -613,6 +651,18 @@ impl App {
                 // docs/donate.md.
                 self.open_donate_picker();
                 Action::OpenDonatePicker
+            }
+            CommandEffect::Sponsor => {
+                // /sponsor works mid-turn like /donate: a read-only page
+                // over a const catalog, opened right here. docs/sponsor.md.
+                self.open_sponsor_page();
+                Action::OpenSponsorPage
+            }
+            CommandEffect::Discord => {
+                // /discord works mid-turn like /sponsor: a read-only page
+                // over a const invite, opened right here. docs/discord.md.
+                self.open_discord_page();
+                Action::OpenDiscordPage
             }
             CommandEffect::Secrets => {
                 // /secrets works mid-turn like /skills: the page only

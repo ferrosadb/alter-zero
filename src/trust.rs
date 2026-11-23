@@ -278,9 +278,20 @@ impl ServerParts {
     #[must_use]
     pub fn of(config: &McpServerConfig) -> Self {
         let (target, values) = match config {
-            McpServerConfig::Stdio { command, args, env } => {
-                // Structured, so `["a b"]` and `["a", "b"]` stay apart.
-                let line = serde_json::to_string(&(command, args)).unwrap_or_default();
+            McpServerConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                // Structured, so `["a b"]` and `["a", "b"]` stay apart. Where
+                // it starts is part of what runs — and left out when unset,
+                // so an entry decided before the key existed reads unchanged.
+                let line = match cwd {
+                    Some(cwd) => serde_json::to_string(&(command, args, cwd)),
+                    None => serde_json::to_string(&(command, args)),
+                }
+                .unwrap_or_default();
                 (fingerprint(line.as_bytes()), env)
             }
             McpServerConfig::Http { url, headers, .. }
@@ -740,6 +751,29 @@ mod tests {
         let plain = crate::mcp::parse_server_entry(r#"{"url":"https://x.test/mcp"}"#).unwrap();
         let json = serde_json::to_string(&ServerParts::of(&plain)).unwrap();
         assert!(!json.contains("oauth"), "{json}");
+    }
+
+    /// The redirect URI an entry's client registered is part of that
+    /// client: another `callbackUrl` is an OAuth-client change, and so is a
+    /// codex-shaped entry whose keys now mean something.
+    #[test]
+    fn another_callback_url_is_an_oauth_client_change() {
+        let entry = |oauth: &str| {
+            crate::mcp::parse_server_entry(&format!(
+                r#"{{"url":"https://x.test/mcp","oauth":{oauth}}}"#
+            ))
+            .unwrap()
+        };
+        let was = ServerParts::of(&entry(
+            r#"{"clientId":"c","callbackUrl":"http://127.0.0.1:5000/callback/one"}"#,
+        ));
+        let now = ServerParts::of(&entry(
+            r#"{"clientId":"c","callbackUrl":"http://127.0.0.1:5000/callback/two"}"#,
+        ));
+        assert_eq!(was.changes(&now), [ServerChange::OAuthClient]);
+        let snake = ServerParts::of(&entry(r#"{"client_id":"c"}"#));
+        let camel = ServerParts::of(&entry(r#"{"clientId":"c"}"#));
+        assert_eq!(snake, camel, "one client, whichever spelling names it");
     }
 
     const USER: &str = "/home/u/.alter-zero/hooks.json";

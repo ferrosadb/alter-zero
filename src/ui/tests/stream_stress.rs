@@ -304,6 +304,149 @@ fn fuzz_stream_render_agrees_with_batch_on_hostile_soup() {
     }
 }
 
+/// The reply so far, whole ([`StreamRender::whole`]) — what the Ctrl+O pager
+/// shows of a reply still streaming — is the batch render of that prefix at
+/// each of `ends`: text, colour, modifiers and carriers, every row. One
+/// render across the whole document, so each call stands on the rows the
+/// calls before it kept.
+fn assert_whole_matches_batch(
+    full: &str,
+    ends: impl Iterator<Item = usize>,
+    width: u16,
+    ctx: &str,
+) {
+    let mut render = StreamRender::new();
+    for end in ends {
+        let prefix = &full[..end];
+        assert_eq!(
+            render.whole(prefix, width),
+            message_lines(Role::Assistant, prefix, width),
+            "{ctx}: the reply so far at {prefix:?} (w={width})"
+        );
+    }
+}
+
+#[test]
+fn the_reply_so_far_is_the_batch_render_at_every_prefix() {
+    // The pager's live reply renders a line once and keeps its rows
+    // (`docs/input-latency.md`): nothing it shows may differ from rendering
+    // the reply whole, whatever a hostile stream interleaves — at every
+    // character of the soup, and at every token of the tour of block kinds.
+    let mut rng = Rng(0x5EED_CAFE_F00D_0003);
+    for case in 0..60 {
+        let doc = hostile_doc(&mut rng);
+        let ends = doc.char_indices().skip(1).map(|(end, _)| end);
+        for width in [3u16, 38] {
+            assert_whole_matches_batch(
+                &doc,
+                ends.clone().chain([doc.len()]),
+                width,
+                &format!("whole case {case}"),
+            );
+        }
+    }
+    let tour = crate::stream::MARKDOWN_TOUR;
+    let ends: Vec<usize> = crate::stream::tokens(tour)
+        .iter()
+        .scan(0, |end, token| {
+            *end += token.len();
+            Some(*end)
+        })
+        .collect();
+    for width in [24u16, 100] {
+        assert_whole_matches_batch(tour, ends.iter().copied(), width, "the markdown tour");
+    }
+}
+
+#[test]
+fn the_reply_so_far_never_ends_the_reply() {
+    // `whole` reads the trailing line and an open table off a clone: the
+    // commits that follow it must be the ones that would have happened
+    // without it, or a pager opened mid-reply would change scrollback.
+    let doc = "intro\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n```rust\nfn f() {}\n```\nend";
+    for width in [12u16, 60] {
+        let (mut plain, mut peeked) = (StreamRender::new(), StreamRender::new());
+        for (end, _) in doc.char_indices().skip(1).chain([(doc.len(), ' ')]) {
+            let prefix = &doc[..end];
+            let _ = peeked.whole(prefix, width);
+            assert_eq!(
+                peeked.commit(prefix, width),
+                plain.commit(prefix, width),
+                "the commit at {prefix:?} (w={width})"
+            );
+        }
+        assert_eq!(peeked.finish(doc, width), plain.finish(doc, width));
+    }
+}
+
+#[test]
+fn label_only_links_stream_exactly_as_they_render_whole() {
+    // Where the terminal opens hyperlinks a link is its label alone, the
+    // target behind it (`docs/links.md` *Labelled links*). Whether a target
+    // is hidden is decided by the finished link — its target, its label —
+    // and an unfinished one is withheld whole, so the three streaming
+    // invariants hold for this presentation as they do for the other: no
+    // committed row is restyled when the `)` lands, scrollback and the strip
+    // are the reply so far, and the commits reconstruct the batch render,
+    // carriers included.
+    crate::links::with_target_display(crate::links::TargetDisplay::Hidden, || {
+        let docs = [
+            "Source: [FIDE](https://www.fide.com/geneva-to-host-fide-world-championship-match-2026/) today",
+            "read [the official documentation](https://example.com/docs/index.html) first, \
+             then [**the** `api` *notes*](https://example.com/api) and https://example.org/bare.",
+            "- one [more link](https://example.org/a) here\n- [](https://x.com/empty) and \
+             [the notes](docs/links.md)\n\n> quoted [source](https://x.com/q)",
+            "## A [heading link](https://x.com/h) here\n\n| Name | Source |\n| --- | --- |\n\
+             | chess | [FIDE](https://www.fide.com/x) |\n| notes | [the notes](AGENTS.md) |\n\ndone",
+            "[https://bank.example](https://evil.example/login) and \
+             [https://x.com/d](https://x.com/d) and [see https://x.com/d now](https://x.com/d)",
+        ];
+        for (i, doc) in docs.iter().enumerate() {
+            for width in [9u16, 14, 30, 80] {
+                assert_stream_matches_batch(doc, width, &format!("label-only doc {i}"));
+            }
+        }
+        // The hostile soup holds a link, an unclosed one, nested brackets and
+        // an image inside a link among its fragments: a smaller sweep of it
+        // under this presentation.
+        let mut rng = Rng(0x5EED_CAFE_F00D_0002);
+        for case in 0..80 {
+            let doc = hostile_doc(&mut rng);
+            for width in [3u16, 24] {
+                assert_stream_matches_batch(&doc, width, &format!("label-only soup {case}"));
+            }
+        }
+    });
+}
+
+#[test]
+fn links_written_once_stream_exactly_as_they_render_whole() {
+    // A label that is its own target is written once, and a link with no
+    // target is its label (`docs/links.md` *The same on every terminal*).
+    // Both are decided by the finished link, so a streamed reply holding
+    // them commits what the whole render shows, in either presentation.
+    let docs = [
+        "The rule lives in [`src/ui/inline.rs`](src/ui/inline.rs), beside \
+         [AGENTS.md](AGENTS.md) — write to [me@example.com](mailto:me@example.com).",
+        "an [empty target]() then [](#anchor), [#install](#install) and \
+         [agents.md](AGENTS.md) in a row, [x.com/d](https://x.com/d) last",
+        "| File | Mail |\n| --- | --- |\n| [docs/links.md](docs/links.md) | \
+         [me@example.com](mailto:me@example.com) |\n| [none]() | [the guide](AGENTS.md) |\n\ndone",
+    ];
+    for display in [
+        crate::links::TargetDisplay::Shown,
+        crate::links::TargetDisplay::Hidden,
+    ] {
+        crate::links::with_target_display(display, || {
+            for (i, doc) in docs.iter().enumerate() {
+                for width in [7u16, 14, 30, 80] {
+                    assert_stream_matches_batch(doc, width, &format!("{display:?} doc {i}"));
+                }
+            }
+        });
+    }
+}
+
 #[test]
 fn a_streaming_url_never_commits_a_plain_styled_prefix() {
     // The minimal reproduction of the autolink instability the fuzz found: a

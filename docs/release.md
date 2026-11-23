@@ -73,15 +73,17 @@ unambiguous about the libc, it is what `rustup target add` and `cargo build
 name to decide what `file(1)` must say about the binary inside.
 
 The binary is the one Cargo.toml documents for a packaged release —
-`cargo build --release --locked --target T --config
-profile.release.incremental=false`. `--locked` refuses a build whose
-Cargo.lock is stale (a bumped Cargo.toml without its lock entry), and the
-incremental release profile is a developer's rebuild speed, not a shipped
-layout (`docs/build-time.md`). It is **not stripped**: the release profile
-already drops debuginfo, and the symbol table that remains is what turns a
-user's `RUST_BACKTRACE=1` report into function names. It costs ~7 MB of a
-~22 MB binary that compresses to a ~9 MB archive; `--config
-profile.release.strip=true` on the build line is the knob if that ever
+`cargo build --profile dist --locked --target T`. `--locked` refuses a build
+whose Cargo.lock is stale (a bumped Cargo.toml without its lock entry), and
+`dist` is the release profile with fat LTO over a single codegen unit and no
+incremental cache: on x86_64 Linux an 18.6 MB binary instead of 25.6 MB, and
+a faster render path, for a build about two minutes longer
+(`docs/binary-size.md`). The `release` profile itself stays a developer's
+quick incremental rebuild (`docs/build-time.md`). The binary is **not
+stripped**: the profile already drops debuginfo, and the symbol table that
+remains is what turns a user's `RUST_BACKTRACE=1` report into function names.
+After LTO it costs ~1.8 MB of the binary and ~0.4 MB of its ~8.6 MB archive;
+`--config profile.dist.strip=true` on the build line is the knob if that ever
 matters more.
 
 ### The notes
@@ -319,6 +321,16 @@ git push origin HEAD v0.2.0
 `git tag -a v0.1.0 -m "alter-zero v0.1.0" && git push origin v0.1.0` from
 `main` — ideally after one rehearsal run. The section's date is the day it
 was written; edit it to the tag's day if that differs.
+
+**Before `prepare`, take the idle function list again when startup
+changed.** The binary's functions are laid out by a checked-in list of what
+an idle session runs ([`docs/text-layout.md`](text-layout.md)). A function
+that newly runs at startup and is not on it costs a 64 kB window of
+resident memory until it is, so a release whose startup path changed — or
+the first one on a new toolchain — wants `scripts/text_layout.sh profile`
+(it builds the release and the dist binary and needs valgrind) and the
+rewritten `layout/idle-functions.txt` committed. Skipping it breaks
+nothing: the list degrades a window at a time.
 
 **npm follows the GitHub release in the same run.** Once the repository
 sets `NPM_PUBLISH`, the tag push publishes the npm packages right after the

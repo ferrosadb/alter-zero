@@ -763,6 +763,14 @@ impl ReplySource for LlmBackend {
         // pushes onto it while the turn runs and the agent loop drains it at
         // every round boundary.
         let steer = self.steer.clone();
+        // The wire names this session is offered, owned so they cross into the
+        // thread — a routing hint may never name a tool the model cannot see
+        // (docs/tools.md).
+        let offered_owned: Vec<String> = self
+            .tool_definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
         thread::spawn(move || {
             // Encoding the attachments reads files — done here on the backend
             // thread so a large image never stalls the event loop. A known
@@ -860,10 +868,12 @@ impl ReplySource for LlmBackend {
             // request is known to the model within this same turn
             // (docs/background.md). The round's `agent` calls go to the
             // subagent launcher instead (docs/agent-tool.md).
+            let offered: Vec<&str> = offered_owned.iter().map(String::as_str).collect();
             agent::run_agent(
                 &tx,
                 &cancel,
                 max_tool_calls,
+                &offered,
                 &mut messages,
                 |msgs| {
                     if let Ok(mut previous) = wire_history.lock() {
@@ -1725,6 +1735,14 @@ fn spawn_subagent_run(
         .as_ref()
         .and_then(|def| def.model.named())
         .map_or(config.vision, |_| None);
+    // The names this agent is offered, kept as owned Strings so the list
+    // survives `specs` being moved into the client and the thread below — a
+    // routing hint may never name a tool the agent cannot see (docs/tools.md).
+    let offered: Vec<String> = specs
+        .iter()
+        .filter_map(|spec| spec["function"]["name"].as_str())
+        .map(str::to_string)
+        .collect();
     let client = client.with_tools(specs);
     let detach = config.detach_helper.clone();
     let background = config.background.clone();
@@ -1840,10 +1858,12 @@ fn spawn_subagent_run(
                 super::skill::LoadedSkills::from_messages(registry, &messages, secrets.as_ref())
             })
             .unwrap_or_default();
+        let offered_refs: Vec<&str> = offered.iter().map(String::as_str).collect();
         agent::run_agent(
             &tx2,
             &cancel,
             max_tool_calls,
+            &offered_refs,
             &mut messages,
             |msgs| stream_round(&client, msgs, &tx2, &cancel, max_retries),
             |call, on_output| {

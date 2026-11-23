@@ -12,6 +12,21 @@ release heading when a version is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **The reasoning splitter understands channel-framed replies.** A model that
+  frames its answer as a sequence of channel messages — Inkling 2
+  (`inkling2_loop`), and others with the same tokenizer convention — now has
+  its thinking and its reply separated instead of its markers printed into the
+  transcript. The reply arrives as
+  `<|message_model|><|content_thinking|>plan<|end_message|><|message_model|><|content_text|>answer<|end_message|>`;
+  the splitter peels the thinking out to drive the `Thinking` status, drops the
+  role markers, and leaves only the answer in the reply. Unlike the
+  ` thinking`/`<reasoning>` tags it already knew, a channel reply **re-opens**
+  mid-stream, so the markers are treated as structure wherever they appear.
+  Markers split across SSE frames still match, and a reply that merely mentions
+  the tokens is left alone.
+
 ## [0.20.0] - 2026-11-23
 
 ### Added

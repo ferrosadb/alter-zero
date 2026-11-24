@@ -587,7 +587,7 @@ fn a_plugin_servers_tools_are_named_as_claude_code_names_them() {
     // own example.
     assert_eq!(
         crate::mcp::tool_wire_name(&plugin_server_name("my-plugin", "database-tools"), "query"),
-        "mcp__plugin_my-plugin_database-tools__query"
+        "plugin_my-plugin_database-tools_query"
     );
     assert_eq!(plugin_server_name("hello", "echo"), "plugin:hello:echo");
 }

@@ -505,6 +505,7 @@ fn the_permission_prompt_keeps_the_open_group_above_the_call_it_asks_about() {
         id: "p1".to_string(),
         kind: crate::permission::PermissionKind::Bash,
         target: "ls -la".to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: None,

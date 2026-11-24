@@ -84,6 +84,7 @@ pub fn permission_request(
                 id: String::new(),
                 kind,
                 target: args.path,
+                server: None,
                 body,
                 detail: None,
                 agent,
@@ -101,6 +102,7 @@ pub fn permission_request(
                 id: String::new(),
                 kind: PermissionKind::Edit,
                 target: args.path,
+                server: None,
                 body: render_numbered_diff(&tools::diff_lines(&old, &result.new_content)),
                 detail: None,
                 agent,
@@ -114,6 +116,7 @@ pub fn permission_request(
                 id: String::new(),
                 kind: PermissionKind::Bash,
                 target: args.command,
+                server: None,
                 body: String::new(),
                 detail: args
                     .description
@@ -153,6 +156,7 @@ pub fn permission_request(
             id: String::new(),
             kind: PermissionKind::Mcp,
             target: name.to_string(),
+            server: None,
             body: crate::mcp::pretty_args(&call.arguments),
             detail: describe
                 .and_then(|describe| describe(name))
@@ -189,6 +193,7 @@ fn session_request(
         id: String::new(),
         kind: PermissionKind::Session,
         target: id,
+        server: None,
         body: crate::pty::keys::display_input(input),
         detail: command,
         agent,

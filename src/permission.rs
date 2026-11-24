@@ -140,6 +140,14 @@ pub struct PermissionRequest {
     /// `mcp__server__tool` wire name (`Mcp` — the rule key), or the session
     /// id (`Session`).
     pub target: String,
+    /// The MCP server that offered the tool this request is for — `Some("forge")`
+    /// on a [`PermissionKind::Mcp`] call, `None` for every other kind.
+    ///
+    /// Carried, not derived. A short aliased wire name (`frg_find`) has no
+    /// unambiguous split — the server half may itself contain underscores — so
+    /// the display form and the classifier's label read this instead of parsing
+    /// [`target`](Self::target) back into a pair.
+    pub server: Option<String>,
     /// The framed body: the numbered contents / diff for a file change, the
     /// `key: "value"` arguments for an MCP call, the input on one line for a
     /// session, empty for a command (whose `target` *is* the body).
@@ -275,9 +283,27 @@ pub fn question(request: &PermissionRequest) -> String {
 /// The `{Server} - {tool} (MCP)` display form for an MCP request's wire-name
 /// `target` — what the rejected cell names, the server capitalized like
 /// every other rendered surface (`docs/mcp.md`).
-fn mcp_display(wire: &str) -> String {
-    crate::mcp::display_from_wire(wire)
-        .map_or_else(|| wire.to_string(), |d| crate::mcp::capitalize_display(&d))
+fn mcp_display(request: &PermissionRequest) -> String {
+    carried_display_label(request).map_or_else(
+        || request.target.clone(),
+        |label| crate::mcp::capitalize_display(&label),
+    )
+}
+
+/// `{server} - {tool} (MCP)` for the request, from what it carries.
+///
+/// `server` comes from the definition that raised the call, so no short
+/// aliased name is split back into a pair. The legacy `mcp__server__tool`
+/// target still parses, for a record written before the field existed.
+fn carried_display_label(request: &PermissionRequest) -> Option<String> {
+    match &request.server {
+        Some(server) => Some(crate::mcp::tool_display_name(
+            server,
+            crate::mcp::parse_wire_name(&request.target)
+                .map_or(request.target.as_str(), |(_, tool)| tool),
+        )),
+        None => crate::mcp::display_from_wire(&request.target),
+    }
 }
 
 /// The `{server} - {tool}` label — the display name without its ` (MCP)`
@@ -286,16 +312,25 @@ fn mcp_display(wire: &str) -> String {
 /// read [`mcp_display_label`] instead, so a display-only capitalization can
 /// never rewrite what the classifier is asked about.
 #[must_use]
-pub fn mcp_label(wire: &str) -> String {
-    crate::mcp::label_from_wire(wire).unwrap_or_else(|| wire.to_string())
+pub fn mcp_label(request: &PermissionRequest) -> String {
+    match &request.server {
+        Some(server) => {
+            let tool = crate::mcp::parse_wire_name(&request.target)
+                .map_or(request.target.as_str(), |(_, tool)| tool);
+            crate::mcp::tool_label(server, tool)
+        }
+        None => {
+            crate::mcp::label_from_wire(&request.target).unwrap_or_else(|| request.target.clone())
+        }
+    }
 }
 
 /// [`mcp_label`] with its server half capitalized — the prompt body's
 /// headline and the "don't ask again" row's spelling (the rule still stores
 /// the exact wire name, `docs/mcp.md`).
 #[must_use]
-pub fn mcp_display_label(wire: &str) -> String {
-    crate::mcp::capitalize_display(&mcp_label(wire))
+pub fn mcp_display_label(request: &PermissionRequest) -> String {
+    crate::mcp::capitalize_display(&mcp_label(request))
 }
 
 /// How many options every prompt offers (Yes / remember / No) — the length of
@@ -328,7 +363,7 @@ pub fn options(request: &PermissionRequest, project: Option<&str>) -> [String; O
         // An MCP rule remembers the exact wire name (`docs/mcp.md`); the row
         // shows the display label, which is the same tool said out loud.
         PermissionKind::Mcp => {
-            let label = mcp_display_label(&request.target);
+            let label = mcp_display_label(request);
             match project {
                 Some(dir) => format!("Yes, and don't ask again for {label} commands in {dir}"),
                 None => format!("Yes, and don't ask again for {label} commands"),
@@ -369,7 +404,7 @@ pub fn denied_display(request: &PermissionRequest, feedback: Option<&str>) -> St
         PermissionKind::Write => format!("User rejected write to {}", file_name(&request.target)),
         PermissionKind::Edit => format!("User rejected edit to {}", file_name(&request.target)),
         PermissionKind::Bash => "User rejected command".to_string(),
-        PermissionKind::Mcp => format!("User rejected {}", mcp_display(&request.target)),
+        PermissionKind::Mcp => format!("User rejected {}", mcp_display(request)),
         PermissionKind::Session => "User rejected input".to_string(),
     };
     match feedback.map(str::trim).filter(|f| !f.is_empty()) {
@@ -1461,6 +1496,7 @@ mod tests {
             id: "perm_0".to_string(),
             kind,
             target: target.to_string(),
+            server: None,
             body: String::new(),
             detail: None,
             agent: None,

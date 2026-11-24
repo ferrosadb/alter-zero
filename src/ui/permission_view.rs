@@ -326,7 +326,7 @@ fn detail_rows(request: &PermissionRequest, room: u16) -> Vec<(String, Color)> {
 fn mcp_rows(request: &PermissionRequest, width: u16, budget: usize) -> (Vec<Line<'static>>, usize) {
     let indent = PERMISSION_COMMAND_INDENT;
     let room = width.saturating_sub(cols(indent) as u16).max(1);
-    let label = crate::permission::mcp_display_label(&request.target);
+    let label = crate::permission::mcp_display_label(request);
     let args = request.body.trim();
     let call = if args.is_empty() {
         label

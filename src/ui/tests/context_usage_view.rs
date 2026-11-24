@@ -19,6 +19,7 @@ const TALL: u16 = 200;
 fn tool(name: &str, size: usize) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
+        server: None,
         schema: "x".repeat(size),
     }
 }

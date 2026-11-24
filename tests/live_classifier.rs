@@ -131,6 +131,7 @@ fn bash_request(command: &str) -> PermissionRequest {
         id: String::new(),
         kind: PermissionKind::Bash,
         target: command.to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: None,

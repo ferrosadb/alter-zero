@@ -337,6 +337,7 @@ fn live_deepwiki_tool_descriptions_drive_the_permission_prompt() {
         id: "perm_0".to_string(),
         kind: PermissionKind::Mcp,
         target: wire,
+        server: None,
         body: mcp::pretty_args(&format!(r#"{{"repoName":"{REPO}"}}"#)),
         detail: Some(description.clone()),
         agent: None,

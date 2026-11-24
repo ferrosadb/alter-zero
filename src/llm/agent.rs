@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::exec::ToolProgress;
 use super::hooks::{HookSink, allowed_note, block_texts as hook_block_texts};
 use super::tools::{
-    ToolCallRequest, ToolOutcome, attachment_note, display_name, summarize_call,
+    OfferedTool, ToolCallRequest, ToolOutcome, attachment_note, display_name, summarize_call,
     summarize_call_naming,
 };
 use super::{ChatMessage, ContentPart, LlmError};
@@ -407,6 +407,7 @@ pub fn run_agent(
     tx: &UnboundedSender<StreamEvent>,
     cancel: &CancelToken,
     max_tool_calls: usize,
+    offered: &[OfferedTool<'_>],
     messages: &mut Vec<ChatMessage>,
     mut round: impl FnMut(&[ChatMessage]) -> RoundOutcome,
     mut execute: impl FnMut(&ToolCallRequest, &mut dyn FnMut(ToolProgress<'_>)) -> ToolOutcome,
@@ -745,7 +746,18 @@ pub fn run_agent(
                             ok: outcome.ok,
                             tasks: outcome.tasks.clone().unwrap_or_default(),
                         });
-                        results.push((call.id.clone(), outcome.context_text().to_string()));
+                        // Two hints, both server-agnostic: a better tool for
+                        // what the shell was reaching for, and — when the
+                        // answer was cut — the fact that it worked.
+                        let routed = super::tools::with_tool_hint(
+                            &call.name,
+                            &call.arguments,
+                            outcome.context_text(),
+                            offered,
+                        );
+                        let output =
+                            super::tools::with_limited_hint(&call.name, &routed, outcome.truncated);
+                        results.push((call.id.clone(), output));
                         continue;
                     }
                     // `PreToolUse` (docs/hooks.md), ahead of the gate for the
@@ -1183,6 +1195,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             max_tool_calls,
+            &[],
             &mut messages,
             |_| match rounds.next() {
                 Some(calls) => RoundOutcome::ToolCalls {
@@ -1424,6 +1437,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_| {
                 asked += 1;
@@ -1457,6 +1471,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             messages,
             |_| match rounds.next() {
                 Some(calls) => RoundOutcome::ToolCalls {
@@ -1603,6 +1618,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |_msgs| answered(),
             |_call, _sink| panic!("no tools should run"),
@@ -1630,6 +1646,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 *ran.borrow_mut() += 1;
@@ -1840,6 +1857,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 *ran.borrow_mut() += 1;
@@ -2040,6 +2058,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -2088,6 +2107,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -2147,6 +2167,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -2224,6 +2245,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -2319,6 +2341,7 @@ mod tests {
                 &tx,
                 &cancel,
                 MAX_TOOL_ITERATIONS,
+                &[],
                 &mut vec![ChatMessage::user("hi")],
                 |_msgs| outcome.borrow_mut().take().expect("one round"),
                 |_c, _sink| panic!("no tools"),
@@ -2404,6 +2427,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |_msgs| {
                 RoundOutcome::Failed(LlmError::Api {
@@ -2461,6 +2485,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -2558,6 +2583,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |_msgs| reply("done"),
             |_c, _sink| panic!("no tools"),
@@ -2603,6 +2629,7 @@ mod tests {
                 &tx,
                 &cancel,
                 MAX_TOOL_ITERATIONS,
+                &[],
                 &mut vec![ChatMessage::user("hi")],
                 |_msgs| {
                     *rounds.borrow_mut() += 1;
@@ -2642,6 +2669,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |_msgs| {
                 RoundOutcome::Failed(LlmError::Api {
@@ -2674,6 +2702,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             1,
+            &[],
             &mut vec![ChatMessage::user("loop")],
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -2699,6 +2728,7 @@ mod tests {
             &tx,
             &CancelToken::new(),
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |_msgs| RoundOutcome::Cancelled,
             |_c, _sink| panic!("no tools"),
@@ -3067,6 +3097,7 @@ mod tests {
                 &tx,
                 &cancel,
                 MAX_TOOL_ITERATIONS,
+                &[],
                 &mut vec![ChatMessage::user("run it")],
                 |_msgs| {
                     let mut n = rounds.borrow_mut();
@@ -3139,6 +3170,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("run ls")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3240,6 +3272,7 @@ mod tests {
                 &tx,
                 &cancel,
                 MAX_TOOL_ITERATIONS,
+                &[],
                 &mut messages,
                 |_msgs| {
                     let mut n = rounds.borrow_mut();
@@ -3312,6 +3345,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("run it")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3386,6 +3420,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("wait on it")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3458,6 +3493,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("ping them")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3544,6 +3580,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("read a")],
             |msgs| {
                 seen_lens.borrow_mut().push(msgs.len());
@@ -3578,6 +3615,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| RoundOutcome::Failed(LlmError::Http("boom".to_string())),
             |_c, _sink| panic!("no tools"),
@@ -3600,6 +3638,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| RoundOutcome::Cancelled,
             |_c, _sink| panic!("no tools"),
@@ -3621,6 +3660,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| panic!("round should not run once cancelled"),
             |_c, _sink| panic!("no tools"),
@@ -3646,6 +3686,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -3696,6 +3737,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -3731,6 +3773,7 @@ mod tests {
             &tx,
             &cancel,
             3,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -3819,6 +3862,7 @@ mod tests {
             &tx,
             &cancel,
             5,
+            &[],
             &mut messages,
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -3876,6 +3920,7 @@ mod tests {
             &tx,
             &cancel,
             0,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3926,6 +3971,7 @@ mod tests {
             &tx,
             &cancel,
             2,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -3985,6 +4031,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("kill the server")],
             |msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4053,6 +4100,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("remove it")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4115,6 +4163,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |msgs| {
                 *seen.borrow_mut() = msgs.iter().map(|m| (m.role.clone(), text_of(m))).collect();
@@ -4161,6 +4210,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("list the repo")],
             |msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4221,6 +4271,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("hi")],
             |msgs| {
                 *seen.borrow_mut() = msgs.iter().map(|m| (m.role.clone(), text_of(m))).collect();
@@ -4280,6 +4331,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("x")],
             |_msgs| panic!("no round once cancelled"),
             |_c, _sink| panic!("no tools"),
@@ -4314,6 +4366,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("look at shot.png")],
             |msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4394,6 +4447,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("draw a fox")],
             |msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4466,6 +4520,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("read a.txt")],
             |msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4515,6 +4570,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("ping in background")],
             |msgs| {
                 seen_lens.borrow_mut().push(msgs.len());
@@ -4570,6 +4626,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4651,6 +4708,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4706,6 +4764,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("list files")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4760,6 +4819,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("ls")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4809,6 +4869,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4906,6 +4967,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("go")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -4964,6 +5026,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut vec![ChatMessage::user("go")],
             |_msgs| {
                 let mut n = rounds.borrow_mut();
@@ -5037,6 +5100,7 @@ mod tests {
             &tx,
             &cancel,
             1,
+            &[],
             &mut messages,
             |_msgs| RoundOutcome::ToolCalls {
                 assistant: assistant_with(&calls),
@@ -5092,6 +5156,7 @@ mod tests {
             &tx,
             &cancel,
             MAX_TOOL_ITERATIONS,
+            &[],
             &mut messages,
             |_msgs| {
                 let mut n = rounds.borrow_mut();

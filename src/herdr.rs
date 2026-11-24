@@ -241,7 +241,7 @@ fn permission_message(request: &PermissionRequest, paths: &PathDisplay) -> Strin
     let subject = match request.kind {
         PermissionKind::Write | PermissionKind::Edit => paths.display(&request.target),
         PermissionKind::Bash => request.target.clone(),
-        PermissionKind::Mcp => permission::mcp_display_label(&request.target),
+        PermissionKind::Mcp => permission::mcp_display_label(request),
         PermissionKind::Session => request
             .detail
             .clone()
@@ -919,6 +919,7 @@ mod tests {
             id: "p1".to_string(),
             kind,
             target: target.to_string(),
+            server: None,
             body: String::new(),
             detail: None,
             agent: None,

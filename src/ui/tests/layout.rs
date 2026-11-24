@@ -272,6 +272,7 @@ fn region_is_modal_only_while_a_permission_prompt_is_open() {
         id: "perm_0".to_string(),
         kind: crate::permission::PermissionKind::Write,
         target: "hello.py".to_string(),
+        server: None,
         body: "1 print(\"hi\")".to_string(),
         detail: None,
         agent: None,

@@ -236,6 +236,7 @@ impl Stage<'_> {
             id: self.gate.next_id(),
             kind,
             target: target.to_string(),
+            server: None,
             body,
             detail: detail.map(str::to_string),
             agent: None,

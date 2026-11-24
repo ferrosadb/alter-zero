@@ -636,6 +636,7 @@ fn feedback_on_a_refused_call_carries_the_placeholder() {
         id: "p1".to_string(),
         kind: PermissionKind::Bash,
         target: "mysql -u root".to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: None,

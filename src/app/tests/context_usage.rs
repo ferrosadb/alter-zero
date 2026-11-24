@@ -11,6 +11,7 @@ use crate::stream::TokenUsage;
 fn tool(name: &str, size: usize) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
+        server: None,
         schema: "x".repeat(size),
     }
 }

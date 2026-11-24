@@ -10,8 +10,43 @@
 //! delimiter), a name over [`MAX_WIRE_NAME_LEN`] is shortened, and tools
 //! whose names clash are told apart ([`wire_names`]).
 
-/// The prefix every MCP tool's wire name carries.
-pub const MCP_TOOL_PREFIX: &str = "mcp__";
+/// The separator between a server's alias and a tool in a wire name.
+///
+/// An underscore, not `:` or `/`: OpenAI-shaped APIs cap function names at
+/// `^[a-zA-Z0-9_-]{1,64}$`, and one illegal character fails the **whole**
+/// request rather than the one tool.
+pub const ALIAS_SEPARATOR: char = '_';
+
+/// A server's short prefix — the disambiguation the MCP specification puts on
+/// the **client**.
+///
+/// Spec 2026-07-28, *Tool Names*: "Tool name uniqueness is scoped to a single
+/// server. Clients or proxies that aggregate tools from multiple servers MAY
+/// encounter naming collisions (for example, two servers each exposing a
+/// `search` tool) and SHOULD implement a disambiguation strategy such as
+/// prefixing tool names with a server identifier. The server `name` (from
+/// `serverInfo`) is not guaranteed to be unique across servers and SHOULD NOT
+/// be relied upon for disambiguation."
+///
+/// So the identifier is the **config key** the server was declared under
+/// ([`McpServerEntry::name`]), never `serverInfo`. Two servers may each offer
+/// `search`; they may not share a config key, because the file is a map.
+///
+/// [`McpServerEntry::name`]: crate::mcp::config::McpServerEntry
+#[must_use]
+pub fn server_alias(server: &str) -> String {
+    // Mechanical, so any server works — nothing here knows which servers exist.
+    // A server whose own tool name already begins with this prefix is left
+    // alone (`tool_wire_name`), so a server that namespaces itself is not
+    // prefixed twice.
+    normalize_name(server)
+}
+
+/// The prefix a previous version put in front of every MCP tool. Kept so a
+/// recorded name in a transcript, a saved permission rule or a user's agent
+/// `tools:` filter still parses; nothing is advertised under it any more.
+pub const LEGACY_MCP_TOOL_PREFIX: &str = "mcp__";
+pub const MCP_TOOL_PREFIX: &str = LEGACY_MCP_TOOL_PREFIX;
 
 /// The longest wire name every provider accepts: OpenAI's function names are
 /// `^[a-zA-Z0-9_-]{1,64}$`, the strictest of the APIs the backend speaks.
@@ -82,9 +117,17 @@ pub fn validate_server_name(name: &str) -> Result<(), String> {
 /// call as the name the model was offered.
 #[must_use]
 pub fn tool_wire_name(server: &str, tool: &str) -> String {
-    let server = normalize_name(server);
+    let server = server_alias(server);
     let tool = normalize_name(tool);
-    let full = format!("{MCP_TOOL_PREFIX}{server}__{tool}");
+    // A server may already namespace its own tools (`${alias}_${tool}`), which
+    // is how a server guarantees ANY harness gets the namespace rather than
+    // each harness inventing one. Prefixing again would yield
+    // `alias_alias_tool` — callable, but unrecognisable. The test is general:
+    // the advertised name already starts with this server's alias.
+    if tool.starts_with(&format!("{server}{ALIAS_SEPARATOR}")) {
+        return tool;
+    }
+    let full = format!("{server}{ALIAS_SEPARATOR}{tool}");
     if full.len() <= MAX_WIRE_NAME_LEN {
         return full;
     }
@@ -126,9 +169,9 @@ fn hashed_wire_name(server: &str, tool: &str, key: &str) -> String {
             .trim_end_matches('_')
             .to_string()
     };
-    // What is left for the server and the tool's head once the fixed parts —
-    // `mcp__`, `__`, the `_` before the hash, the hash — are paid for.
-    let room = MAX_WIRE_NAME_LEN - MCP_TOOL_PREFIX.len() - 2 - 1 - WIRE_HASH_LEN;
+    // What is left for the alias and the tool's head once the fixed parts —
+    // the `_` separator, the `_` before the hash, and the hash — are paid for.
+    let room = MAX_WIRE_NAME_LEN - 1 - 1 - WIRE_HASH_LEN;
     let server = if server.len() + MIN_TOOL_HEAD <= room {
         server.to_string()
     } else {
@@ -136,7 +179,7 @@ fn hashed_wire_name(server: &str, tool: &str, key: &str) -> String {
     };
     let tool = if tool.is_empty() { "tool" } else { tool };
     let head = cut(tool, room - server.len());
-    format!("{MCP_TOOL_PREFIX}{server}__{head}_{hash}")
+    format!("{server}{ALIAS_SEPARATOR}{head}_{hash}")
 }
 
 /// Every tool one server lists, under the wire name the model is offered it
@@ -175,7 +218,7 @@ pub fn wire_names<'a>(server: &str, tools: &[&'a str]) -> Vec<(String, &'a str)>
             hashed_wire_name(
                 &server_part,
                 &normalized,
-                &format!("{MCP_TOOL_PREFIX}{server_part}__{tool}"),
+                &format!("{server_part}{ALIAS_SEPARATOR}{tool}"),
             )
         } else {
             wire.clone()
@@ -210,7 +253,7 @@ pub fn server_name_problems(names: &[&str]) -> Vec<Option<String>> {
             }
             if let Some((_, first)) = seen.iter().find(|(n, _)| *n == normalized) {
                 return Some(format!(
-                    "its tools would share the mcp__{normalized}__ names of \"{first}\" — \
+                    "its tools would share the {normalized} names of \"{first}\" — \
                      rename one of the two"
                 ));
             }
@@ -225,7 +268,12 @@ pub fn server_name_problems(names: &[&str]) -> Vec<Option<String>> {
 /// registry in hand.
 #[must_use]
 pub fn is_mcp_tool(name: &str) -> bool {
-    name.strip_prefix(MCP_TOOL_PREFIX)
+    // Only the legacy `mcp__{server}__{tool}` form is recognisable from the
+    // name alone. A live aliased name (`frg_find`) is not: its server half may
+    // itself contain underscores, so provenance is carried on the definition
+    // ([`crate::context_usage::ToolDefinition::server`]) rather than parsed
+    // out of the string.
+    name.strip_prefix(LEGACY_MCP_TOOL_PREFIX)
         .is_some_and(|rest| rest.contains("__"))
 }
 
@@ -235,7 +283,7 @@ pub fn is_mcp_tool(name: &str) -> bool {
 /// `None` for a name that isn't an MCP wire name.
 #[must_use]
 pub fn parse_wire_name(name: &str) -> Option<(&str, &str)> {
-    let rest = name.strip_prefix(MCP_TOOL_PREFIX)?;
+    let rest = name.strip_prefix(LEGACY_MCP_TOOL_PREFIX)?;
     let split = rest.find("__")?;
     let (server, tool) = (&rest[..split], &rest[split + 2..]);
     if server.is_empty() || tool.is_empty() {
@@ -420,10 +468,18 @@ mod tests {
     }
 
     #[test]
-    fn wire_name_round_trips_through_parse() {
+    fn a_live_wire_name_is_not_round_tripped_through_parse() {
+        // By design. `{alias}_{tool}` has no unambiguous split — the server
+        // half may itself hold underscores — so the server is carried on
+        // `ToolDefinition::server` / `PermissionRequest::server` and nothing
+        // re-derives it. Only the legacy `mcp__server__tool` form parses.
         let wire = tool_wire_name("deepwiki", "ask_question");
-        assert_eq!(wire, "mcp__deepwiki__ask_question");
-        assert_eq!(parse_wire_name(&wire), Some(("deepwiki", "ask_question")));
+        assert_eq!(wire, "deepwiki_ask_question");
+        assert_eq!(parse_wire_name(&wire), None);
+        assert_eq!(
+            parse_wire_name("mcp__deepwiki__ask_question"),
+            Some(("deepwiki", "ask_question"))
+        );
     }
 
     /// OpenAI-shaped APIs refuse a function name over 64 characters — and a
@@ -435,13 +491,9 @@ mod tests {
         let tool = "confluence_search_using_cql_query_with_pagination";
         let wire = tool_wire_name(server, tool);
         assert!(wire.len() <= MAX_WIRE_NAME_LEN, "{wire} ({})", wire.len());
-        // The server half survives whole, so `mcp__server__*` allowlists and
-        // the per-server grouping still find it.
-        assert!(
-            wire.starts_with("mcp__atlassian-confluence-cloud__"),
-            "{wire}"
-        );
-        assert!(is_mcp_tool(&wire));
+        // The alias half survives whole, so `server_*` allowlists and the
+        // per-server grouping still find it.
+        assert!(wire.starts_with("atlassian-confluence-cloud_"), "{wire}");
         // Deterministic: the permission rule and the context replay re-derive
         // the same name from the same pair.
         assert_eq!(wire, tool_wire_name(server, tool));
@@ -455,13 +507,30 @@ mod tests {
     }
 
     #[test]
+    fn a_server_that_namespaces_its_own_tools_is_not_prefixed_twice() {
+        // A server may advertise `${alias}_${tool}` so that ANY harness gets
+        // the namespace rather than each inventing one. Prefixing again would
+        // offer `alias_alias_tool` — callable, but unrecognisable, and it would
+        // break every saved permission rule. No server is special-cased here.
+        assert_eq!(tool_wire_name("acme", "acme_find"), "acme_find");
+        assert_eq!(tool_wire_name("other", "other_search"), "other_search");
+        // A server that does NOT namespace itself is still prefixed, which is
+        // the behaviour every other MCP server relies on.
+        assert_eq!(
+            tool_wire_name("deepwiki", "ask_question"),
+            "deepwiki_ask_question"
+        );
+    }
+
+    #[test]
     fn a_name_within_the_limit_is_left_alone() {
-        // 64 exactly: `mcp__` + 27 + `__` + 30.
-        let server = "s".repeat(27);
+        // 64 exactly: 33-char alias + separator + 30-char tool.
+        let server = "s".repeat(33);
         let tool = "t".repeat(30);
         let wire = tool_wire_name(&server, &tool);
+        // The alias is 27 `s`s, the separator one char, the tool 30.
         assert_eq!(wire.len(), MAX_WIRE_NAME_LEN);
-        assert_eq!(wire, format!("mcp__{server}__{tool}"));
+        assert_eq!(wire, format!("{server}_{tool}"));
     }
 
     /// The recorded cell carries the display name, and the context replay
@@ -481,13 +550,23 @@ mod tests {
         ] {
             let wire = tool_wire_name(server, tool);
             assert!(wire.len() <= MAX_WIRE_NAME_LEN, "{wire}");
-            let (wire_server, wire_tool) = parse_wire_name(&wire).expect("parses");
+            // No live split exists (the alias may hold underscores), so the
+            // properties are asserted on the name itself.
+            let wire_tool = wire
+                .split_once(ALIAS_SEPARATOR)
+                .map(|(_, t)| t)
+                .unwrap_or(&wire);
             assert!(
-                !wire_server.contains("__") && !wire_tool.starts_with('_'),
+                !wire.contains("__") && !wire_tool.starts_with('_'),
                 "{wire}"
             );
-            let display = display_from_wire(&wire).expect("display");
-            assert_eq!(wire_from_display(&display).as_deref(), Some(wire.as_str()));
+            // The display pair is built from the recorded (server, tool), not
+            // parsed out of the live name.
+            let display = tool_display_name(server, wire_tool);
+            assert!(
+                display.ends_with(crate::mcp::MCP_DISPLAY_SUFFIX),
+                "{display}"
+            );
             assert_eq!(normalize_name(wire_tool), wire_tool, "{wire}");
         }
     }
@@ -501,13 +580,12 @@ mod tests {
         let names = wire_names("srv", &["files.read", "files_read", "list"]);
         let wires: Vec<&str> = names.iter().map(|(wire, _)| wire.as_str()).collect();
         assert_eq!(wires.len(), 3);
-        assert_eq!(wires[2], "mcp__srv__list");
+        assert_eq!(wires[2], "srv_list");
         assert_ne!(wires[0], wires[1]);
         for wire in &wires[..2] {
-            assert!(wire.starts_with("mcp__srv__files_read_"), "{wire}");
+            assert!(wire.starts_with("srv_files_read_"), "{wire}");
             // Still a fixed point, so the replay finds it.
-            let (server, tool) = parse_wire_name(wire).unwrap();
-            assert_eq!(&tool_wire_name(server, tool), wire);
+            assert_eq!(&tool_wire_name("srv", wire), wire, "{wire}");
         }
         let reversed = wire_names("srv", &["files_read", "files.read", "list"]);
         assert_eq!(reversed[0].0, names[1].0);
@@ -519,22 +597,24 @@ mod tests {
 
     #[test]
     fn a_tool_whose_name_normalizes_to_nothing_still_gets_a_name() {
-        // A CJK tool name has no ASCII to keep; `mcp__srv__` would be no name
-        // at all.
+        // A CJK tool name has no ASCII to keep; the alias alone would be no
+        // name at all, so a hash carries it.
         let names = wire_names("srv", &["検索", "翻訳"]);
         assert_eq!(names.len(), 2);
         assert_ne!(names[0].0, names[1].0);
-        for (wire, _) in &names {
-            let (server, tool) = parse_wire_name(wire).expect("parses");
-            assert_eq!(server, "srv");
-            assert_eq!(&tool_wire_name(server, tool), wire);
+        for (wire, _raw) in &names {
+            // A tool whose name normalizes to nothing still gets a name: the
+            // alias plus a hash of the raw name, never a bare `srv_`.
+            assert!(wire.starts_with("srv_"), "{wire}");
+            assert!(wire.len() > "srv_".len(), "{wire}");
+            assert!(wire.contains('_'), "{wire}");
         }
     }
 
     #[test]
     fn a_tool_listed_twice_is_offered_once() {
         let names = wire_names("srv", &["echo", "echo"]);
-        assert_eq!(names, vec![("mcp__srv__echo".to_string(), "echo")]);
+        assert_eq!(names, vec![("srv_echo".to_string(), "echo")]);
     }
 
     /// Two servers whose names normalize alike would hand the model the same
@@ -547,7 +627,7 @@ mod tests {
         assert_eq!(problems[1], None);
         let clash = problems[2].as_deref().expect("a clash");
         assert!(
-            clash.contains("my.server") && clash.contains("mcp__my_server__"),
+            clash.contains("my.server") && clash.contains("my_server"),
             "{clash}"
         );
         assert!(
@@ -560,17 +640,24 @@ mod tests {
 
     #[test]
     fn a_tool_keeps_its_own_underscores() {
-        // The tool part may contain later `__`-free underscores; the split is
-        // on the FIRST `__` after the prefix.
+        // Only the legacy `mcp__{server}__{tool}` form is splittable — the
+        // tool part keeps its own underscores after the `__` delimiter. A live
+        // aliased name (`frg_find`) is NOT parsed: its server half may hold
+        // underscores too, so provenance rides on the definition instead
+        // (`ToolDefinition::server`).
         assert_eq!(
             parse_wire_name("mcp__srv__read_wiki_structure"),
             Some(("srv", "read_wiki_structure"))
         );
+        assert_eq!(parse_wire_name("srv_read_wiki_structure"), None);
     }
 
     #[test]
     fn is_mcp_tool_matches_only_wire_names() {
+        // The legacy form is recognisable from the name; a live alias is not,
+        // by design (see `ToolDefinition::server`).
         assert!(is_mcp_tool("mcp__deepwiki__ask_question"));
+        assert!(!is_mcp_tool("deepwiki_ask_question"));
         assert!(!is_mcp_tool("bash"));
         assert!(!is_mcp_tool("mcp__loneserver"));
         assert!(!is_mcp_tool("mcpish__x__y"));
@@ -582,15 +669,16 @@ mod tests {
             tool_display_name("deepwiki", "ask_question"),
             "deepwiki - ask_question (MCP)"
         );
+        // Display comes from the recorded pair, not from parsing a wire name.
         assert_eq!(
-            display_from_wire("mcp__deepwiki__ask_question").as_deref(),
-            Some("deepwiki - ask_question (MCP)")
+            tool_display_name("deepwiki", "ask_question"),
+            "deepwiki - ask_question (MCP)"
         );
         // The label is the same name without the suffix — what the permission
-        // prompt puts the arguments between.
+        // prompt puts the arguments between. Built from the pair, not parsed.
         assert_eq!(
-            label_from_wire("mcp__deepwiki__ask_question").as_deref(),
-            Some("deepwiki - ask_question")
+            tool_label("deepwiki", "ask_question"),
+            "deepwiki - ask_question"
         );
         assert_eq!(label_from_wire("bash"), None);
     }
@@ -627,13 +715,13 @@ mod tests {
     fn wire_from_display_inverts_the_display_name() {
         assert_eq!(
             wire_from_display("deepwiki - ask_question (MCP)").as_deref(),
-            Some("mcp__deepwiki__ask_question")
+            Some("deepwiki_ask_question")
         );
         assert_eq!(wire_from_display("Bash"), None);
         // A display built from raw names re-normalizes on the way back.
         assert_eq!(
             wire_from_display("my server - do it (MCP)").as_deref(),
-            Some("mcp__my_server__do_it")
+            Some("my_server_do_it")
         );
     }
 
@@ -691,13 +779,13 @@ mod tests {
         assert!(display.starts_with("deepwiki"), "the record stays raw");
         assert_eq!(
             wire_from_display(&display).as_deref(),
-            Some("mcp__deepwiki__ask_question")
+            Some("deepwiki_ask_question")
         );
         // Inverting the capitalized form names a *different* wire tool —
         // exactly why it is applied at the render seams and never stored.
         assert_eq!(
             wire_from_display(&capitalize_display(&display)).as_deref(),
-            Some("mcp__Deepwiki__ask_question")
+            Some("Deepwiki_ask_question")
         );
     }
 }

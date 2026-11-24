@@ -2211,6 +2211,7 @@ mod tests {
                 id: "p1".into(),
                 kind,
                 target: target.into(),
+                server: None,
                 body: String::new(),
                 detail: None,
                 agent: agent.map(Into::into),
@@ -2233,9 +2234,10 @@ mod tests {
         assert_eq!(json(&started[0])["item"]["name"], "bash");
         let settled = stdout(&reporter.settled(&[tool(&label("bash"), ToolStatus::Ok, "ok")]));
         assert_eq!(json(&settled[0])["item"]["name"], "bash");
-        // An MCP tool's label turns back into the name it was called by,
-        // its case kept.
-        let wire = "mcp__GitHub__create_issue";
+        // An MCP tool's label turns back into the name it was called by. The
+        // shape is `{alias}_{tool}` after normalization, so a mixed-case
+        // server name lowercases here — the display label keeps the case.
+        let wire = "github_create_issue";
         let mcp = stdout(&reporter.settled(&[tool(&label(wire), ToolStatus::Ok, "{}")]));
         assert_eq!(json(&mcp[0])["item"]["name"], wire);
         // A run stopped under an open call names it the same way.

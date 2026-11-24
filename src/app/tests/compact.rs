@@ -627,6 +627,7 @@ fn tool_set(schemas: &[&str]) -> std::sync::Arc<[crate::context_usage::ToolDefin
         .iter()
         .enumerate()
         .map(|(i, schema)| crate::context_usage::ToolDefinition {
+            server: None,
             name: format!("tool_{i}"),
             schema: (*schema).to_string(),
         })

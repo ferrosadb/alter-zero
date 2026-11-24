@@ -37,8 +37,15 @@ use crate::stream::TokenUsage;
 /// fields its own way, a few tokens either side.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ToolDefinition {
-    /// The wire name the model calls it by (`bash`, `mcp__deepwiki__ask`).
+    /// The wire name the model calls it by (`bash`, `frg_find`).
     pub name: String,
+    /// The MCP server that offered it, when one did — `Some("forge")`.
+    ///
+    /// Carried, not derived: a short aliased name (`frg_find`) cannot be split
+    /// back into server and tool, because the server half may itself contain
+    /// underscores. The server is known where the spec is built, so it rides
+    /// along rather than being guessed from the name later.
+    pub server: Option<String>,
     /// The whole Chat Completions `{"type":"function",…}` entry, as JSON.
     pub schema: String,
 }
@@ -54,8 +61,16 @@ impl ToolDefinition {
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
+            server: None,
             schema: spec.to_string(),
         }
+    }
+
+    /// The same definition, attributed to the MCP server that offered it.
+    #[must_use]
+    pub fn on_server(mut self, server: &str) -> Self {
+        self.server = Some(server.to_string());
+        self
     }
 
     /// The definitions of a whole spec set, in its order.
@@ -441,7 +456,13 @@ fn prompt_blocks(prompt: &str) -> Vec<(String, &str)> {
 fn server_parts(tools: &[&ToolDefinition], count: &dyn Fn(&str) -> usize) -> Vec<Part> {
     let mut servers: Vec<(String, usize, usize)> = Vec::new();
     for tool in tools {
-        let server = parse_wire_name(&tool.name).map_or(tool.name.as_str(), |(server, _)| server);
+        // The server was recorded with the definition, so no name is parsed
+        // here: a short alias (`frg_find`) has no unambiguous split.
+        let server = tool
+            .server
+            .as_deref()
+            .or_else(|| parse_wire_name(&tool.name).map(|(server, _)| server))
+            .unwrap_or(tool.name.as_str());
         let tokens = count(&tool.schema);
         match servers.iter_mut().find(|(name, _, _)| name == server) {
             Some((_, tools, sum)) => {
@@ -684,6 +705,7 @@ mod tests {
     fn tool(name: &str, schema: &str) -> ToolDefinition {
         ToolDefinition {
             name: name.to_string(),
+            server: None,
             schema: schema.to_string(),
         }
     }

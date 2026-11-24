@@ -455,10 +455,27 @@ impl LlmBackend {
         if self.imagegen.is_some() {
             specs.push(super::imagegen::imagegen_spec());
         }
-        if let Some(manager) = &self.mcp {
-            specs.extend(manager.tool_specs());
-        }
-        self.tool_definitions = ToolDefinition::from_specs(&specs);
+        // MCP tools carry the server that offered them, so `/context` groups
+        // them without parsing a name back into one (a short alias like
+        // `frg_find` cannot be split — the server half may hold underscores).
+        let mcp_definitions: Vec<ToolDefinition> = match &self.mcp {
+            Some(manager) => {
+                let offered = manager.tool_specs_by_server();
+                specs.extend(offered.iter().map(|(_, spec)| spec.clone()));
+                offered
+                    .into_iter()
+                    .map(|(server, spec)| ToolDefinition::from_spec(&spec).on_server(&server))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let definitions = ToolDefinition::from_specs(&specs);
+        // Swap the unattributed MCP entries (the tail of the spec set) for the
+        // attributed ones, so nothing downstream has to re-derive a server.
+        let built_in = definitions.len().saturating_sub(mcp_definitions.len());
+        let mut attributed: Vec<ToolDefinition> = definitions[..built_in].to_vec();
+        attributed.extend(mcp_definitions);
+        self.tool_definitions = attributed.into();
         self.agent_tools = Arc::default();
         self.client = self.client.clone().with_tools(specs);
         self.wire_history = Arc::new(Mutex::new(super::wire_history::WireHistory::default()));
@@ -865,6 +882,10 @@ impl ReplySource for LlmBackend {
         let turn_context = Arc::clone(&self.turn_context);
         let max_retries = self.max_retries;
         let max_tool_calls = self.max_tool_calls;
+        // The tools this session offers, cloned so they cross into the thread:
+        // the routing hint may never name a tool the model cannot see, and it
+        // quotes the description the model was actually shown.
+        let self_definitions: Vec<ToolDefinition> = self.tool_definitions.to_vec();
         // The run's reply budget, when it has one (docs/headless.md).
         let round_budget = self.round_budget.clone();
         let hooks = Arc::clone(&self.hooks);
@@ -972,10 +993,16 @@ impl ReplySource for LlmBackend {
             // request is known to the model within this same turn
             // (docs/background.md). The round's `agent` calls go to the
             // subagent launcher instead (docs/agent-tool.md).
+            let offered_tools = offered_tools_from(&self_definitions);
+            let offered_view: Vec<tools::OfferedTool<'_>> = offered_tools
+                .iter()
+                .map(OwnedOfferedTool::borrowed)
+                .collect();
             agent::run_agent(
                 &tx,
                 &cancel,
                 max_tool_calls,
+                &offered_view,
                 &mut messages,
                 |msgs| {
                     // `--max-turns` (docs/headless.md): a reply the run's
@@ -1497,6 +1524,49 @@ impl SubagentConfig {
     }
 }
 
+/// The offered tools as the routing hint needs them: wire name plus the
+/// description the model was shown, both borrowed from `offered_owned`.
+///
+/// The description is read back out of the spec the client holds, so the hint
+/// quotes what the model actually read — never a copy that could drift.
+fn offered_tools_from(definitions: &[ToolDefinition]) -> Vec<OwnedOfferedTool> {
+    definitions
+        .iter()
+        .map(|definition| OwnedOfferedTool {
+            name: definition.name.clone(),
+            description: advertised_description(&definition.schema),
+        })
+        .collect()
+}
+
+/// One offered tool, owned — the shape that crosses into the round thread and
+/// then lends `OfferedTool` to the hint.
+struct OwnedOfferedTool {
+    name: String,
+    description: String,
+}
+
+impl OwnedOfferedTool {
+    fn borrowed(&self) -> tools::OfferedTool<'_> {
+        tools::OfferedTool {
+            name: &self.name,
+            description: &self.description,
+        }
+    }
+}
+
+/// The description a stored spec advertises, or empty when it advertises none.
+///
+/// Read from the spec the client holds rather than stored twice, so the hint
+/// quotes what the model actually read. A tool that describes nothing claims
+/// nothing — the safe default, since the hint then has nothing to suggest.
+fn advertised_description(schema: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(schema)
+        .ok()
+        .and_then(|spec| spec["function"]["description"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// The subagent tool set a backend last built for the `/context` page, with
 /// the type and the allowlist it was built from (`docs/context-usage.md`).
 #[derive(Debug)]
@@ -1855,6 +1925,10 @@ fn spawn_subagent_run(
         .as_ref()
         .map_or(crate::subagents::AgentTools::All, |def| def.tools.clone());
     let specs = subagent_tool_specs(skills.is_some(), imagegen.is_some(), mcp.as_ref(), &allowed);
+    // The tools this agent is offered, cloned so they cross into its thread —
+    // the routing hint may never name a tool the agent cannot see.
+    let agent_definitions: Vec<ToolDefinition> =
+        specs.iter().map(ToolDefinition::from_spec).collect();
     // A definition may pin its own model (`model: kimi-k3`): same provider,
     // base and key, and the session's thinking mode / vision verdict dropped
     // — both describe the model being replaced, not this one.
@@ -1982,10 +2056,16 @@ fn spawn_subagent_run(
                 super::skill::LoadedSkills::from_messages(registry, &messages, secrets.as_ref())
             })
             .unwrap_or_default();
+        let offered_tools = offered_tools_from(&agent_definitions);
+        let offered_view: Vec<tools::OfferedTool<'_>> = offered_tools
+            .iter()
+            .map(OwnedOfferedTool::borrowed)
+            .collect();
         agent::run_agent(
             &tx2,
             &cancel,
             max_tool_calls,
+            &offered_view,
             &mut messages,
             |msgs| stream_round(&client, msgs, &tx2, &cancel, max_retries),
             |call, on_output| {

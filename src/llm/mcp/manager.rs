@@ -1452,9 +1452,24 @@ impl McpManager {
     /// what [`crate::llm::LlmBackend::with_mcp`] folds into the offered set.
     #[must_use]
     pub fn tool_specs(&self) -> Vec<Value> {
+        self.tool_specs_by_server()
+            .into_iter()
+            .map(|(_, spec)| spec)
+            .collect()
+    }
+
+    /// The same specs, each paired with the server that offered it.
+    ///
+    /// The pairing exists so a caller that groups tools by server (`/context`)
+    /// reads the server it already knows instead of splitting a short aliased
+    /// wire name — which cannot be split, since the server half may itself
+    /// contain underscores.
+    #[must_use]
+    pub fn tool_specs_by_server(&self) -> Vec<(String, Value)> {
         let inner = self.lock();
         let mut out = Vec::new();
         for server in &inner.servers {
+            let server_name = server.entry.name.clone();
             for (wire, tool) in server.offered() {
                 // The repaired copy — the root shape providers insist on —
                 // never the server's own, which can fail every request.
@@ -1464,10 +1479,9 @@ impl McpManager {
                     Some(note) => format!("{note} {}", tool.description),
                     None => tool.description.clone(),
                 };
-                out.push(crate::llm::tools::function_spec(
-                    &wire,
-                    &description,
-                    parameters,
+                out.push((
+                    server_name.clone(),
+                    crate::llm::tools::function_spec(&wire, &description, parameters),
                 ));
             }
         }
@@ -1475,9 +1489,9 @@ impl McpManager {
         // Tool definitions precede the conversation in provider prompts, so
         // preserving a stable order keeps the whole cached prefix reusable.
         out.sort_by(|left, right| {
-            left["function"]["name"]
+            left.1["function"]["name"]
                 .as_str()
-                .cmp(&right["function"]["name"].as_str())
+                .cmp(&right.1["function"]["name"].as_str())
         });
         out
     }

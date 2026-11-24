@@ -240,6 +240,7 @@ fn a_modal_prompt_holds_the_tip_back_until_it_closes() {
         id: "p1".to_string(),
         kind: crate::permission::PermissionKind::Write,
         target: "hello.py".to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: None,

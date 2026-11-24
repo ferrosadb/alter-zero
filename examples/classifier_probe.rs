@@ -56,6 +56,7 @@ fn request(
         id: String::new(),
         kind,
         target: target.to_string(),
+        server: None,
         body: body.to_string(),
         detail: detail.map(str::to_string),
         agent: None,

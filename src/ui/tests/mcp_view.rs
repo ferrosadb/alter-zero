@@ -332,7 +332,7 @@ fn the_tools_and_tool_detail_pages_render() {
     assert!(all.contains("Tool name:"));
     assert!(all.contains("ask_question"));
     assert!(all.contains("Full name:"));
-    assert!(all.contains("mcp__deepwiki__ask_question"));
+    assert!(all.contains("deepwiki_ask_question"));
     assert!(all.contains("Description:"));
     assert!(all.contains("Parameters:"));
     assert!(all.contains("● repoName (required): unknown - owner/repo"));
@@ -363,7 +363,7 @@ fn the_full_name_is_the_one_the_model_is_offered() {
     app.on_key(key(KeyCode::Enter));
     let all = texts(&app).join("\n");
     assert!(all.contains(&offered[1].0), "{all}");
-    assert!(!all.contains("mcp__srv__files_read\n"), "{all}");
+    assert!(!all.contains("srv_files_read\n"), "{all}");
 }
 
 /// A tool set aside at connect is named on the server page with the
@@ -538,7 +538,7 @@ fn the_tool_detail_reads_label_bright_and_value_dim() {
     let full = find("Full name:");
     assert_eq!(
         plain(&full),
-        format!("  Full name:{MCP_TOOL_FIELD_GAP}mcp__deepwiki__ask_question")
+        format!("  Full name:{MCP_TOOL_FIELD_GAP}deepwiki_ask_question")
     );
     assert_eq!(full.spans[1].style.fg, Some(mcp_detail_label_color()));
     assert_eq!(full.spans[2].style.fg, Some(mcp_detail_value_color()));

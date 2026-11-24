@@ -2985,7 +2985,7 @@ mod tests {
         ];
         let ctx = context_messages(&history);
         let call = &ctx[1].tool_calls[0];
-        assert_eq!(call.name, "mcp__deepwiki__ask_question");
+        assert_eq!(call.name, "deepwiki_ask_question");
         assert_eq!(call.arguments, r#"{"repoName":"a/b","question":"What?"}"#);
         assert_eq!(ctx[2].text, "the answer");
         assert_eq!(ctx[2].tool_call_id.as_deref(), Some("call_0"));

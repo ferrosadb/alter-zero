@@ -9,6 +9,7 @@ fn request(id: &str, kind: PermissionKind, target: &str) -> PermissionRequest {
         id: id.to_string(),
         kind,
         target: target.to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: None,

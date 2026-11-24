@@ -530,6 +530,7 @@ fn ask_at_gate(
         id: gate.next_id(),
         kind: PermissionKind::Bash,
         target: command.to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: Some(GENERAL_PURPOSE.to_string()),

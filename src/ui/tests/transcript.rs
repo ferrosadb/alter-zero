@@ -956,6 +956,7 @@ fn the_quit_hint_tells_the_truth_about_esc() {
         id: "p1".to_string(),
         kind: crate::permission::PermissionKind::Bash,
         target: "rm -rf /".to_string(),
+        server: None,
         body: String::new(),
         detail: None,
         agent: Some("explorer".to_string()),

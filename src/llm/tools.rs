@@ -2663,55 +2663,148 @@ pub fn truncate_output(s: String, max_bytes: usize) -> (String, bool) {
     (s[..cut].to_string(), true)
 }
 
-/// Append a routing hint to a tool result when the call went to the shell for
-/// something a purpose-built tool covers.
+/// One tool the model was offered, as the hint needs it: its wire name and the
+/// description it advertised.
 ///
-/// The hint rides on the **result**, not on the request: the model reads it on
-/// the next round, and a transcript keeps showing what was actually run. Naming
-/// a tool the harness did not offer would be worse than saying nothing, so
-/// `servers` decides whether a hint is eligible at all.
+/// The pair is what makes the hint server-agnostic. Nothing here knows that any
+/// particular server exists — a hint is earned by a tool whose **own
+/// description claims the capability** the shell call just spent tokens on.
+#[derive(Debug, Clone, Copy)]
+pub struct OfferedTool<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+}
+
+/// Append a routing hint to a tool result when the call went to the shell for
+/// something an offered tool already covers.
+///
+/// The hint rides on the **result**, not the request: the model reads it on the
+/// next round, and the transcript keeps showing what was actually run.
+///
+/// Which tool it names is decided by that tool's own advertised description, so
+/// this works for any compliant MCP server — it never encodes a server name, an
+/// alias, or a tool name of its own.
 #[must_use]
-pub fn with_tool_hint(tool: &str, arguments: &str, output: &str, offered: &[&str]) -> String {
+pub fn with_tool_hint(
+    tool: &str,
+    arguments: &str,
+    output: &str,
+    offered: &[OfferedTool<'_>],
+) -> String {
     let Some(hint) = routing_hint(tool, arguments, offered) else {
         return output.to_string();
     };
     format!("{output}\n\n{hint}")
 }
 
-/// The hint `(tool, arguments)` earns, when a purpose-built tool covers what it
-/// asked the shell to do — `None` for the shell calls a shell is for (a build, a
-/// test run, git), and for any call whose tool is not actually available.
-fn routing_hint(tool: &str, arguments: &str, offered: &[&str]) -> Option<String> {
+/// What to tell the model when a result came back **limited** — cut by the
+/// tool's own size cap.
+///
+/// Server-agnostic by construction: it names only the tool that answered and
+/// the fact that its output was cut. Measured, a model hit a tool whose answer
+/// did not fit, read the missing rows as a broken tool, and shelled out 21
+/// times instead of narrowing the query. The spec asks a client to surface
+/// feedback the model can self-correct from, not a dead end (2026-07-28,
+/// *Error Handling*).
+#[must_use]
+pub fn with_limited_hint(tool: &str, output: &str, truncated: bool) -> String {
+    if !truncated {
+        return output.to_string();
+    }
+    format!(
+        "{output}\n\nHint: `{tool}` worked — this result was cut by a size cap, \
+         not by an error. Narrow the query (a more specific pattern, path or \
+         filter) to see the rest, or repeat the call to read later slices."
+    )
+}
+
+/// What a shell command was trying to find out.
+///
+/// Matching is on the **shape of the command**, not on any server's vocabulary:
+/// a recursive grep for a declaration is the same act whatever harness runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Capability {
+    /// Where a symbol is declared, or what a module exports.
+    CodeStructure,
+    /// What the project already knows — a decision, a prior attempt.
+    PriorContext,
+}
+
+/// The hint `(tool, arguments)` earns, or `None` for a shell call a shell is
+/// right for (a build, a test run, git) or when no offered tool claims the
+/// capability.
+fn routing_hint(tool: &str, arguments: &str, offered: &[OfferedTool<'_>]) -> Option<String> {
     // Only the shell is nudged: every other tool already did the specific
     // thing, and a result from `read` has nothing to be redirected toward.
     if tool != "bash" {
         return None;
     }
-    // The wire name the model would have to call, derived from the same spec
-    // list it was offered — so the hint can never name a tool it cannot see.
-    let available = |wire: &str| offered.contains(&wire);
-    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return None;
-    };
-    let command = args
-        .get("command")
-        .and_then(|c| c.as_str())
-        .unwrap_or_default();
+    let args = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let command = args.get("command").and_then(|c| c.as_str())?;
+    let capability = capability_of(command)?;
+    let wanted = capability.words();
+    // The first offered tool whose description claims the capability. Its own
+    // words are quoted back, so the model sees why it was suggested.
+    let suggested = offered
+        .iter()
+        .find(|candidate| claims(candidate.description, wanted))?;
+    let (name, description) = (suggested.name, suggested.description);
+    Some(format!(
+        "Hint: `{name}` covers this — it advertises \"{}\".",
+        first_clause(description)
+    ))
+}
 
-    if available("mcp__forge__find_definition") && is_code_search(command) {
-        return Some(
-            "Hint: `mcp__forge__find_definition` locates a symbol's definition directly \
-             (and `mcp__forge__module_outline` lists what a module exports) — cheaper and \
-             more precise than a grep for a declaration."
-                .to_string(),
-        );
+impl Capability {
+    /// The words a description would use if it covers this capability.
+    const fn words(self) -> &'static [&'static str] {
+        match self {
+            Self::CodeStructure => &[
+                "definition",
+                "declare",
+                "declaration",
+                "symbol",
+                "outline",
+                "export",
+            ],
+            Self::PriorContext => &[
+                "prior context",
+                "remember",
+                "recall",
+                "memory",
+                "earlier decision",
+            ],
+        }
     }
-    if available("mcp__ferrosa-memory__search") && is_memory_question(command) {
-        return Some(
-            "Hint: `mcp__ferrosa-memory__search` answers \"what do we already know about \
-             this?\" from prior context. Try it before searching the tree."
-                .to_string(),
-        );
+}
+
+/// Whether a tool's advertised description claims any of `words`.
+fn claims(description: &str, words: &[&str]) -> bool {
+    let lower = description.to_lowercase();
+    words.iter().any(|word| lower.contains(word))
+}
+
+/// The first sentence of a description, clipped — enough to quote back without
+/// pasting a paragraph into the result.
+fn first_clause(description: &str) -> String {
+    let head = description.split(". ").next().unwrap_or(description).trim();
+    if head.len() <= 120 {
+        return head.to_string();
+    }
+    let mut cut = 120;
+    while !head.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &head[..cut])
+}
+
+/// The capability a shell command is reaching for, by the shape of the command.
+fn capability_of(command: &str) -> Option<Capability> {
+    if is_code_search(command) {
+        return Some(Capability::CodeStructure);
+    }
+    if is_history_question(command) {
+        return Some(Capability::PriorContext);
     }
     None
 }
@@ -2731,10 +2824,12 @@ fn is_code_search(command: &str) -> bool {
     command.contains("src/") || command.contains(" -r") || command.starts_with("rg ")
 }
 
-/// Whether a shell command is really asking memory a question.
-fn is_memory_question(command: &str) -> bool {
-    let asked = ["git log", "git blame", "git diff"];
-    asked.iter().any(|s| command.contains(s)) && command.contains("src/")
+/// Whether a shell command is reading history to answer "why is this like it
+/// is" — a question prior context answers better than the code does.
+fn is_history_question(command: &str) -> bool {
+    ["git log", "git blame", "git diff"]
+        .iter()
+        .any(|asked| command.contains(asked))
 }
 
 #[cfg(test)]
@@ -4926,60 +5021,111 @@ mod tests {
     // shows what was actually run (docs/tools.md).
 
     #[test]
-    fn a_shell_code_search_hints_at_the_forge_definition_tool() {
-        // RED as written: no hint exists yet, so the tool result is the bare
-        // output. This fails on the behaviour, not on a missing symbol.
+    fn a_shell_code_search_hints_at_whatever_tool_claims_definitions() {
+        // Server-agnostic: the suggestion comes from a tool's own advertised
+        // description, not from any server or tool name this crate knows.
+        let offered = [
+            OfferedTool {
+                name: "some_mcp_find_definition",
+                description: "Find the file and line where a symbol is defined.",
+            },
+            OfferedTool {
+                name: "some_mcp_read_log",
+                description: "Read a log file.",
+            },
+        ];
         let output = with_tool_hint(
             "bash",
-            r#"{"command":"grep -rn \"struct ThinkingSplitter\" src/"}"#,
-            "src/llm/thinking.rs:31:pub struct ThinkingSplitter {",
-            &["mcp__forge__find_definition"],
+            r#"{"command":"grep -rn \"struct Thing\" src/"}"#,
+            "src/a.rs:1:pub struct Thing",
+            &offered,
         );
         assert!(
-            output.contains("mcp__forge__find_definition"),
-            "the hint must name the tool: {output:?}"
+            output.contains("some_mcp_find_definition"),
+            "the claiming tool must be named: {output:?}"
         );
         assert!(
-            output.contains("src/llm/thinking.rs:31:pub struct ThinkingSplitter {"),
+            output.contains("src/a.rs:1:pub struct Thing"),
             "the real output must survive verbatim: {output:?}"
+        );
+        assert!(!output.contains("some_mcp_read_log"), "{output:?}");
+    }
+
+    #[test]
+    fn the_hint_is_the_same_shape_whatever_the_server_is_called() {
+        // The proof that nothing is special-cased: identical descriptions under
+        // unrelated server names earn identical hints.
+        let a = [OfferedTool {
+            name: "alpha_excerpt",
+            description: "Extract a symbol declaration.",
+        }];
+        let b = [OfferedTool {
+            name: "zeta_excerpt",
+            description: "Extract a symbol declaration.",
+        }];
+        let args = r#"{"command":"rg Thing src/"}"#;
+        let out_a = with_tool_hint("bash", args, "hit", &a);
+        let out_b = with_tool_hint("bash", args, "hit", &b);
+        assert_eq!(
+            out_a.replace("alpha_excerpt", "X"),
+            out_b.replace("zeta_excerpt", "X"),
+            "the hint depended on the server name"
         );
     }
 
     #[test]
     fn a_shell_call_no_tool_covers_gets_no_hint() {
-        // Negative control: a build or a git command is what a shell is for.
-        // A hint here would be noise, and noise is how a hint stops being read.
-        let output = with_tool_hint(
-            "bash",
-            r#"{"command":"cargo test --lib"}"#,
-            "test result: ok. 7027 passed",
-            &["mcp__forge__find_definition"],
-        );
-        assert_eq!(output, "test result: ok. 7027 passed");
+        let offered = [OfferedTool {
+            name: "any_find_definition",
+            description: "Find a symbol definition.",
+        }];
+        let output = with_tool_hint("bash", r#"{"command":"cargo test --lib"}"#, "ok", &offered);
+        assert_eq!(output, "ok");
     }
 
     #[test]
-    fn a_hint_is_absent_when_its_tool_is_not_available() {
-        // The hint must never name a tool the harness did not offer: a model
-        // told to call what it cannot see is worse than one left to grep.
+    fn a_hint_is_absent_when_no_offered_tool_claims_the_capability() {
+        // A hint naming a tool the model was not offered is worse than silence.
+        let offered = [OfferedTool {
+            name: "read",
+            description: "Read a file from disk.",
+        }];
         let output = with_tool_hint(
             "bash",
             r#"{"command":"grep -rn foo src/"}"#,
             "hit",
-            &["mcp__ferrosa-memory__search"],
+            &offered,
         );
-        assert_eq!(output, "hit", "no forge server, so no forge hint");
+        assert_eq!(output, "hit");
+    }
+
+    #[test]
+    fn a_truncated_result_says_it_was_capped_and_not_broken() {
+        // Measured: a model hit a tool whose answer did not fit, read the
+        // missing rows as a broken tool, and shelled out 21 times.
+        let output = with_limited_hint("some_tool", "first rows…", true);
+        assert!(output.contains("first rows…"), "the real output survives");
+        assert!(output.contains("worked"), "{output}");
+        assert!(output.contains("not by an error"), "{output}");
+        assert!(output.contains("some_tool"), "it names what answered");
+    }
+
+    #[test]
+    fn an_untruncated_result_gets_no_cap_hint() {
+        // Negative control: claiming truncation on a complete answer would teach
+        // the model that every result is partial.
+        let output = with_limited_hint("some_tool", "all of it", false);
+        assert_eq!(output, "all of it");
     }
 
     #[test]
     fn a_non_shell_tool_result_is_never_hinted() {
         // `read` answered a read; it has nothing to be nudged about.
-        let output = with_tool_hint(
-            "read",
-            r#"{"path":"a.rs"}"#,
-            "content",
-            &["mcp__forge__find_definition"],
-        );
+        let offered = [OfferedTool {
+            name: "any_find_definition",
+            description: "Find a symbol definition.",
+        }];
+        let output = with_tool_hint("read", r#"{"path":"a.rs"}"#, "content", &offered);
         assert_eq!(output, "content");
     }
 }

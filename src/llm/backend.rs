@@ -873,13 +873,16 @@ impl ReplySource for LlmBackend {
         // pushes onto it while the turn runs and the agent loop drains it at
         // every round boundary.
         let steer = self.steer.clone();
-        // The wire names this session is offered, owned so they cross into the
-        // thread — a routing hint may never name a tool the model cannot see
+        // The tools this session is offered, cloned so they cross into the
+        // thread — a routing hint may never name a tool the model cannot see,
+        // and it quotes the description the model was actually shown
         // (docs/tools.md).
-        let offered_owned: Vec<String> = self
+        let offered_specs: Vec<serde_json::Value> = self
             .tool_definitions
             .iter()
-            .map(|definition| definition.name.clone())
+            .filter_map(|definition| {
+                serde_json::from_str::<serde_json::Value>(&definition.schema).ok()
+            })
             .collect();
         thread::spawn(move || {
             // Encoding the attachments reads files — done here on the backend
@@ -980,7 +983,9 @@ impl ReplySource for LlmBackend {
             // request is known to the model within this same turn
             // (docs/background.md). The round's `agent` calls go to the
             // subagent launcher instead (docs/agent-tool.md).
-            let offered: Vec<&str> = offered_owned.iter().map(String::as_str).collect();
+            let offered = offered_tools(&offered_specs);
+            let offered: Vec<tools::OfferedTool<'_>> =
+                offered.iter().map(OwnedOfferedTool::borrowed).collect();
             agent::run_agent(
                 &tx,
                 &cancel,
@@ -1507,6 +1512,45 @@ impl SubagentConfig {
     }
 }
 
+/// One offered tool, owned — the shape that crosses into the round thread and
+/// then lends [`tools::OfferedTool`] to the hint.
+struct OwnedOfferedTool {
+    name: String,
+    description: String,
+}
+
+impl OwnedOfferedTool {
+    fn borrowed(&self) -> tools::OfferedTool<'_> {
+        tools::OfferedTool {
+            name: &self.name,
+            description: &self.description,
+        }
+    }
+}
+
+/// The tools a spec set offers, with the descriptions the model was shown.
+///
+/// Read out of the spec rather than a second copy, so a hint quotes exactly what
+/// the model read and can never drift from it. A tool that advertises no
+/// description claims nothing — the safe default, since the hint then has
+/// nothing to suggest for it.
+fn offered_tools(specs: &[serde_json::Value]) -> Vec<OwnedOfferedTool> {
+    specs
+        .iter()
+        .filter_map(|spec| {
+            let function = spec.get("function")?;
+            Some(OwnedOfferedTool {
+                name: function.get("name")?.as_str()?.to_string(),
+                description: function
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
 /// The subagent tool set a backend last built for the `/context` page, with
 /// the type and the allowlist it was built from (`docs/context-usage.md`).
 #[derive(Debug)]
@@ -1865,6 +1909,7 @@ fn spawn_subagent_run(
         .as_ref()
         .map_or(crate::subagents::AgentTools::All, |def| def.tools.clone());
     let specs = subagent_tool_specs(skills.is_some(), imagegen.is_some(), mcp.as_ref(), &allowed);
+    let offered_specs: Vec<serde_json::Value> = specs.clone();
     // A definition may pin its own model (`model: kimi-k3`): same provider,
     // base and key, and the session's thinking mode / vision verdict dropped
     // — both describe the model being replaced, not this one.
@@ -1876,14 +1921,6 @@ fn spawn_subagent_run(
         .as_ref()
         .and_then(|def| def.model.named())
         .map_or(config.vision, |_| None);
-    // The names this agent is offered, kept as owned Strings so the list
-    // survives `specs` being moved into the client and the thread below — a
-    // routing hint may never name a tool the agent cannot see (docs/tools.md).
-    let offered: Vec<String> = specs
-        .iter()
-        .filter_map(|spec| spec["function"]["name"].as_str())
-        .map(str::to_string)
-        .collect();
     let client = client.with_tools(specs);
     let detach = config.detach_helper.clone();
     let background = config.background.clone();
@@ -2000,7 +2037,9 @@ fn spawn_subagent_run(
                 super::skill::LoadedSkills::from_messages(registry, &messages, secrets.as_ref())
             })
             .unwrap_or_default();
-        let offered_refs: Vec<&str> = offered.iter().map(String::as_str).collect();
+        let offered = offered_tools(&offered_specs);
+        let offered_refs: Vec<tools::OfferedTool<'_>> =
+            offered.iter().map(OwnedOfferedTool::borrowed).collect();
         agent::run_agent(
             &tx2,
             &cancel,

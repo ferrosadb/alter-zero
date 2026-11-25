@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::exec::ToolProgress;
 use super::hooks::{HookSink, allowed_note, block_texts as hook_block_texts};
 use super::tools::{
-    ToolCallRequest, ToolOutcome, attachment_note, display_name, summarize_call,
+    OfferedTool, ToolCallRequest, ToolOutcome, attachment_note, display_name, summarize_call,
     summarize_call_naming,
 };
 use super::{ChatMessage, ContentPart, LlmError};
@@ -407,7 +407,7 @@ pub fn run_agent(
     tx: &UnboundedSender<StreamEvent>,
     cancel: &CancelToken,
     max_tool_calls: usize,
-    offered: &[&str],
+    offered: &[OfferedTool<'_>],
     messages: &mut Vec<ChatMessage>,
     mut round: impl FnMut(&[ChatMessage]) -> RoundOutcome,
     mut execute: impl FnMut(&ToolCallRequest, &mut dyn FnMut(ToolProgress<'_>)) -> ToolOutcome,
@@ -746,12 +746,14 @@ pub fn run_agent(
                             ok: outcome.ok,
                             tasks: outcome.tasks.clone().unwrap_or_default(),
                         });
-                        let output = super::tools::with_tool_hint(
+                        let routed = super::tools::with_tool_hint(
                             &call.name,
                             &call.arguments,
                             outcome.context_text(),
                             offered,
                         );
+                        let output =
+                            super::tools::with_limited_hint(&call.name, &routed, outcome.truncated);
                         results.push((call.id.clone(), output));
                         continue;
                     }
